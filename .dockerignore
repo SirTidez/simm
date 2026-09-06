@@ -1,0 +1,17 @@
+.git
+.agents
+.auto-claude
+.browser-pilot
+.claude
+.codex_tmp
+.serena
+.stitch
+.vscode
+dist
+node_modules
+output
+src-tauri/target
+target
+test-results
+depots
+*.log

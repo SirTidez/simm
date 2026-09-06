@@ -2,6 +2,8 @@
 /// <reference types="vitest/globals" />
 /// <reference types="@testing-library/jest-dom" />
 
+declare const __SIMM_TELEMETRY_ENABLED__: boolean;
+
 declare module '*.png' {
   const src: string;
   export default src;

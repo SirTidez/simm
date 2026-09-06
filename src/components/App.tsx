@@ -7,35 +7,40 @@ import {
   useCallback,
   useRef,
 } from 'react';
-import type { ComponentType, TransitionEvent } from 'react';
+import type { ComponentType, ReactNode, TransitionEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { confirm, message } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { EnvironmentList, type WorkspaceRoute } from './EnvironmentList';
+import type { WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
 import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
+import { ModLibraryStoreProvider } from '../stores/modLibraryStore';
 import { DownloadStatusStoreProvider, useDownloadStatusStore } from '../stores/downloadStatusStore';
 import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
+import { createAsyncListenerScope, onRuntimeSwitch } from '../services/events';
 import { logger } from '../services/logger';
 import {
   buildSetupGuideSettings,
   resolveExperienceMode,
   settingsNeedUpgradeSetupPrompt,
 } from '../utils/uxSettings';
+import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import type {
   Environment,
   ExperienceMode,
   AppUpdateChannel,
+  AppUpdateChannelPreferences,
   AppUpdatePreferences,
   AppUpdateStatus,
+  RuntimeSwitchResult,
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { Icon } from './Icon';
@@ -46,6 +51,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SimmBadge, SimmButton, SimmDialogContent, SimmIconButton } from './primitives';
 import type { IconName } from './icons';
@@ -53,12 +59,18 @@ import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
 import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 
-const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const APP_UPDATE_CHECK_REQUEST_EVENT = 'simm:check-app-update';
+const MIN_APP_UPDATE_CHECK_INTERVAL_MINUTES = 1;
+const MAX_APP_UPDATE_CHECK_INTERVAL_MINUTES = 1440;
 const LAST_ENV_KEY = 'simm:lastEnvId';
 const SHELL_NAV_COLLAPSED_KEY = 'simm:shellNavCollapsed';
 const CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY = 'simm:consumedNexusOAuthCallbacks';
 const SIMM_RELEASES_URL = 'https://api.github.com/repos/SirTidez/simm/releases?per_page=4';
 const SIMM_CHANGELOG_URL = 'https://raw.githubusercontent.com/SirTidez/simm/master/CHANGELOG.md';
+
+const runtimeDisplayName = (runtime: RuntimeSwitchResult['runtime']) => (
+  runtime === 'Mono' || runtime === 'MONO' ? 'Mono' : 'IL2CPP'
+);
 
 const readConsumedNexusOAuthCallbacks = () => {
   try {
@@ -122,6 +134,10 @@ const lazyNamed = <T,>(
   default: select(await loader()),
 }));
 
+const EnvironmentList = lazyNamed(
+  () => import('./EnvironmentList'),
+  (module) => module.EnvironmentList,
+);
 const EnvironmentCreationWizard = lazyNamed(
   () => import('./EnvironmentCreationWizard'),
   (module) => module.EnvironmentCreationWizard,
@@ -133,6 +149,10 @@ const ModLibraryOverlay = lazyNamed(
 const Settings = lazyNamed(
   () => import('./Settings'),
   (module) => module.Settings,
+);
+const TelemetryWorkspace = lazyNamed(
+  () => import('./TelemetryWorkspace'),
+  (module) => module.TelemetryWorkspace,
 );
 const SteamAccountOverlay = lazyNamed(
   () => import('./SteamAccountOverlay'),
@@ -162,6 +182,10 @@ const LogsOverlay = lazyNamed(
   () => import('./LogsOverlay'),
   (module) => module.LogsOverlay,
 );
+const SaveBackupsWorkspace = lazyNamed(
+  () => import('./SaveBackupsWorkspace'),
+  (module) => module.SaveBackupsWorkspace,
+);
 const ConfigurationOverlay = lazyNamed(
   () => import('./ConfigurationOverlay'),
   (module) => module.ConfigurationOverlay,
@@ -173,6 +197,10 @@ const SecurityScanReportPage = lazyNamed(
 const DownloadsPanel = lazyNamed(
   () => import('./DownloadsPanel'),
   (module) => module.DownloadsPanel,
+);
+const ProfilesWorkspace = lazyNamed(
+  () => import('./ProfilesWorkspace'),
+  (module) => module.ProfilesWorkspace,
 );
 
 function WorkspacePanelFallback() {
@@ -186,41 +214,202 @@ function WorkspacePanelFallback() {
   );
 }
 
-const normalizeVersionCore = (value: string) => {
-  const match = value.trim().match(/\d+(?:\.\d+)*/i);
-  return match?.[0] ?? value.trim();
-};
+type StartupPhase = 'directories' | 'database' | 'services' | 'ready';
 
-const compareVersionCores = (left: string, right: string) => {
-  const leftParts = normalizeVersionCore(left).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
-  const rightParts = normalizeVersionCore(right).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
-  const maxLength = Math.max(leftParts.length, rightParts.length);
+const startupSteps: ReadonlyArray<{ phase: StartupPhase; label: string }> = [
+  { phase: 'directories', label: 'Preparing SIMM folders' },
+  { phase: 'database', label: 'Checking database, backups, and migrations' },
+  { phase: 'services', label: 'Starting workspace services' },
+  { phase: 'ready', label: 'Opening workspace' },
+];
 
-  for (let index = 0; index < maxLength; index += 1) {
-    const leftValue = leftParts[index] ?? 0;
-    const rightValue = rightParts[index] ?? 0;
-    if (leftValue > rightValue) {
-      return 1;
+function waitForStartupFrame() {
+  return new Promise<void>((resolve) => {
+    if (typeof window.requestAnimationFrame !== 'function') {
+      window.setTimeout(resolve, 0);
+      return;
     }
-    if (leftValue < rightValue) {
-      return -1;
-    }
+
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+function StartupLoadingScreen({
+  phase,
+  error,
+  onRetry,
+}: {
+  phase: StartupPhase;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  const activeIndex = startupSteps.findIndex((step) => step.phase === phase);
+
+  return (
+    <div className="boot-screen" role={error ? 'alert' : 'status'} aria-live={error ? 'assertive' : 'polite'}>
+      <div className="boot-card">
+        <div className="boot-title">Schedule I</div>
+        <div className="boot-subtitle">
+          {error ? 'Startup needs your attention' : 'Preparing the dev environment'}
+        </div>
+        {!error && (
+          <div className="boot-loader" aria-hidden="true">
+            <span className="boot-dot" />
+            <span className="boot-dot" />
+            <span className="boot-dot" />
+          </div>
+        )}
+        <div className="boot-startup-steps">
+          {startupSteps.map((step, index) => {
+            const isActive = index === activeIndex;
+            const isComplete = activeIndex > index;
+            return (
+              <div
+                key={step.phase}
+                className={`boot-startup-step${isActive ? ' boot-startup-step--active' : ''}${isComplete ? ' boot-startup-step--complete' : ''}`}
+              >
+                <span className="boot-startup-step__marker" aria-hidden="true" />
+                <span>{step.label}</span>
+              </div>
+            );
+          })}
+        </div>
+        {error ? (
+          <>
+            <p className="boot-error">{error}</p>
+            <button className="btn btn-primary" type="button" onClick={onRetry}>
+              Retry startup
+            </button>
+          </>
+        ) : (
+          <div className="boot-bar" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StartupGate({ children }: { children: ReactNode }) {
+  const [ready, setReady] = useState(false);
+  const [phase, setPhase] = useState<StartupPhase>('directories');
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const prepare = async () => {
+      setReady(false);
+      setError(null);
+      setPhase('directories');
+
+      await waitForStartupFrame();
+      if (cancelled) return;
+
+      setPhase('database');
+      await waitForStartupFrame();
+      if (cancelled) return;
+
+      try {
+        await ApiService.prepareApp();
+        if (cancelled) return;
+        setPhase('services');
+        await waitForStartupFrame();
+        if (cancelled) return;
+        setPhase('ready');
+        setReady(true);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to prepare SIMM startup');
+      }
+    };
+
+    void prepare();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt]);
+
+  if (!ready) {
+    return (
+      <StartupLoadingScreen
+        phase={phase}
+        error={error}
+        onRetry={() => setAttempt((value) => value + 1)}
+      />
+    );
   }
 
-  return 0;
+  return <>{children}</>;
+}
+
+const getAppUpdateChannelPreferences = (
+  preferences: AppUpdatePreferences | null | undefined,
+  channel: AppUpdateChannel,
+): AppUpdateChannelPreferences => {
+  const channelPreferences = preferences?.byChannel?.[channel];
+  if (channelPreferences) {
+    return channelPreferences;
+  }
+
+  // Existing settings stored one flat record. Treat that record as belonging
+  // only to its recorded channel so it can never suppress the other feed.
+  const legacyChannel = preferences?.channel ?? 'beta';
+  return legacyChannel === channel
+    ? {
+        lastCheckedAt: preferences?.lastCheckedAt ?? null,
+        lastSeenVersionRaw: preferences?.lastSeenVersionRaw ?? null,
+        lastResolvedUrl: preferences?.lastResolvedUrl ?? null,
+        lastSeenVersionNormalized: preferences?.lastSeenVersionNormalized ?? null,
+        snoozedUntil: preferences?.snoozedUntil ?? null,
+        skippedVersionNormalized: preferences?.skippedVersionNormalized ?? null,
+      }
+    : {};
 };
 
-function formatDashboardTime(value: string | number | undefined) {
-  if (!value) return 'Not checked yet';
+const appUpdateReleaseIdentity = (result: AppUpdateStatus) => result.version.trim();
+
+const appUpdateIntervalMs = (value: number | undefined) => {
+  const minutes = Number.isFinite(value)
+    ? Math.min(
+        MAX_APP_UPDATE_CHECK_INTERVAL_MINUTES,
+        Math.max(MIN_APP_UPDATE_CHECK_INTERVAL_MINUTES, Math.trunc(value as number)),
+      )
+    : 60;
+  return minutes * 60 * 1000;
+};
+
+function parseDashboardTime(value: string | number | undefined) {
+  if (!value) return null;
   const date = typeof value === 'number'
     ? new Date(value > 1_000_000_000_000 ? value : value * 1000)
     : new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return 'Not checked yet';
+    return null;
   }
 
-  return date.toLocaleString();
+  return date;
+}
+
+export function formatDashboardTime(value: string | number | undefined) {
+  const date = parseDashboardTime(value);
+  if (!date) return 'Not checked yet';
+
+  return date.toLocaleString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+export function formatDashboardTimeDetail(value: string | number | undefined) {
+  const date = parseDashboardTime(value);
+  return date ? date.toLocaleString('en-US') : 'Not checked yet';
 }
 
 type HomeFeedItem = {
@@ -396,6 +585,7 @@ function HomeDashboard({
   onOpenModUpdates,
   onOpenWizard,
   onOpenSettings,
+  onOpenProfiles,
 }: {
   environments: Environment[];
   environmentsLoading: boolean;
@@ -409,6 +599,7 @@ function HomeDashboard({
   onOpenModUpdates: () => void;
   onOpenWizard: () => void;
   onOpenSettings: () => void;
+  onOpenProfiles: () => void;
 }) {
   const completed = environments.filter((env) => env.status === 'completed');
   const updateCount = completed.filter((env) => env.updateAvailable).length;
@@ -476,6 +667,10 @@ function HomeDashboard({
             <Icon name="plus" />
             Add Environment
           </SimmButton>
+          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenProfiles}>
+            <Icon name="userGear" />
+            Profiles
+          </SimmButton>
         </div>
       </div>
 
@@ -522,7 +717,7 @@ function HomeDashboard({
             </>
           ) : (
             <>
-              <strong title={formatDashboardTime(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
+              <strong title={formatDashboardTimeDetail(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
               <small>Environment metadata</small>
             </>
           )}
@@ -588,6 +783,10 @@ function HomeDashboard({
             <SimmButton type="button" variant="ghost" onClick={onOpenSettings}>
               <Icon name="sliders" />
               Preferences
+            </SimmButton>
+            <SimmButton type="button" variant="ghost" onClick={onOpenProfiles}>
+              <Icon name="userGear" />
+              Profiles
             </SimmButton>
           </div>
         </section>
@@ -791,6 +990,8 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenEnvironmentsWorkspace,
   onOpenHome,
   onOpenLibrary,
+  onOpenProfiles,
+  onOpenSaveBackups,
   onShellNavTransitionEnd,
   onToggleShellNavigation,
   shellNavAnimating,
@@ -807,6 +1008,8 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenEnvironmentsWorkspace: () => void;
   onOpenHome: () => void;
   onOpenLibrary: () => void;
+  onOpenProfiles: () => void;
+  onOpenSaveBackups: () => void;
   onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
   onToggleShellNavigation: () => void;
   shellNavAnimating: boolean;
@@ -855,6 +1058,13 @@ const AppShellSidebar = memo(function AppShellSidebar({
       onClick: onOpenLibrary,
     },
     {
+      key: 'profiles',
+      label: 'Profiles',
+      icon: 'userGear',
+      active: activeWorkspace.view === 'profiles',
+      onClick: onOpenProfiles,
+    },
+    {
       key: 'mods',
       label: 'Installed Mods',
       icon: 'boxArchive',
@@ -874,6 +1084,13 @@ const AppShellSidebar = memo(function AppShellSidebar({
       icon: 'fileLines',
       active: activeWorkspace.view === 'logs',
       onClick: () => onOpenEnvironmentWorkspace('logs'),
+    },
+    {
+      key: 'saveBackups',
+      label: 'Save Management',
+      icon: 'boxArchive',
+      active: activeWorkspace.view === 'saveBackups',
+      onClick: onOpenSaveBackups,
     },
   ] as const;
 
@@ -1003,6 +1220,28 @@ type ShellUtilityAction = {
 function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUtilityAction[] }) {
   const appWindow = getCurrentWindow();
   const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const enforceCustomChrome = async () => {
+      try {
+        await appWindow.setDecorations(false);
+      } catch (error) {
+        if (!disposed) {
+          console.error('Failed to disable native window decorations:', error);
+        }
+      }
+    };
+
+    void enforceCustomChrome();
+    window.addEventListener('focus', enforceCustomChrome);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('focus', enforceCustomChrome);
+    };
+  }, [appWindow]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -1162,16 +1401,20 @@ function AppContent() {
   const completedNxmCallbackRef = useRef(new Set<string>());
   const inFlightNxmCallbackRef = useRef<string | null>(null);
   const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
+  const [runtimeSwitchNotice, setRuntimeSwitchNotice] = useState<RuntimeSwitchResult | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
-  const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
+  const [dismissedAppUpdateVersions, setDismissedAppUpdateVersions] = useState<Partial<Record<AppUpdateChannel, string>>>({});
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string | null>(null);
   const [environmentFocusRequestId, setEnvironmentFocusRequestId] = useState(0);
   const [launchingEnvironmentId, setLaunchingEnvironmentId] = useState<string | null>(null);
+  const [telemetryAvailable, setTelemetryAvailable] = useState(false);
   const [shellNavCollapsed, setShellNavCollapsed] = useState(readStoredShellNavCollapsed);
   const [shellNavAnimating, setShellNavAnimating] = useState(false);
   const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
+  const [closePrompt, setClosePrompt] = useState({ isOpen: false, remember: false });
+  const closeRequestInFlightRef = useRef(false);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
   const startupSetupCheckedRef = useRef(false);
@@ -1228,6 +1471,37 @@ function AppContent() {
     if (shellNavAnimationFrameRef.current !== null) {
       cancelShellAnimationFrame(shellNavAnimationFrameRef.current);
     }
+  }, []);
+  useEffect(() => {
+    let disposed = false;
+    void ApiService.getTelemetryCapability()
+      .then((capability) => {
+        if (!disposed) setTelemetryAvailable(capability.available);
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setTelemetryAvailable(false);
+          logger.warn('Telemetry capability lookup failed', {
+            error: getErrorMessage(error, 'backend capability lookup failed'),
+          });
+        }
+      });
+    return () => { disposed = true; };
+  }, []);
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void onRuntimeSwitch((result) => {
+      if (result.missingItems.length > 0 || result.errors.length > 0) {
+        setRuntimeSwitchNotice(result);
+      }
+    }).then((dispose) => {
+      unlisten = dispose;
+    }).catch((error) => {
+      logger.warn('Failed to listen for Steam runtime switches', {
+        error: getErrorMessage(error, 'listener setup failed'),
+      });
+    });
+    return () => unlisten?.();
   }, []);
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
@@ -1418,6 +1692,63 @@ function AppContent() {
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
 
+  const dismissClosePrompt = useCallback(() => {
+    setClosePrompt({ isOpen: false, remember: false });
+    closeRequestInFlightRef.current = false;
+  }, []);
+
+  const resolveClosePrompt = useCallback(async (behavior: 'tray' | 'quit') => {
+    const remember = closePrompt.remember;
+    setClosePrompt({ isOpen: false, remember: false });
+
+    try {
+      if (remember) {
+        try {
+          await updateSettings({ windowCloseBehavior: behavior });
+        } catch (error) {
+          logger.error('Failed to remember SIMM close behavior', {
+            error: getErrorMessage(error, 'unknown error'),
+          });
+        }
+      }
+
+      if (behavior === 'tray') {
+        await ApiService.hideMainWindow();
+      } else {
+        await ApiService.quitSimm();
+      }
+    } catch (error) {
+      logger.error('Failed to apply SIMM close behavior', {
+        error: getErrorMessage(error, 'unknown error'),
+      });
+    } finally {
+      closeRequestInFlightRef.current = false;
+    }
+  }, [closePrompt.remember, updateSettings]);
+
+  useEffect(() => {
+    let unlistenCloseRequest: (() => void) | undefined;
+    void listen('simm_close_requested', async () => {
+      if (closeRequestInFlightRef.current) {
+        return;
+      }
+      closeRequestInFlightRef.current = true;
+      let awaitingChoice = false;
+
+      try {
+        setClosePrompt({ isOpen: true, remember: false });
+        awaitingChoice = true;
+      } catch (error) {
+        logger.error('Failed to handle SIMM close request', { error: getErrorMessage(error, 'unknown error') });
+      } finally {
+        if (!awaitingChoice) {
+          closeRequestInFlightRef.current = false;
+        }
+      }
+    }).then((unlisten) => { unlistenCloseRequest = unlisten; });
+    return () => unlistenCloseRequest?.();
+  }, []);
+
   // Check if SIMM directory was just created on app launch
   useEffect(() => {
     if (!hasSettings || startupSetupCheckedRef.current) {
@@ -1462,6 +1793,9 @@ function AppContent() {
     requestedKind?: 'library' | 'install';
     error?: string;
     nxmUrl?: string;
+    securityScan?: unknown;
+    securityScanConfirmationRequired?: boolean;
+    securityScanBlocked?: boolean;
   }) => {
     window.dispatchEvent(new CustomEvent('nexus-manual-download-result', { detail }));
   }, []);
@@ -1484,10 +1818,21 @@ function AppContent() {
     updateSettingsRef.current = updateSettings;
   }, [updateSettings]);
 
-  const persistAppUpdateSettings = useCallback(async (updates: Partial<AppUpdatePreferences>) => {
-    const mergedSettings = {
-      ...(appUpdateSettingsRef.current ?? {}),
-      ...updates,
+  const persistAppUpdateSettings = useCallback(async (
+    channel: AppUpdateChannel,
+    updates: Partial<AppUpdateChannelPreferences>,
+  ) => {
+    const currentSettings = appUpdateSettingsRef.current ?? {};
+    const mergedSettings: AppUpdatePreferences = {
+      ...currentSettings,
+      channel,
+      byChannel: {
+        ...(currentSettings.byChannel ?? {}),
+        [channel]: {
+          ...getAppUpdateChannelPreferences(currentSettings, channel),
+          ...updates,
+        },
+      },
     };
     appUpdateSettingsRef.current = mergedSettings;
     await updateSettingsRef.current({
@@ -1495,7 +1840,7 @@ function AppContent() {
     });
   }, []);
 
-  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'beta';
+  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'stable';
 
   const completeSetupGuide = useCallback(async (mode: ExperienceMode) => {
     await updateSettings(buildSetupGuideSettings(mode));
@@ -1515,63 +1860,55 @@ function AppContent() {
     }
 
     let cancelled = false;
+    const automaticChecksEnabled = settings?.autoCheckUpdates !== false;
 
     const runAppUpdateCheck = async () => {
       try {
-        setAppUpdateState((previous) =>
-          previous.status === 'available' ? previous : { status: 'checking', result: null },
-        );
+        // Never retain an available result while a selected-channel check is
+        // in flight: the result belongs to the currently selected feed only.
+        setAppUpdateState({ status: 'checking', result: null });
 
         const result = await ApiService.checkAppUpdate(appUpdateChannel);
-        if (cancelled) {
+        if (cancelled || result.channel !== appUpdateChannel) {
           return;
         }
 
         const currentAppUpdateSettings = appUpdateSettingsRef.current ?? {};
+        const currentChannelPreferences = getAppUpdateChannelPreferences(
+          currentAppUpdateSettings,
+          appUpdateChannel,
+        );
         const expiredSnooze =
-          !!currentAppUpdateSettings.snoozedUntil
-          && Number.isFinite(Date.parse(currentAppUpdateSettings.snoozedUntil))
-          && Date.parse(currentAppUpdateSettings.snoozedUntil) <= Date.now();
-        const skippedVersionNormalized =
-          currentAppUpdateSettings.skippedVersionNormalized
-            && result.versionNormalized
-            && currentAppUpdateSettings.skippedVersionNormalized !== result.versionNormalized
-            && compareVersionCores(
-              currentAppUpdateSettings.skippedVersionNormalized,
-              result.versionNormalized,
-            ) < 0
-            ? null
-            : currentAppUpdateSettings.skippedVersionNormalized ?? null;
+          !!currentChannelPreferences.snoozedUntil
+          && Number.isFinite(Date.parse(currentChannelPreferences.snoozedUntil))
+          && Date.parse(currentChannelPreferences.snoozedUntil) <= Date.now();
+        const releaseIdentity = appUpdateReleaseIdentity(result);
+        const skippedVersionNormalized = currentChannelPreferences.skippedVersionNormalized;
+        const skipMatchesRelease = skippedVersionNormalized === releaseIdentity
+          || skippedVersionNormalized === result.versionNormalized;
 
-        const nextSettings = {
+        const nextChannelPreferences = {
           lastCheckedAt: result.checkedAt,
           lastSeenVersionRaw: result.version,
           lastSeenVersionNormalized: result.versionNormalized,
           lastResolvedUrl: result.manifestUrl,
-          snoozedUntil: expiredSnooze ? null : (currentAppUpdateSettings.snoozedUntil ?? null),
-          skippedVersionNormalized,
-          channel: appUpdateChannel,
+          snoozedUntil: expiredSnooze ? null : (currentChannelPreferences.snoozedUntil ?? null),
+          skippedVersionNormalized: skipMatchesRelease ? (skippedVersionNormalized ?? null) : null,
         };
 
-        const previousSerialized = JSON.stringify({
-          lastCheckedAt: currentAppUpdateSettings.lastCheckedAt ?? null,
-          lastSeenVersionRaw: currentAppUpdateSettings.lastSeenVersionRaw ?? null,
-          lastSeenVersionNormalized: currentAppUpdateSettings.lastSeenVersionNormalized ?? null,
-          lastResolvedUrl: currentAppUpdateSettings.lastResolvedUrl ?? null,
-          snoozedUntil: currentAppUpdateSettings.snoozedUntil ?? null,
-          skippedVersionNormalized: currentAppUpdateSettings.skippedVersionNormalized ?? null,
-          channel: currentAppUpdateSettings.channel ?? null,
-        });
-        const nextSerialized = JSON.stringify(nextSettings);
+        const previousSerialized = JSON.stringify(currentChannelPreferences);
+        const nextSerialized = JSON.stringify(nextChannelPreferences);
         if (previousSerialized !== nextSerialized) {
-          void persistAppUpdateSettings(nextSettings).catch((error) => {
+          void persistAppUpdateSettings(appUpdateChannel, nextChannelPreferences).catch((error) => {
             logger.warn('Failed to persist app update settings', error);
           });
         }
 
-        setDismissedAppUpdateVersion((previous) =>
-          previous && previous !== result.versionNormalized ? null : previous,
-        );
+        setDismissedAppUpdateVersions((previous) => (
+          previous[appUpdateChannel] && previous[appUpdateChannel] !== releaseIdentity
+            ? { ...previous, [appUpdateChannel]: undefined }
+            : previous
+        ));
         setAppUpdateState(result.updateAvailable
           ? { status: 'available', result }
           : { status: 'upToDate', result: null });
@@ -1587,52 +1924,91 @@ function AppContent() {
       }
     };
 
-    void runAppUpdateCheck();
-    const intervalId = window.setInterval(() => {
+    const handleManualCheck = () => {
       void runAppUpdateCheck();
-    }, APP_UPDATE_CHECK_INTERVAL_MS);
+    };
+    window.addEventListener(APP_UPDATE_CHECK_REQUEST_EVENT, handleManualCheck);
+
+    let intervalId: number | null = null;
+    if (automaticChecksEnabled) {
+      void runAppUpdateCheck();
+      intervalId = window.setInterval(() => {
+        void runAppUpdateCheck();
+      }, appUpdateIntervalMs(settings?.updateCheckInterval));
+    } else {
+      setAppUpdateState({ status: 'idle', result: null });
+    }
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      window.removeEventListener(APP_UPDATE_CHECK_REQUEST_EVENT, handleManualCheck);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
     };
-  }, [appUpdateChannel, environmentsLoading, hasSettings, persistAppUpdateSettings]);
+  }, [
+    appUpdateChannel,
+    environmentsLoading,
+    hasSettings,
+    persistAppUpdateSettings,
+    settings?.autoCheckUpdates,
+    settings?.updateCheckInterval,
+  ]);
 
   const handleSkipAppUpdateVersion = useCallback(() => {
-    if (appUpdateState.status !== 'available') {
+    if (
+      appUpdateState.status !== 'available'
+      || appUpdateState.result.channel !== appUpdateChannel
+    ) {
       return;
     }
-    const latestVersionNormalized = appUpdateState.result.versionNormalized;
-    setDismissedAppUpdateVersion(latestVersionNormalized);
-    void persistAppUpdateSettings({
-      skippedVersionNormalized: latestVersionNormalized,
+    const channel = appUpdateState.result.channel;
+    const releaseIdentity = appUpdateReleaseIdentity(appUpdateState.result);
+    setDismissedAppUpdateVersions((previous) => ({
+      ...previous,
+      [channel]: releaseIdentity,
+    }));
+    void persistAppUpdateSettings(channel, {
+      skippedVersionNormalized: releaseIdentity,
       snoozedUntil: null,
     }).catch((error) => {
       logger.warn('Failed to persist skipped app update version', error);
     });
-  }, [appUpdateState, persistAppUpdateSettings]);
+  }, [appUpdateChannel, appUpdateState, persistAppUpdateSettings]);
 
   const handleSnoozeAppUpdate = useCallback((days: number) => {
-    if (appUpdateState.status !== 'available') {
+    if (
+      appUpdateState.status !== 'available'
+      || appUpdateState.result.channel !== appUpdateChannel
+    ) {
       return;
     }
+    const channel = appUpdateState.result.channel;
     const snoozedUntil = new Date(Date.now() + (days * 24 * 60 * 60 * 1000)).toISOString();
-    setDismissedAppUpdateVersion(appUpdateState.result.versionNormalized);
-    void persistAppUpdateSettings({
+    setDismissedAppUpdateVersions((previous) => ({
+      ...previous,
+      [channel]: appUpdateReleaseIdentity(appUpdateState.result),
+    }));
+    void persistAppUpdateSettings(channel, {
       snoozedUntil,
     }).catch((error) => {
       logger.warn('Failed to persist app update snooze state', error);
     });
-  }, [appUpdateState, persistAppUpdateSettings]);
+  }, [appUpdateChannel, appUpdateState, persistAppUpdateSettings]);
 
   const handleInstallAppUpdate = useCallback(async () => {
-    if (appUpdateState.status !== 'available' || installingAppUpdate) {
+    if (
+      appUpdateState.status !== 'available'
+      || installingAppUpdate
+      || appUpdateState.result.channel !== appUpdateChannel
+    ) {
       return;
     }
 
-    const releaseChannelLabel = appUpdateState.result.channel === 'beta' ? 'beta' : 'stable';
+    const result = appUpdateState.result;
+    const releaseChannelLabel = result.channel === 'beta' ? 'beta' : 'stable';
     const shouldInstall = await confirm(
-      `Download and install SIMM ${appUpdateState.result.version} from the ${releaseChannelLabel} channel now?`,
+      `Download and install SIMM ${result.version} from the ${releaseChannelLabel} channel now?`,
       {
         title: 'Install SIMM Update',
         kind: 'info',
@@ -1645,9 +2021,16 @@ function AppContent() {
       return;
     }
 
+    // Re-read the persisted selection after confirmation. A channel switch
+    // while the dialog is open must not install the now-stale result.
+    const currentChannel = appUpdateSettingsRef.current?.channel ?? 'stable';
+    if (currentChannel !== result.channel) {
+      return;
+    }
+
     try {
       setInstallingAppUpdate(true);
-      const installResult = await ApiService.installAppUpdate(appUpdateState.result.channel);
+      const installResult = await ApiService.installAppUpdate(result.channel);
       if (!installResult.installed) {
         throw new Error('Updater did not install an update.');
       }
@@ -1665,7 +2048,7 @@ function AppContent() {
     } finally {
       setInstallingAppUpdate(false);
     }
-  }, [appUpdateState, installingAppUpdate]);
+  }, [appUpdateChannel, appUpdateState, installingAppUpdate]);
 
   const handleNexusOAuthCallback = useCallback(async (callbackUrl: string) => {
     if (!callbackUrl.startsWith('simm://oauth/nexus/callback')) {
@@ -1720,7 +2103,7 @@ function AppContent() {
     } finally {
       inFlightNexusCallbackRef.current = null;
     }
-  }, [dispatchNexusOAuthResult]);
+  }, [dispatchNexusOAuthResult, pushWorkspace]);
 
   const handleNexusManualDownloadCallback = useCallback(async (nxmUrl: string) => {
     if (!nxmUrl.startsWith('nxm://')) {
@@ -1751,12 +2134,21 @@ function AppContent() {
         return;
       }
       if (!result.success) {
-        completedNxmCallbackRef.current.add(nxmUrl);
+        const securityGateResponse = Boolean(
+          result.securityScanConfirmationRequired || result.securityScanBlocked,
+        );
+        if (!securityGateResponse) {
+          completedNxmCallbackRef.current.add(nxmUrl);
+        }
         dispatchNexusManualDownloadResult({
           success: false,
+          result,
           error: result.error || 'Failed to complete Nexus manual download',
           requestedKind: result.requestedKind,
           nxmUrl,
+          securityScan: result.securityScan,
+          securityScanConfirmationRequired: result.securityScanConfirmationRequired,
+          securityScanBlocked: result.securityScanBlocked,
         });
         return;
       }
@@ -1797,12 +2189,21 @@ function AppContent() {
     try {
       const result = await ApiService.completeNexusManualDownloadSession(pending.nxmUrl, runtime);
       if (!result.success) {
-        completedNxmCallbackRef.current.add(pending.nxmUrl);
+        const securityGateResponse = Boolean(
+          result.securityScanConfirmationRequired || result.securityScanBlocked,
+        );
+        if (!securityGateResponse) {
+          completedNxmCallbackRef.current.add(pending.nxmUrl);
+        }
         dispatchNexusManualDownloadResult({
           success: false,
+          result,
           error: result.error || 'Failed to complete Nexus manual download',
           requestedKind: result.requestedKind ?? pending.kind,
           nxmUrl: pending.nxmUrl,
+          securityScan: result.securityScan,
+          securityScanConfirmationRequired: result.securityScanConfirmationRequired,
+          securityScanBlocked: result.securityScanBlocked,
         });
         return;
       }
@@ -1851,47 +2252,40 @@ function AppContent() {
   }, [handleNexusManualDownloadCallback, handleNexusOAuthCallback]);
 
   useEffect(() => {
-    let unlistenDeepLink: (() => void) | null = null;
-    let unlistenSingleInstance: (() => void) | null = null;
-    let cancelled = false;
+    const reportDeepLinkError = (error: unknown) => {
+      console.error('Failed to initialize deep-link handling:', error);
+      dispatchNexusOAuthResult({
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to initialize deep-link handling',
+      });
+    };
+    const listeners = createAsyncListenerScope(reportDeepLinkError);
 
     const processPendingDeepLinks = async () => {
       const currentUrls = await getCurrentDeepLink();
-      if (!cancelled && currentUrls?.length) {
+      if (listeners.isActive() && currentUrls?.length) {
         for (const url of currentUrls) {
           void handleExternalProtocolUrl(url);
         }
       }
     };
 
-    const initDeepLinkHandling = async () => {
-      try {
-        await processPendingDeepLinks();
-
-        unlistenDeepLink = await onOpenUrl((urls) => {
-          for (const url of urls) {
-            void handleExternalProtocolUrl(url);
-          }
-        });
-
-        unlistenSingleInstance = await listen<{ args?: string[] }>('single-instance-args', (event) => {
-          const args = event.payload?.args || [];
-          for (const arg of args) {
-            if (typeof arg === 'string' && (arg.startsWith('simm://') || arg.startsWith('nxm://'))) {
-              void handleExternalProtocolUrl(arg);
-            }
-          }
-        });
-      } catch (error) {
-        console.error('Failed to initialize deep-link handling:', error);
-        dispatchNexusOAuthResult({
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to initialize deep-link handling',
-        });
+    void processPendingDeepLinks().catch(reportDeepLinkError);
+    listeners.register(() => onOpenUrl((urls) => {
+      if (!listeners.isActive()) return;
+      for (const url of urls) {
+        void handleExternalProtocolUrl(url);
       }
-    };
-
-    void initDeepLinkHandling();
+    }));
+    listeners.register(() => listen<{ args?: string[] }>('single-instance-args', (event) => {
+      if (!listeners.isActive()) return;
+      const args = event.payload?.args || [];
+      for (const arg of args) {
+        if (typeof arg === 'string' && (arg.startsWith('simm://') || arg.startsWith('nxm://'))) {
+          void handleExternalProtocolUrl(arg);
+        }
+      }
+    }));
 
     const handleWindowFocus = () => {
       void processPendingDeepLinks().catch((error) => {
@@ -1901,10 +2295,8 @@ function AppContent() {
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
-      cancelled = true;
       window.removeEventListener('focus', handleWindowFocus);
-      unlistenDeepLink?.();
-      unlistenSingleInstance?.();
+      listeners.dispose();
     };
   }, [dispatchNexusOAuthResult, handleExternalProtocolUrl]);
 
@@ -1975,6 +2367,14 @@ function AppContent() {
             onRunSetupGuide={() => pushWorkspace({ view: 'welcome' }, { welcomeMode: 'setup' })}
           />
         );
+      case 'telemetry':
+        return telemetryAvailable ? <TelemetryWorkspace onClose={onCloseHandler} /> : null;
+      case 'profiles':
+        return (
+          <ProfilesWorkspace preferredEnvironmentId={selectedEnvironmentId} />
+        );
+      case 'saveBackups':
+        return <SaveBackupsWorkspace onClose={onCloseHandler} />;
       case 'welcome':
         return (
           <WelcomeOverlay
@@ -2052,24 +2452,32 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, updateWorkspaceEntry]);
+  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, telemetryAvailable, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
   };
 
   const appUpdatePreferences = settings?.appUpdate ?? null;
-  const appUpdateSnoozedUntil = appUpdatePreferences?.snoozedUntil
-    && Number.isFinite(Date.parse(appUpdatePreferences.snoozedUntil))
-    ? Date.parse(appUpdatePreferences.snoozedUntil)
+  const appUpdateChannelPreferences = getAppUpdateChannelPreferences(
+    appUpdatePreferences,
+    appUpdateChannel,
+  );
+  const appUpdateSnoozedUntil = appUpdateChannelPreferences.snoozedUntil
+    && Number.isFinite(Date.parse(appUpdateChannelPreferences.snoozedUntil))
+    ? Date.parse(appUpdateChannelPreferences.snoozedUntil)
     : null;
   const isAppUpdateSnoozed = appUpdateState.status === 'available'
     && appUpdateSnoozedUntil !== null
     && appUpdateSnoozedUntil > Date.now();
   const isAppUpdateSkipped = appUpdateState.status === 'available'
-    && appUpdatePreferences?.skippedVersionNormalized === appUpdateState.result.versionNormalized;
+    && (
+      appUpdateChannelPreferences.skippedVersionNormalized === appUpdateReleaseIdentity(appUpdateState.result)
+      || appUpdateChannelPreferences.skippedVersionNormalized === appUpdateState.result.versionNormalized
+    );
   const isAppUpdateDismissedForSession = appUpdateState.status === 'available'
-    && dismissedAppUpdateVersion === appUpdateState.result.versionNormalized;
+    && dismissedAppUpdateVersions[appUpdateState.result.channel]
+      === appUpdateReleaseIdentity(appUpdateState.result);
   const showAppUpdateToast = appUpdateState.status === 'available'
     && !isAppUpdateSnoozed
     && !isAppUpdateSkipped
@@ -2149,6 +2557,36 @@ function AppContent() {
         return;
     }
   }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace, selectEnvironmentForShell]);
+
+  const verifyShellMelonLoaderLaunch = useCallback(async (
+    environmentId: string,
+    launchStartedAt: number | undefined,
+  ) => {
+    if (!launchStartedAt) {
+      return;
+    }
+
+    try {
+      const verification = await ApiService.verifyMelonLoaderLaunch(environmentId, launchStartedAt, 20000);
+      if (verification.confirmed || verification.status === 'notInstalled') {
+        return;
+      }
+
+      await message(
+        `${verification.message}\n\nLog checked: ${verification.logPath}`,
+        {
+          title: currentEnvironment ? `MelonLoader Launch Not Confirmed: ${currentEnvironment.name}` : 'MelonLoader Launch Not Confirmed',
+          kind: 'warning',
+        },
+      );
+    } catch (error) {
+      logger.warn('Failed to verify MelonLoader launch after starting game', {
+        environmentId,
+        error: getErrorMessage(error, 'verification failed'),
+      });
+    }
+  }, [currentEnvironment]);
+
   const handleShellLaunchGame = useCallback(async () => {
     if (!currentEnvironmentId) {
       openWorkspace({ view: 'wizard' });
@@ -2161,9 +2599,44 @@ function AppContent() {
       if (!result.success) {
         throw new Error('Launch request was not accepted.');
       }
+      await verifyShellMelonLoaderLaunch(currentEnvironmentId, result.launchStartedAt);
     } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Failed to launch the selected environment.');
+      if (isSteamShortcutReloadError(errorMessage)) {
+        const shouldRestartSteam = await confirm(
+          `${errorMessage}\n\nRestart Steam now and retry the launch?`,
+          {
+            title: currentEnvironment ? `Restart Steam: ${currentEnvironment.name}` : 'Restart Steam',
+            kind: 'warning',
+          },
+        );
+
+        if (shouldRestartSteam) {
+          try {
+            const retryResult = await ApiService.launchGame(currentEnvironmentId, 'steam_restart');
+            if (!retryResult.success) {
+              await message('Launch request was not accepted.', {
+                title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
+                kind: 'error',
+              });
+            } else {
+              await verifyShellMelonLoaderLaunch(currentEnvironmentId, retryResult.launchStartedAt);
+            }
+          } catch (retryError) {
+            await message(
+              getErrorMessage(retryError, 'Failed to restart Steam and launch the selected environment.'),
+              {
+                title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
+                kind: 'error',
+              },
+            );
+          }
+        }
+        return;
+      }
+
       await message(
-        error instanceof Error ? error.message : 'Failed to launch the selected environment.',
+        errorMessage,
         {
           title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
           kind: 'error',
@@ -2172,8 +2645,18 @@ function AppContent() {
     } finally {
       setLaunchingEnvironmentId(null);
     }
-  }, [currentEnvironment, currentEnvironmentId, openWorkspace]);
-  const utilityActions = [
+  }, [currentEnvironment, currentEnvironmentId, openWorkspace, verifyShellMelonLoaderLaunch]);
+  const telemetryUtilityAction: ShellUtilityAction = {
+    key: 'telemetry',
+    label: 'Telemetry',
+    icon: 'waveSquare',
+    active: activeWorkspace.view === 'telemetry',
+    variant: 'btn-secondary',
+    onClick: () => openWorkspace({ view: 'telemetry' }),
+    disabled: false,
+    title: 'Open live telemetry diagnostics',
+  };
+  const utilityActions: readonly ShellUtilityAction[] = [
     {
       key: 'launch',
       label: isShellLaunchInProgress ? 'Launching...' : 'Launch Game',
@@ -2216,6 +2699,7 @@ function AppContent() {
       disabled: false,
       title: 'Open help and troubleshooting guidance',
     },
+    ...(telemetryAvailable ? [telemetryUtilityAction] : []),
     {
       key: 'settings',
       label: 'Settings',
@@ -2226,7 +2710,7 @@ function AppContent() {
       disabled: false,
       title: 'Open application settings',
     },
-  ] as const;
+  ];
 
   return (
     <div className="app app-desktop-shell">
@@ -2244,6 +2728,8 @@ function AppContent() {
             onOpenEnvironmentsWorkspace={openEnvironmentsWorkspace}
             onOpenHome={goHome}
             onOpenLibrary={openLibraryWorkspaceFromShell}
+            onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
+            onOpenSaveBackups={() => openWorkspace({ view: 'saveBackups' })}
             onShellNavTransitionEnd={handleShellNavTransitionEnd}
             onToggleShellNavigation={toggleShellNavigation}
             shellNavAnimating={shellNavAnimating}
@@ -2270,6 +2756,7 @@ function AppContent() {
                     })}
                     onOpenWizard={() => openWorkspace({ view: 'wizard' })}
                     onOpenSettings={() => openWorkspace({ view: 'settings' })}
+                    onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
                   />
                 </main>
               </div>
@@ -2304,7 +2791,10 @@ function AppContent() {
           onUpdate={() => void handleInstallAppUpdate()}
           onSkip={handleSkipAppUpdateVersion}
           onSnooze={handleSnoozeAppUpdate}
-          onDismiss={() => setDismissedAppUpdateVersion(appUpdateState.result.versionNormalized)}
+          onDismiss={() => setDismissedAppUpdateVersions((previous) => ({
+            ...previous,
+            [appUpdateState.result.channel]: appUpdateReleaseIdentity(appUpdateState.result),
+          }))}
         />
       )}
 
@@ -2379,20 +2869,106 @@ function AppContent() {
           </SimmDialogContent>
         </Dialog>
       )}
+
+      <Dialog open={!!runtimeSwitchNotice} onOpenChange={(open) => {
+        if (!open) setRuntimeSwitchNotice(null);
+      }}>
+        <SimmDialogContent className="app-dialog app-dialog--message app-runtime-dialog" showCloseButton={false}>
+          <DialogHeader className="modal-header app-dialog__header">
+            <DialogTitle>Steam Runtime Changed</DialogTitle>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setRuntimeSwitchNotice(null)} aria-label="Close runtime switch notice">
+              <Icon name="times" />
+            </SimmButton>
+          </DialogHeader>
+          {runtimeSwitchNotice && (
+            <div className="app-dialog__body app-runtime-dialog__body">
+              <div className="app-dialog__callout app-dialog__callout--warning">
+                <div className="app-dialog__icon"><Icon name="triangleExclamation" /></div>
+                <div className="app-dialog__meta">
+                  <strong>{runtimeSwitchNotice.environmentName} changed from {runtimeDisplayName(runtimeSwitchNotice.previousRuntime)} to {runtimeDisplayName(runtimeSwitchNotice.runtime)}</strong>
+                  <DialogDescription>
+                    SIMM disabled {runtimeSwitchNotice.disabledItems} {runtimeDisplayName(runtimeSwitchNotice.previousRuntime)} item(s) and installed {runtimeSwitchNotice.installedItems} downloaded {runtimeDisplayName(runtimeSwitchNotice.runtime)} replacement(s).
+                  </DialogDescription>
+                </div>
+              </div>
+              {runtimeSwitchNotice.missingItems.length > 0 && (
+                <div className="app-runtime-dialog__details">
+                  <strong>No downloaded {runtimeDisplayName(runtimeSwitchNotice.runtime)} version was found for:</strong>
+                  <span>{runtimeSwitchNotice.missingItems.join(', ')}</span>
+                  <span>Those items remain disabled. Download their {runtimeDisplayName(runtimeSwitchNotice.runtime)} versions before enabling them.</span>
+                </div>
+              )}
+              {runtimeSwitchNotice.errors.length > 0 && (
+                <div className="app-runtime-dialog__details">
+                  <strong>SIMM also encountered:</strong>
+                  {runtimeSwitchNotice.errors.map((error) => <span key={error}>{error}</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="app-dialog__footer">
+            <SimmButton className="btn btn-primary" onClick={() => setRuntimeSwitchNotice(null)} autoFocus>OK</SimmButton>
+          </DialogFooter>
+        </SimmDialogContent>
+      </Dialog>
+
+      <Dialog open={closePrompt.isOpen} onOpenChange={(open) => {
+        if (!open) {
+          dismissClosePrompt();
+        }
+      }}>
+        <SimmDialogContent className="app-dialog app-dialog--message app-close-behavior-dialog" showCloseButton={false}>
+          <DialogHeader className="modal-header app-dialog__header">
+            <DialogTitle>Close SIMM</DialogTitle>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={dismissClosePrompt} aria-label="Close close behavior dialog">
+              <Icon name="times" />
+            </SimmButton>
+          </DialogHeader>
+          <div className="app-dialog__body">
+            <div className="app-dialog__callout app-dialog__callout--info">
+              <div className="app-dialog__icon"><Icon name="circleQuestion" /></div>
+              <div className="app-dialog__meta">
+                <strong>Keep SIMM available in the tray?</strong>
+                <DialogDescription>Tray mode keeps monitoring and configured update checks running while the window is hidden.</DialogDescription>
+              </div>
+            </div>
+            <label className="app-dialog__option">
+              <Checkbox checked={closePrompt.remember} onCheckedChange={(checked) => setClosePrompt((current) => ({ ...current, remember: Boolean(checked) }))} />
+              <span className="app-dialog__option-copy"><strong>Remember my choice</strong></span>
+            </label>
+          </div>
+          <DialogFooter className="app-dialog__footer">
+            <div className="app-dialog__actions">
+              <SimmButton className="btn btn-secondary" onClick={() => void resolveClosePrompt('quit')}>Quit SIMM</SimmButton>
+              <SimmButton className="btn btn-primary" onClick={() => void resolveClosePrompt('tray')} autoFocus>Hide to Tray</SimmButton>
+            </div>
+          </DialogFooter>
+        </SimmDialogContent>
+      </Dialog>
     </div>
   );
 }
 
 export function App() {
-  return (
-    <ErrorBoundary>
-      <SettingsStoreProvider>
-        <EnvironmentStoreProvider>
+  const appContent = (
+    <SettingsStoreProvider>
+      <EnvironmentStoreProvider>
+        <ModLibraryStoreProvider>
           <DownloadStatusStoreProvider>
             <AppContent />
           </DownloadStatusStoreProvider>
-        </EnvironmentStoreProvider>
-      </SettingsStoreProvider>
+        </ModLibraryStoreProvider>
+      </EnvironmentStoreProvider>
+    </SettingsStoreProvider>
+  );
+
+  return (
+    <ErrorBoundary>
+      {import.meta.env.MODE === 'test' ? appContent : (
+        <StartupGate>
+          {appContent}
+        </StartupGate>
+      )}
     </ErrorBoundary>
   );
 }

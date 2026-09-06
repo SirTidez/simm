@@ -226,6 +226,29 @@ impl UserLibsService {
 
         Ok(())
     }
+
+    pub async fn delete_user_lib(&self, game_dir: &str, user_lib_path: &str) -> Result<()> {
+        let user_lib_path = self.resolve_user_lib_path(game_dir, user_lib_path)?;
+
+        if !user_lib_path.exists() {
+            return Err(anyhow::anyhow!("User lib file not found"));
+        }
+
+        let metadata = fs::metadata(&user_lib_path).await?;
+        if metadata.is_file() {
+            fs::remove_file(&user_lib_path)
+                .await
+                .context("Failed to delete user lib file")?;
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(&user_lib_path)
+                .await
+                .context("Failed to delete user lib directory")?;
+        } else {
+            return Err(anyhow::anyhow!("Path is not a file or directory"));
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for UserLibsService {
@@ -285,6 +308,15 @@ mod tests {
             .await?;
         assert!(!userlibs_dir.join("LibA.dll").exists());
         assert!(userlibs_dir.join("LibA.dll.disabled").exists());
+        let disabled_meta = fs::symlink_metadata(userlibs_dir.join("LibA.dll.disabled")).await?;
+        assert!(
+            disabled_meta.is_file() && !disabled_meta.file_type().is_symlink(),
+            "disabled UserLib should be a real file, not a symlink"
+        );
+        assert_eq!(
+            fs::read(userlibs_dir.join("LibA.dll.disabled")).await?,
+            b"data"
+        );
 
         service
             .enable_user_lib(
@@ -297,6 +329,12 @@ mod tests {
             .await?;
         assert!(userlibs_dir.join("LibA.dll").exists());
         assert!(!userlibs_dir.join("LibA.dll.disabled").exists());
+        let enabled_meta = fs::symlink_metadata(userlibs_dir.join("LibA.dll")).await?;
+        assert!(
+            enabled_meta.is_file() && !enabled_meta.file_type().is_symlink(),
+            "enabled UserLib should be a real file, not a symlink"
+        );
+        assert_eq!(fs::read(userlibs_dir.join("LibA.dll")).await?, b"data");
 
         Ok(())
     }
@@ -338,6 +376,57 @@ mod tests {
             .await?;
 
         assert!(userlibs_dir.join("SharedAssets").exists());
+        assert!(!userlibs_dir.join("SharedAssets.disabled").exists());
+        let enabled_dir_meta = fs::symlink_metadata(userlibs_dir.join("SharedAssets")).await?;
+        assert!(
+            enabled_dir_meta.is_dir() && !enabled_dir_meta.file_type().is_symlink(),
+            "enabled UserLib directory should be a real directory, not a symlink"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_userlib_removes_enabled_file() -> Result<()> {
+        let temp = tempdir()?;
+        let service = UserLibsService::new();
+
+        let userlibs_dir = temp.path().join("UserLibs");
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::write(userlibs_dir.join("LibA.dll"), b"data").await?;
+
+        service
+            .delete_user_lib(
+                temp.path().to_string_lossy().as_ref(),
+                userlibs_dir.join("LibA.dll").to_string_lossy().as_ref(),
+            )
+            .await?;
+
+        assert!(!userlibs_dir.join("LibA.dll").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_userlib_removes_disabled_directory() -> Result<()> {
+        let temp = tempdir()?;
+        let service = UserLibsService::new();
+
+        let userlibs_dir = temp.path().join("UserLibs");
+        fs::create_dir_all(userlibs_dir.join("SharedAssets.disabled")).await?;
+        fs::write(
+            userlibs_dir.join("SharedAssets.disabled").join("asset.bin"),
+            b"data",
+        )
+        .await?;
+
+        service
+            .delete_user_lib(
+                temp.path().to_string_lossy().as_ref(),
+                userlibs_dir.join("SharedAssets").to_string_lossy().as_ref(),
+            )
+            .await?;
+
         assert!(!userlibs_dir.join("SharedAssets.disabled").exists());
 
         Ok(())

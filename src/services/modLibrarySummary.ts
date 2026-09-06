@@ -72,6 +72,13 @@ export interface EnvironmentModSnapshot {
   updates: ModUpdateSummaryEntry[];
 }
 
+function canonicalRuntime(runtime: string | null | undefined): 'IL2CPP' | 'Mono' | null {
+  const normalized = String(runtime ?? '').toLowerCase();
+  if (normalized.includes('il2cpp')) return 'IL2CPP';
+  if (normalized.includes('mono')) return 'Mono';
+  return null;
+}
+
 export function applyFeaturedDownloadRemoteVersions(
   library: ModLibraryResult | null | undefined,
   latestBySourceId: ReadonlyMap<string, string>,
@@ -310,7 +317,10 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
     entry.installedIn.forEach((envId) => group.installedIn.add(envId));
     (entry.installedInByRuntime?.IL2CPP || []).forEach((envId) => group.installedInByRuntime.IL2CPP.add(envId));
     (entry.installedInByRuntime?.Mono || []).forEach((envId) => group.installedInByRuntime.Mono.add(envId));
-    entry.availableRuntimes.forEach((runtime) => group.availableRuntimes.add(runtime));
+    entry.availableRuntimes.forEach((runtime) => {
+      const canonical = canonicalRuntime(runtime);
+      if (canonical) group.availableRuntimes.add(canonical);
+    });
     group.managedStates.add(entry.managed);
     if (entry.author) {
       group.authors.add(entry.author);

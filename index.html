@@ -31,6 +31,8 @@
 
       .boot-screen {
         min-height: 100vh;
+        min-height: 100dvh;
+        box-sizing: border-box;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -103,6 +105,49 @@
         animation: slide 1.6s ease-in-out infinite;
       }
 
+      .boot-startup-steps {
+        display: grid;
+        gap: 10px;
+        margin: 4px 0;
+        text-align: left;
+      }
+
+      .boot-startup-step {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 22px;
+        color: var(--boot-subtitle);
+        font-size: 13px;
+      }
+
+      .boot-startup-step__marker {
+        width: 9px;
+        height: 9px;
+        border: 1px solid var(--boot-dot);
+        border-radius: 50%;
+      }
+
+      .boot-startup-step--active {
+        color: var(--boot-body-text);
+      }
+
+      .boot-startup-step--active .boot-startup-step__marker {
+        background: var(--boot-dot);
+        box-shadow: 0 0 0 4px rgba(124, 169, 230, 0.12);
+      }
+
+      .boot-startup-step--complete .boot-startup-step__marker {
+        background: var(--boot-dot);
+      }
+
+      .boot-error {
+        margin: 0;
+        color: #ffb4b4;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
       @keyframes bounce {
         0%,
         100% {
@@ -129,6 +174,8 @@
     </style>
     <script>
       (function() {
+        window.__SIMM_BOOT_TIMINGS__ = window.__SIMM_BOOT_TIMINGS__ || {};
+        window.__SIMM_BOOT_TIMINGS__.inlineScriptAt = performance.now();
         try {
           var theme = localStorage.getItem('simm-theme') || 'modern-blue';
           var root = document.documentElement;
@@ -183,6 +230,15 @@
         </div>
       </div>
     </div>
+    <script>
+      (function() {
+        var timings = window.__SIMM_BOOT_TIMINGS__ = window.__SIMM_BOOT_TIMINGS__ || {};
+        timings.appElementReadyAt = performance.now();
+        requestAnimationFrame(function() {
+          timings.bootFrameAt = performance.now();
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -19,9 +19,12 @@ interface NexusOAuthStatus {
   };
 }
 
+type SteamAuthMode = 'qr' | 'password';
+
 export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const { settings, refreshSettings } = useSettingsStore();
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [steamAuthMode, setSteamAuthMode] = useState<SteamAuthMode>('qr');
   const [nexusStatus, setNexusStatus] = useState<NexusOAuthStatus>({ connected: false });
   const [nexusBusy, setNexusBusy] = useState(false);
   const [nexusError, setNexusError] = useState<string | null>(null);
@@ -85,8 +88,8 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     ? 'Steam authorization is ready for advanced Schedule I branch installs, and you can refresh the session here whenever Steam Guard or credentials change.'
     : 'No Steam account is connected yet. You do not need Steam sign-in for the normal Steam install; Steam manages that game and its updates. Authenticate here only when SIMM asks to manage an advanced Schedule I install.';
   const steamActionNote = steamConnected
-    ? 'Refresh the stored Steam session if advanced branch installs start prompting again or Steam changes its approval requirements.'
-    : 'SIMM only uses Steam credentials for Schedule I install authorization and stores them locally in encrypted form if you choose to remember them.';
+    ? 'Use QR login to refresh the DepotDownloader session without typing a password, or use password login if Steam QR is unavailable.'
+    : 'QR login is recommended. SIMM stores only the Steam account name for QR sessions while DepotDownloader stores the remembered login token.';
   const nexusExpiry = nexusStatus.connected && nexusStatus.expiresAt
     ? new Date(nexusStatus.expiresAt * 1000).toLocaleString()
     : null;
@@ -171,6 +174,11 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     await refreshSettings();
   };
 
+  const openSteamAuth = (mode: SteamAuthMode) => {
+    setSteamAuthMode(mode);
+    setShowAuthModal(true);
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -230,9 +238,13 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             )}
 
             <div className="account-service-card__actions">
-              <SimmButton onClick={() => setShowAuthModal(true)} className="btn btn-primary">
-                <Icon name={steamConnected ? 'fas fa-sync-alt' : 'fas fa-sign-in-alt'} />
-                {steamConnected ? 'Refresh Steam Access' : 'Authenticate with Steam'}
+              <SimmButton onClick={() => openSteamAuth('qr')} className="btn btn-primary">
+                <Icon name="fas fa-mobile-screen-button" />
+                {steamConnected ? 'Refresh with QR Login' : 'Login with Steam QR'}
+              </SimmButton>
+              <SimmButton onClick={() => openSteamAuth('password')} className="btn btn-secondary">
+                <Icon name="fas fa-lock" />
+                Password Login
               </SimmButton>
               <span className="account-action-note">{steamActionNote}</span>
             </div>
@@ -324,6 +336,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
           onClose={() => setShowAuthModal(false)}
           onAuthenticated={handleAuthenticated}
           required={false}
+          initialMode={steamAuthMode}
           nested={true}
         />
       )}

@@ -2,6 +2,7 @@ use crate::events;
 use crate::services::environment::EnvironmentService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
+use crate::services::settings::RuntimeSettingsState;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -9,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
+use tauri::Manager;
 use tokio::sync::Mutex;
 
 const MODS_SNAPSHOT_REFRESH_DEBOUNCE_MS: u64 = 250;
@@ -58,18 +60,38 @@ async fn refresh_mods_snapshot(
     let env_service = EnvironmentService::new(pool.clone())?;
     let Some(environment) = env_service.get_environment(environment_id).await? else {
         mods_snapshot_cache::remove(environment_id).await;
+        crate::commands::mods::invalidate_mod_library_cache("environment removed").await;
         return Ok(());
     };
 
     if environment.output_dir.is_empty() {
         mods_snapshot_cache::remove(environment_id).await;
+        crate::commands::mods::invalidate_mod_library_cache("environment has no output directory")
+            .await;
         return Ok(());
     }
 
-    let mods_service = ModsService::new(pool);
+    let runtime_settings = app
+        .try_state::<RuntimeSettingsState>()
+        .map(|state| state.inner().clone());
+    let mods_service = match runtime_settings {
+        Some(runtime_settings) => {
+            ModsService::new(pool).with_runtime_settings(runtime_settings.snapshot().await)
+        }
+        None => ModsService::new(pool),
+    };
     let snapshot = mods_service.list_mods(&environment.output_dir).await?;
-    mods_snapshot_cache::set(environment_id.to_string(), snapshot.clone()).await;
-    events::emit_mods_snapshot_updated(app, environment_id.to_string(), snapshot)?;
+    let replacement =
+        mods_snapshot_cache::replace_if_changed(environment_id.to_string(), snapshot.clone()).await;
+    if replacement.should_publish() {
+        crate::commands::mods::invalidate_mod_library_cache("mods snapshot changed").await;
+        events::emit_mods_snapshot_updated(app, environment_id.to_string(), snapshot)?;
+    } else {
+        log::debug!(
+            "Skipped unchanged mods snapshot event for {}",
+            environment_id
+        );
+    }
     Ok(())
 }
 

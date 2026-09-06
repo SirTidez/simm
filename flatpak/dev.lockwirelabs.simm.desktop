@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Schedule I Mod Manager
+Comment=Manage Schedule I installations and mod development environments
+Exec=simmrust %U
+Icon=dev.lockwirelabs.simm
+Terminal=false
+Categories=Game;
+MimeType=x-scheme-handler/simm;x-scheme-handler/nxm;
+StartupNotify=true

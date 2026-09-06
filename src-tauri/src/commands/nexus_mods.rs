@@ -1,5 +1,5 @@
 use crate::services::nexus_mods::NexusModsService;
-use crate::services::settings::SettingsService;
+use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use once_cell::sync::Lazy;
@@ -23,6 +23,8 @@ const DEFAULT_NEXUS_OAUTH_CLIENT_ID: &str = "simm";
 const NEXUS_V1_API_BASE: &str = "https://api.nexusmods.com/v1";
 const NXM_PROTOCOL: &str = "nxm";
 const SUPPORTED_NEXUS_GAME_ID: &str = "schedule1";
+const NEXUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const NEXUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[track_caller]
 fn nexus_error(message: impl Into<String>) -> String {
@@ -70,6 +72,50 @@ async fn cleanup_temp_archive(path: &std::path::Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
 
+fn nexus_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(NEXUS_CONNECT_TIMEOUT)
+        .timeout(NEXUS_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|error| nexus_error(format!("Failed to build Nexus HTTP client: {}", error)))
+}
+
+fn nexus_temp_archive_path(
+    scope: &str,
+    mod_id: u32,
+    file_id: u32,
+    original_filename: &str,
+) -> std::path::PathBuf {
+    let safe_filename: String = std::path::Path::new(original_filename)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("nexus-archive.zip")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_filename = safe_filename.trim_matches(['.', '_']).trim();
+    let safe_filename = if safe_filename.is_empty() {
+        "nexus-archive.zip"
+    } else {
+        safe_filename
+    };
+
+    std::env::temp_dir().join(format!(
+        "simm-nexus-{}-{}-{}-{}-{}",
+        scope,
+        mod_id,
+        file_id,
+        uuid::Uuid::new_v4(),
+        safe_filename,
+    ))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingNexusManualDownload {
@@ -115,6 +161,12 @@ fn now_epoch_seconds() -> i64 {
 
 fn new_pending_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+fn pending_nxm_matches(pending: &PendingNexusManualDownload, nxm: &ParsedNxmUrl) -> bool {
+    pending.game_id == normalize_nexus_game_id(Some(&nxm.game_id))
+        && pending.mod_id == nxm.mod_id
+        && pending.file_id == nxm.file_id
 }
 
 fn env_or_default(key: &str, default: &str) -> String {
@@ -315,15 +367,7 @@ async fn get_nxm_download_links(
         urlencoding::encode(user_id)
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            nexus_error(format!(
-                "Failed to build Nexus manual download client: {}",
-                e
-            ))
-        })?;
+    let client = nexus_http_client()?;
 
     let response = client
         .get(&url)
@@ -530,6 +574,65 @@ fn restore_windows_protocol_handler(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn linux_desktop_id_looks_like_simm(desktop_id: &str) -> bool {
+    crate::services::linux_readiness::linux_desktop_id_looks_like_simm(desktop_id)
+}
+
+#[cfg(target_os = "linux")]
+async fn query_linux_default_scheme_handler(protocol: &str) -> Result<Option<String>, String> {
+    let output = match tokio::process::Command::new("xdg-mime")
+        .args(["query", "default", &format!("x-scheme-handler/{protocol}")])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to query Linux desktop scheme handler with xdg-mime: {}",
+                error
+            ));
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "xdg-mime could not query the Linux desktop scheme handler".to_string()
+        } else {
+            format!("xdg-mime could not query the Linux desktop scheme handler: {stderr}")
+        });
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
+}
+
+#[cfg(target_os = "linux")]
+async fn verify_linux_nxm_scheme_handler(protocol: &str) -> Result<(), String> {
+    match query_linux_default_scheme_handler(protocol).await {
+        Ok(Some(handler)) if linux_desktop_id_looks_like_simm(&handler) => {
+            log::info!(
+                "Linux desktop scheme handler for {}:// is registered to {}",
+                protocol,
+                handler
+            );
+        }
+        Ok(Some(handler)) => warn_with_location(&format!(
+            "Linux desktop scheme handler for {}:// is currently '{}'. Nexus manual downloads may open in another app until SIMM is registered as the default handler.",
+            protocol, handler
+        )),
+        Ok(None) => warn_with_location(&format!(
+            "Could not verify Linux desktop scheme handler for {}:// because xdg-mime is not available or no default handler is registered.",
+            protocol
+        )),
+        Err(error) => warn_with_location(&error),
+    }
+
+    Ok(())
+}
+
 fn base64url_sha256(input: &str) -> String {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
@@ -623,7 +726,7 @@ async fn oauth_exchange_code_local(
         form.push(("client_secret", secret));
     }
 
-    let response = reqwest::Client::new()
+    let response = nexus_http_client()?
         .post("https://users.nexusmods.com/oauth/token")
         .form(&form)
         .send()
@@ -660,7 +763,8 @@ async fn oauth_refresh_token_local(
         form.push(("client_secret", secret));
     }
 
-    let response = reqwest::Client::new()
+    let response = nexus_http_client()
+        .map_err(OAuthRefreshFailure::Error)?
         .post("https://users.nexusmods.com/oauth/token")
         .form(&form)
         .send()
@@ -684,7 +788,7 @@ async fn oauth_refresh_token_local(
 }
 
 async fn oauth_userinfo_local(access_token: &str) -> Result<Value, String> {
-    let response = reqwest::Client::new()
+    let response = nexus_http_client()?
         .get("https://users.nexusmods.com/oauth/userinfo")
         .bearer_auth(access_token)
         .send()
@@ -715,7 +819,10 @@ async fn oauth_revoke_local(token: &str, client_id: &str) {
         form.push(("client_secret", secret));
     }
 
-    let _ = reqwest::Client::new()
+    let Ok(client) = nexus_http_client() else {
+        return;
+    };
+    let _ = client
         .post("https://users.nexusmods.com/oauth/revoke")
         .form(&form)
         .send()
@@ -1091,24 +1198,33 @@ async fn clear_nxm_pending_download(db: Arc<SqlitePool>) -> Result<(), String> {
     Ok(())
 }
 
+async fn clear_nxm_pending_download_if_identity(
+    db: Arc<SqlitePool>,
+    pending: &PendingNexusManualDownload,
+) -> Result<bool, String> {
+    let settings = SettingsService::new(db)
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
+    settings
+        .clear_nexus_nxm_pending_download_if_identity(&pending.session_id, pending.created_at)
+        .await
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to conditionally clear pending Nexus manual download: {}",
+                e
+            ))
+        })
+}
+
 pub(crate) async fn ensure_nxm_runtime_registration(db: Arc<SqlitePool>) -> Result<(), String> {
-    let settings = SettingsService::new(db).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     {
+        let settings = SettingsService::new(db).map_err(|e| e.to_string())?;
         let existing_backup = settings
             .get_nexus_nxm_protocol_backup()
             .await
             .map_err(|e| e.to_string())?;
+        let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
         if existing_backup.is_none() {
-            let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
-            settings
-                .save_nexus_nxm_protocol_backup(
-                    &serde_json::to_value(backup).map_err(|e| e.to_string())?,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-        } else {
-            let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
             settings
                 .save_nexus_nxm_protocol_backup(
                     &serde_json::to_value(backup).map_err(|e| e.to_string())?,
@@ -1116,14 +1232,27 @@ pub(crate) async fn ensure_nxm_runtime_registration(db: Arc<SqlitePool>) -> Resu
                 .await
                 .map_err(|e| e.to_string())?;
         }
+        return Ok(());
     }
-    Ok(())
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = db;
+        verify_linux_nxm_scheme_handler(NXM_PROTOCOL).await?;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+    {
+        let _ = db;
+        Ok(())
+    }
 }
 
 pub(crate) async fn cleanup_nxm_runtime_registration(db: Arc<SqlitePool>) -> Result<(), String> {
-    let settings = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     {
+        let settings = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
         let backup = settings
             .get_nexus_nxm_protocol_backup()
             .await
@@ -1134,15 +1263,20 @@ pub(crate) async fn cleanup_nxm_runtime_registration(db: Arc<SqlitePool>) -> Res
             .transpose()?;
 
         restore_windows_protocol_handler(NXM_PROTOCOL, backup.as_ref())?;
+
+        clear_nxm_pending_download(db.clone()).await?;
+        settings
+            .clear_nexus_nxm_protocol_backup()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        return Ok(());
     }
 
-    clear_nxm_pending_download(db.clone()).await?;
-    settings
-        .clear_nexus_nxm_protocol_backup()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        clear_nxm_pending_download(db).await
+    }
 }
 
 pub(crate) async fn cleanup_stale_nxm_runtime_registration(
@@ -1249,16 +1383,95 @@ fn build_nexus_mod_metadata(
     Value::Object(metadata_obj)
 }
 
+enum ManualNxmArchiveStoreResult {
+    Stored {
+        store_result: Value,
+        security_report: Option<crate::types::SecurityScanReport>,
+    },
+    EarlyResponse(Value),
+}
+
+async fn store_manual_nxm_archive_after_security_gate(
+    settings: &crate::types::Settings,
+    mods_service: &crate::services::mods::ModsService,
+    archive_path: &std::path::Path,
+    original_filename: &str,
+    runtime: Option<crate::types::Runtime>,
+    metadata: Value,
+    security_override: bool,
+) -> Result<ManualNxmArchiveStoreResult, String> {
+    let archive_path_str = archive_path.to_string_lossy().to_string();
+    let security_scan = crate::commands::mods::prepare_security_scan_with_settings(
+        settings,
+        &archive_path_str,
+        Some(metadata),
+        security_override,
+    )
+    .await;
+
+    let (metadata, security_report) = match security_scan {
+        Ok(crate::commands::mods::SecurityGateResult::Continue { metadata, report }) => {
+            (metadata, report)
+        }
+        Ok(crate::commands::mods::SecurityGateResult::EarlyResponse(response)) => {
+            cleanup_temp_archive(archive_path).await;
+            return Ok(ManualNxmArchiveStoreResult::EarlyResponse(response));
+        }
+        Err(error) => {
+            cleanup_temp_archive(archive_path).await;
+            return Err(nexus_error(error));
+        }
+    };
+
+    let store_result = mods_service
+        .store_mod_archive(
+            &archive_path_str,
+            original_filename,
+            runtime,
+            metadata,
+            None,
+        )
+        .await;
+    cleanup_temp_archive(archive_path).await;
+    let store_result = store_result.map_err(|error| {
+        nexus_error(format!(
+            "Failed to store manually downloaded Nexus archive: {}",
+            error
+        ))
+    })?;
+
+    Ok(ManualNxmArchiveStoreResult::Stored {
+        store_result,
+        security_report,
+    })
+}
+
 async fn complete_pending_nxm_download(
     app: &AppHandle,
     db: Arc<SqlitePool>,
+    settings: &crate::types::Settings,
     pending: Option<&PendingNexusManualDownload>,
     nxm: &ParsedNxmUrl,
     runtime_override: Option<crate::types::Runtime>,
     runtime_was_explicit: bool,
+    security_override: bool,
 ) -> Result<Value, String> {
     use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
+
+    if let Some(pending) = pending {
+        if !pending_nxm_matches(pending, nxm) {
+            return Err(nexus_warn(format!(
+                "Nexus callback does not match the pending manual download session (expected {}/{}/{}, received {}/{}/{}). Start a new download from the matching Nexus file.",
+                pending.game_id,
+                pending.mod_id,
+                pending.file_id,
+                nxm.game_id,
+                nxm.mod_id,
+                nxm.file_id,
+            )));
+        }
+    }
 
     let nexus_service = get_nexus_mods_service().await?;
     let mod_info = nexus_service
@@ -1303,7 +1516,7 @@ async fn complete_pending_nxm_download(
     let runtime = runtime_override
         .or_else(|| pending.and_then(|value| parse_runtime_label(value.runtime.as_deref())))
         .or_else(|| infer_runtime_from_file_name(original_filename));
-    let mods_service = ModsService::new(db.clone());
+    let mods_service = ModsService::new(db.clone()).with_runtime_settings(settings.clone());
 
     let install_target = pending.and_then(|value| {
         let same_mod = value.mod_id == nxm.mod_id;
@@ -1470,10 +1683,8 @@ async fn complete_pending_nxm_download(
     } else {
         original_filename
     };
-    let archive_path = std::env::temp_dir().join(format!(
-        "nexusmods-manual-{}-{}-{}",
-        nxm.mod_id, nxm.file_id, original_filename
-    ));
+    let archive_path =
+        nexus_temp_archive_path("manual", nxm.mod_id, nxm.file_id, original_filename);
     tokio::fs::write(&archive_path, downloaded)
         .await
         .map_err(|e| {
@@ -1499,55 +1710,68 @@ async fn complete_pending_nxm_download(
         ),
     );
 
-    let store_result = match mods_service
-        .store_mod_archive(
-            &archive_path.to_string_lossy(),
-            original_filename,
-            runtime.clone(),
-            Some(build_nexus_mod_metadata(
-                &mod_info,
-                Some(file_info),
-                &nxm.game_id,
-                nxm.mod_id,
-                nxm.file_id,
-                &version,
-            )),
-            None,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            cleanup_temp_archive(&archive_path).await;
-            return Err(nexus_error(format!(
-                "Failed to store manually downloaded Nexus archive: {}",
-                e
-            )));
-        }
+    let metadata = build_nexus_mod_metadata(
+        &mod_info,
+        Some(file_info),
+        &nxm.game_id,
+        nxm.mod_id,
+        nxm.file_id,
+        &version,
+    );
+    let archive_store = store_manual_nxm_archive_after_security_gate(
+        settings,
+        &mods_service,
+        &archive_path,
+        original_filename,
+        runtime.clone(),
+        metadata,
+        security_override,
+    )
+    .await?;
+    let (store_result, security_report) = match archive_store {
+        ManualNxmArchiveStoreResult::Stored {
+            store_result,
+            security_report,
+        } => (store_result, security_report),
+        ManualNxmArchiveStoreResult::EarlyResponse(response) => return Ok(response),
     };
-    cleanup_temp_archive(&archive_path).await;
+
+    let storage_id = store_result
+        .get("storageId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let already_stored = store_result
+        .get("alreadyStored")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     if install_target.is_none() {
-        return Ok(json!({
+        let response = json!({
             "success": true,
             "kind": "library",
             "storage": store_result,
+            "storageId": storage_id,
+            "alreadyStored": already_stored,
             "modId": nxm.mod_id,
             "fileId": nxm.file_id,
             "requestedKind": pending.map(|value| value.kind.clone()),
             "usedFallback": pending
                 .map(|value| value.mod_id != nxm.mod_id || value.file_id != nxm.file_id || value.kind != "library")
                 .unwrap_or(true),
-        }));
+        });
+        return Ok(crate::commands::mods::finalize_security_scan_response(
+            &mods_service,
+            response,
+            security_report.as_ref(),
+            "downloading a manual Nexus mod archive",
+        )
+        .await);
     }
 
     let environment_id = install_target
         .ok_or_else(|| nexus_error("Pending Nexus install is missing an environment id"))?;
-    let storage_id = store_result
-        .get("storageId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| nexus_error("Stored Nexus archive did not return a storage ID"))?
-        .to_string();
+    let storage_id = storage_id
+        .ok_or_else(|| nexus_error("Stored Nexus archive did not return a storage ID"))?;
 
     let env_service = EnvironmentService::new(db.clone())
         .map_err(|e| nexus_error(format!("Failed to create environment service: {}", e)))?;
@@ -1566,12 +1790,13 @@ async fn complete_pending_nxm_download(
         .as_ref()
         .is_some_and(|requested| requested != &environment.runtime)
     {
-        return Ok(json!({
+        let response = json!({
             "success": true,
             "kind": "install",
             "environmentId": environment_id,
             "storageId": storage_id,
             "storage": store_result,
+            "alreadyStored": already_stored,
             "result": { "results": [] },
             "modId": nxm.mod_id,
             "fileId": nxm.file_id,
@@ -1583,7 +1808,14 @@ async fn complete_pending_nxm_download(
             "skippedEnvironmentIds": [environment.id.clone()],
             "skippedEnvironmentNames": [environment.name.clone()],
             "skipReason": "no-compatible-environments",
-        }));
+        });
+        return Ok(crate::commands::mods::finalize_security_scan_response(
+            &mods_service,
+            response,
+            security_report.as_ref(),
+            "downloading a manual Nexus mod archive",
+        )
+        .await);
     }
 
     let install_result = mods_service
@@ -1596,12 +1828,13 @@ async fn complete_pending_nxm_download(
             ))
         })?;
 
-    Ok(json!({
+    let response = json!({
         "success": true,
         "kind": "install",
         "environmentId": environment_id,
         "storageId": storage_id,
         "storage": store_result,
+        "alreadyStored": already_stored,
         "result": install_result,
         "modId": nxm.mod_id,
         "fileId": nxm.file_id,
@@ -1609,7 +1842,14 @@ async fn complete_pending_nxm_download(
         "installedEnvironmentNames": [environment.name.clone()],
         "requestedKind": pending.map(|value| value.kind.clone()),
         "usedFallback": false,
-    }))
+    });
+    Ok(crate::commands::mods::finalize_security_scan_response(
+        &mods_service,
+        response,
+        security_report.as_ref(),
+        "installing a manual Nexus mod archive",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -1861,53 +2101,58 @@ pub async fn begin_nexus_manual_download_session(
         created_at,
     };
 
-    settings
-        .save_nexus_nxm_pending_download(&serde_json::to_value(&pending).map_err(|e| {
-            nexus_error(format!(
-                "Failed to serialize pending Nexus download session: {}",
-                e
-            ))
-        })?)
+    let pending_value = serde_json::to_value(&pending).map_err(|e| {
+        nexus_error(format!(
+            "Failed to serialize pending Nexus download session: {}",
+            e
+        ))
+    })?;
+    let reserved = settings
+        .save_nexus_nxm_pending_download_if_absent(&pending_value)
         .await
         .map_err(|e| {
             nexus_error(format!(
-                "Failed to save pending Nexus download session: {}",
+                "Failed to reserve pending Nexus download session: {}",
                 e
             ))
         })?;
-
-    let db_for_cleanup = db.inner().clone();
-    let session_id = pending.session_id.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(20 * 60)).await;
-        let Ok(settings) = SettingsService::new(db_for_cleanup.clone()) else {
-            return;
-        };
-        let Ok(current) = settings.get_nexus_nxm_pending_download().await else {
-            return;
-        };
-        let Some(current) = current else {
-            return;
-        };
-        let Ok(current_pending) = serde_json::from_value::<PendingNexusManualDownload>(current)
-        else {
-            let _ = clear_nxm_pending_download(db_for_cleanup.clone()).await;
-            return;
-        };
-        if (!current_pending.session_id.is_empty() && current_pending.session_id == session_id)
-            || (current_pending.session_id.is_empty() && current_pending.created_at == created_at)
-        {
-            let _ = clear_nxm_pending_download(db_for_cleanup.clone()).await;
-        }
-    });
+    if !reserved {
+        let existing = settings
+            .get_nexus_nxm_pending_download()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_value::<PendingNexusManualDownload>(value).ok());
+        return Err(match existing {
+            Some(existing) => nexus_warn(format!(
+                "Another Nexus manual {} download is already pending for mod {} file {} (session {}). Complete or cancel it before starting a new download.",
+                existing.kind, existing.mod_id, existing.file_id, existing.session_id
+            )),
+            None => nexus_warn(
+                "Another Nexus manual download is already pending. Complete or cancel it before starting a new download."
+            ),
+        });
+    }
 
     #[allow(deprecated)]
-    app.shell()
-        .open(files_page_url.clone(), None)
-        .map_err(|e| nexus_error(format!("Failed to open Nexus files page: {}", e)))?;
+    if let Err(error) = app.shell().open(files_page_url.clone(), None) {
+        let _ = clear_nxm_pending_download_if_identity(db.inner().clone(), &pending).await;
+        return Err(nexus_error(format!(
+            "Failed to open Nexus files page: {}",
+            error
+        )));
+    }
+
+    let db_for_cleanup = db.inner().clone();
+    let pending_for_cleanup = pending.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+        let _ = clear_nxm_pending_download_if_identity(db_for_cleanup, &pending_for_cleanup).await;
+    });
 
     Ok(json!({
         "success": true,
+        "sessionId": pending.session_id,
         "kind": kind,
         "filesPageUrl": files_page_url,
         "modId": mod_id,
@@ -1920,12 +2165,14 @@ pub async fn begin_nexus_manual_download_session(
 pub async fn complete_nexus_manual_download_session(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     nxm_url: String,
     runtime_override: Option<String>,
+    security_override: Option<bool>,
 ) -> Result<Value, String> {
-    let settings = SettingsService::new(db.inner().clone())
+    let settings_service = SettingsService::new(db.inner().clone())
         .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
-    let pending = settings
+    let pending = settings_service
         .get_nexus_nxm_pending_download()
         .await
         .map_err(|e| {
@@ -1949,18 +2196,28 @@ pub async fn complete_nexus_manual_download_session(
             "SIMM only handles Schedule I Nexus downloads while it is open. Close SIMM to download Nexus mods for other games."
         ));
     }
+    let settings = runtime_settings.snapshot().await;
     let result = complete_pending_nxm_download(
         &app,
         db.inner().clone(),
+        &settings,
         pending.as_ref(),
         &nxm,
         parse_runtime_label(runtime_override.as_deref()),
         runtime_override.is_some(),
+        security_override.unwrap_or(false),
     )
     .await;
 
     let cleanup_result = if should_clear_pending_after_manual_completion(&result) {
-        clear_nxm_pending_download(db.inner().clone()).await
+        match pending.as_ref() {
+            Some(completed_pending) => {
+                clear_nxm_pending_download_if_identity(db.inner().clone(), completed_pending)
+                    .await
+                    .map(|_| ())
+            }
+            None => Ok(()),
+        }
     } else {
         Ok(())
     };
@@ -1988,6 +2245,14 @@ fn should_clear_pending_after_manual_completion(result: &Result<Value, String>) 
                 .get("runtimeSelectionRequired")
                 .and_then(|item| item.as_bool())
                 == Some(true)
+                || value
+                    .get("securityScanBlocked")
+                    .and_then(|item| item.as_bool())
+                    == Some(true)
+                || value
+                    .get("securityScanConfirmationRequired")
+                    .and_then(|item| item.as_bool())
+                    == Some(true)
     )
 }
 
@@ -2090,6 +2355,27 @@ pub async fn get_nexus_mods_mod_files(
         .get_mod_files(&game_id, mod_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_nexus_mod_file_dependencies(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    mod_id: u32,
+    file_id: u32,
+) -> Result<crate::types::NexusModFileDependencies, String> {
+    let access_token = get_valid_nexus_access_token(db.inner().clone())
+        .await
+        .map_err(nexus_error)?;
+    let service = get_nexus_mods_service().await?;
+    service
+        .get_mod_file_dependencies(&access_token, &game_id, mod_id, file_id)
+        .await
+        .map_err(|error| {
+            nexus_error(format!(
+                "Failed to resolve Nexus dependencies for mod {mod_id} file {file_id}: {error}"
+            ))
+        })
 }
 
 #[tauri::command]
@@ -2203,6 +2489,7 @@ pub async fn check_nexus_mods_for_updates(
 pub async fn download_nexus_mod_to_library(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, crate::services::settings::RuntimeSettingsState>,
     game_id_param: Option<String>,
     mod_id: u32,
     file_id: u32,
@@ -2216,17 +2503,10 @@ pub async fn download_nexus_mod_to_library(
         .map_err(nexus_error)?;
 
     let db_pool = db.inner().clone();
+    let settings = runtime_settings.snapshot().await;
     let game_id = if let Some(ref id) = game_id_param {
         normalize_nexus_game_id(Some(id))
     } else {
-        let mut settings_service = SettingsService::new(db_pool.clone())
-            .map_err(|e| nexus_error(format!("Failed to create settings service: {}", e)))?;
-        let settings = settings_service.load_settings().await.map_err(|e| {
-            nexus_error(format!(
-                "Failed to load settings for Nexus library download: {}",
-                e
-            ))
-        })?;
         normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
     };
 
@@ -2256,7 +2536,7 @@ pub async fn download_nexus_mod_to_library(
         .unwrap_or("1.0.0")
         .to_string();
 
-    let mods_service = ModsService::new(db_pool.clone());
+    let mods_service = ModsService::new(db_pool.clone()).with_runtime_settings(settings.clone());
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2327,10 +2607,7 @@ pub async fn download_nexus_mod_to_library(
             message
         })?;
 
-    let archive_path = std::env::temp_dir().join(format!(
-        "nexusmods-library-{}-{}-{}",
-        mod_id, file_id, original_filename
-    ));
+    let archive_path = nexus_temp_archive_path("library", mod_id, file_id, original_filename);
     tokio::fs::write(&archive_path, downloaded)
         .await
         .map_err(|e| {
@@ -2362,8 +2639,8 @@ pub async fn download_nexus_mod_to_library(
         file_id,
         &version,
     );
-    let security_scan = match crate::commands::mods::prepare_security_scan(
-        db_pool.clone(),
+    let security_scan = match crate::commands::mods::prepare_security_scan_with_settings(
+        &settings,
         &zip_path_str,
         Some(metadata),
         security_override.unwrap_or(false),
@@ -2429,6 +2706,7 @@ pub async fn download_nexus_mod_to_library(
 pub async fn install_nexus_mods_mod(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, crate::services::settings::RuntimeSettingsState>,
     environment_id: String,
     game_id_param: Option<String>,
     mod_id: u32,
@@ -2443,14 +2721,10 @@ pub async fn install_nexus_mods_mod(
         .map_err(nexus_error)?;
 
     let db_pool = db.inner().clone();
+    let settings = runtime_settings.snapshot().await;
     let game_id = if let Some(ref id) = game_id_param {
         normalize_nexus_game_id(Some(id))
     } else {
-        let mut settings_service = SettingsService::new(db_pool.clone())
-            .map_err(|e| nexus_error(format!("Failed to create settings service: {}", e)))?;
-        let settings = settings_service.load_settings().await.map_err(|e| {
-            nexus_error(format!("Failed to load settings for Nexus install: {}", e))
-        })?;
         normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
     };
 
@@ -2496,7 +2770,7 @@ pub async fn install_nexus_mods_mod(
         .unwrap_or("1.0.0")
         .to_string();
 
-    let mods_service = ModsService::new(db_pool.clone());
+    let mods_service = ModsService::new(db_pool.clone()).with_runtime_settings(settings.clone());
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2560,11 +2834,7 @@ pub async fn install_nexus_mods_mod(
             message
         })?;
 
-    let temp_dir = std::env::temp_dir();
-    let archive_path = temp_dir.join(format!(
-        "nexusmods-{}-{}-{}",
-        mod_id, file_id, original_filename
-    ));
+    let archive_path = nexus_temp_archive_path("install", mod_id, file_id, original_filename);
     tokio::fs::write(&archive_path, downloaded)
         .await
         .map_err(|e| {
@@ -2677,8 +2947,8 @@ pub async fn install_nexus_mods_mod(
 
     let metadata = Value::Object(metadata_obj);
 
-    let security_scan = match crate::commands::mods::prepare_security_scan(
-        db_pool.clone(),
+    let security_scan = match crate::commands::mods::prepare_security_scan_with_settings(
+        &settings,
         &zip_path_str,
         Some(metadata),
         security_override.unwrap_or(false),
@@ -2787,11 +3057,23 @@ pub async fn install_nexus_mods_mod(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::linux_desktop_id_looks_like_simm;
     use super::{
         classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
-        derive_account_summary, should_clear_pending_after_manual_completion, OAuthRefreshFailure,
+        derive_account_summary, nexus_temp_archive_path, pending_nxm_matches,
+        should_clear_pending_after_manual_completion, store_manual_nxm_archive_after_security_gate,
+        ManualNxmArchiveStoreResult, OAuthRefreshFailure, ParsedNxmUrl, PendingNexusManualDownload,
     };
+    #[cfg(not(target_os = "windows"))]
+    use super::{cleanup_nxm_runtime_registration, ensure_nxm_runtime_registration};
+    use crate::commands::mods::{
+        blocked_security_scan_report_for_test, install_security_scan_test_hook,
+    };
+    use crate::services::mods::ModsService;
+    use crate::services::settings::SettingsService;
     use serde_json::json;
+    use serial_test::serial;
 
     fn build_test_jwt(payload: serde_json::Value) -> String {
         use base64::Engine as _;
@@ -2911,5 +3193,323 @@ mod tests {
         assert!(!should_clear_pending_after_manual_completion(
             &runtime_selection
         ));
+
+        let security_confirmation = Ok(json!({
+            "success": false,
+            "securityScanConfirmationRequired": true,
+        }));
+        assert!(!should_clear_pending_after_manual_completion(
+            &security_confirmation
+        ));
+
+        let security_block = Ok(json!({
+            "success": false,
+            "securityScanBlocked": true,
+        }));
+        assert!(!should_clear_pending_after_manual_completion(
+            &security_block
+        ));
+    }
+
+    #[test]
+    fn pending_manual_download_requires_exact_game_mod_and_file_identity() {
+        let pending = PendingNexusManualDownload {
+            session_id: "session-a".to_string(),
+            kind: "install".to_string(),
+            game_id: "schedule1".to_string(),
+            mod_id: 42,
+            file_id: 99,
+            environment_id: Some("environment-a".to_string()),
+            runtime: None,
+            created_at: 1,
+        };
+        let matching = ParsedNxmUrl {
+            game_id: "schedule1".to_string(),
+            mod_id: 42,
+            file_id: 99,
+            key: "key".to_string(),
+            expires: "expires".to_string(),
+            user_id: "user".to_string(),
+        };
+        let wrong_file = ParsedNxmUrl {
+            file_id: 100,
+            ..matching.clone()
+        };
+        let wrong_game = ParsedNxmUrl {
+            game_id: "other-game".to_string(),
+            ..matching.clone()
+        };
+
+        assert!(pending_nxm_matches(&pending, &matching));
+        assert!(!pending_nxm_matches(&pending, &wrong_file));
+        assert!(!pending_nxm_matches(&pending, &wrong_game));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pending_session_b_is_rejected_until_session_a_clears() -> anyhow::Result<()> {
+        let (_temp, _guard, pool) =
+            crate::test_helpers::init_test_pool_with_temp_data_dir().await?;
+        let settings = SettingsService::new(pool)?;
+        let session_a = json!({
+            "sessionId": "session-a",
+            "kind": "library",
+            "gameId": "schedule1",
+            "modId": 42,
+            "fileId": 99,
+            "createdAt": 1,
+        });
+        assert!(
+            settings
+                .save_nexus_nxm_pending_download_if_absent(&session_a)
+                .await?
+        );
+        let observed_a: PendingNexusManualDownload = serde_json::from_value(
+            settings
+                .get_nexus_nxm_pending_download()
+                .await?
+                .expect("session A is pending"),
+        )?;
+
+        let session_b = json!({
+            "sessionId": "session-b",
+            "kind": "install",
+            "gameId": "schedule1",
+            "modId": 84,
+            "fileId": 100,
+            "environmentId": "environment-b",
+            "createdAt": 2,
+        });
+        assert!(
+            !settings
+                .save_nexus_nxm_pending_download_if_absent(&session_b)
+                .await?,
+            "session B must not overwrite the pending callback identity"
+        );
+
+        assert_eq!(
+            settings.get_nexus_nxm_pending_download().await?,
+            Some(session_a)
+        );
+
+        let cleared = settings
+            .clear_nexus_nxm_pending_download_if_identity(
+                &observed_a.session_id,
+                observed_a.created_at,
+            )
+            .await?;
+
+        assert!(cleared, "session A still owns the reserved slot");
+        assert!(settings.get_nexus_nxm_pending_download().await?.is_none());
+        assert!(
+            settings
+                .save_nexus_nxm_pending_download_if_absent(&session_b)
+                .await?
+        );
+        assert_eq!(
+            settings.get_nexus_nxm_pending_download().await?,
+            Some(session_b)
+        );
+        assert!(
+            settings
+                .clear_nexus_nxm_pending_download_if_identity("session-b", 2)
+                .await?
+        );
+        assert!(settings.get_nexus_nxm_pending_download().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn concurrent_manual_sessions_preserve_exactly_one_pending_identity() -> anyhow::Result<()>
+    {
+        let (_temp, _guard, pool) =
+            crate::test_helpers::init_test_pool_with_temp_data_dir().await?;
+
+        // Initialize the per-installation encryption key before racing the
+        // database reservation itself.
+        let warmup_settings = SettingsService::new(pool.clone())?;
+        let warmup = json!({
+            "sessionId": "warmup",
+            "kind": "library",
+            "gameId": "schedule1",
+            "modId": 1,
+            "fileId": 1,
+            "createdAt": 0,
+        });
+        assert!(
+            warmup_settings
+                .save_nexus_nxm_pending_download_if_absent(&warmup)
+                .await?
+        );
+        warmup_settings.clear_nexus_nxm_pending_download().await?;
+
+        let session_a = json!({
+            "sessionId": "session-a",
+            "kind": "library",
+            "gameId": "schedule1",
+            "modId": 42,
+            "fileId": 99,
+            "createdAt": 1,
+        });
+        let session_b = json!({
+            "sessionId": "session-b",
+            "kind": "install",
+            "gameId": "schedule1",
+            "modId": 84,
+            "fileId": 100,
+            "environmentId": "environment-b",
+            "createdAt": 2,
+        });
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+        let task_a = {
+            let settings = SettingsService::new(pool.clone())?;
+            let barrier = barrier.clone();
+            let pending = session_a.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                settings
+                    .save_nexus_nxm_pending_download_if_absent(&pending)
+                    .await
+            })
+        };
+        let task_b = {
+            let settings = SettingsService::new(pool.clone())?;
+            let barrier = barrier.clone();
+            let pending = session_b.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                settings
+                    .save_nexus_nxm_pending_download_if_absent(&pending)
+                    .await
+            })
+        };
+        barrier.wait().await;
+        let reserved_a = task_a.await??;
+        let reserved_b = task_b.await??;
+
+        assert_ne!(
+            reserved_a, reserved_b,
+            "exactly one start must reserve the slot"
+        );
+        let expected = if reserved_a { session_a } else { session_b };
+        assert_eq!(
+            warmup_settings.get_nexus_nxm_pending_download().await?,
+            Some(expected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nexus_temp_archives_are_unique_and_keep_untrusted_filename_as_one_component() {
+        let first = nexus_temp_archive_path("library", 42, 99, "../../mod archive.zip");
+        let second = nexus_temp_archive_path("library", 42, 99, "../../mod archive.zip");
+
+        assert_ne!(first, second);
+        let temp_dir = std::env::temp_dir();
+        assert_eq!(first.parent(), Some(temp_dir.as_path()));
+        let name = first.file_name().unwrap().to_string_lossy();
+        assert!(!name.contains('/'));
+        assert!(!name.contains('\\'));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn manual_nxm_gate_blocks_once_before_library_storage_materialization(
+    ) -> anyhow::Result<()> {
+        let (temp, _guard, pool) = crate::test_helpers::init_test_pool_with_temp_data_dir().await?;
+        let download_dir = temp.path().join("downloads");
+        let mut settings = SettingsService::default_settings();
+        settings.default_download_dir = download_dir.to_string_lossy().to_string();
+        let archive_path = temp.path().join("blocked-manual-nxm.zip");
+        tokio::fs::write(&archive_path, b"manual-nxm").await?;
+        let scan_hook = install_security_scan_test_hook(
+            archive_path.to_string_lossy().to_string(),
+            blocked_security_scan_report_for_test(),
+        );
+        let mods_service = ModsService::new(pool);
+
+        let result = store_manual_nxm_archive_after_security_gate(
+            &settings,
+            &mods_service,
+            &archive_path,
+            "blocked-manual-nxm.zip",
+            Some(crate::types::Runtime::Il2cpp),
+            json!({ "source": "nexusmods", "sourceId": "42" }),
+            false,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert!(matches!(
+            result,
+            ManualNxmArchiveStoreResult::EarlyResponse(_)
+        ));
+        assert_eq!(scan_hook.call_count(), 1);
+        assert!(!archive_path.exists());
+        assert!(!download_dir.join("Mods").exists());
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_desktop_id_matching_accepts_simm_handlers() {
+        assert!(linux_desktop_id_looks_like_simm(
+            "Schedule I Mod Manager.desktop"
+        ));
+        assert!(linux_desktop_id_looks_like_simm(
+            "schedule-i-mod-manager.desktop"
+        ));
+        assert!(linux_desktop_id_looks_like_simm(
+            "com.s1devenvmanager.app.desktop"
+        ));
+        assert!(linux_desktop_id_looks_like_simm("simmrust.desktop"));
+        assert!(linux_desktop_id_looks_like_simm("simm.desktop"));
+        assert!(!linux_desktop_id_looks_like_simm("vortex.desktop"));
+        assert!(!linux_desktop_id_looks_like_simm("nexusmods-app.desktop"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    #[serial]
+    async fn non_windows_nxm_runtime_registration_keeps_protocol_backup_under_tauri_control(
+    ) -> anyhow::Result<()> {
+        let (_temp, _guard, pool) =
+            crate::test_helpers::init_test_pool_with_temp_data_dir().await?;
+        let settings = SettingsService::new(pool.clone())?;
+        let backup = json!({
+            "owner": "desktop-environment",
+            "scheme": "nxm"
+        });
+        settings.save_nexus_nxm_protocol_backup(&backup).await?;
+        assert!(
+            settings
+                .save_nexus_nxm_pending_download_if_absent(&json!({
+                    "sessionId": "pending",
+                    "kind": "library",
+                    "gameId": "schedule1",
+                    "modId": 1,
+                    "fileId": 2,
+                    "createdAt": 1
+                }))
+                .await?
+        );
+
+        ensure_nxm_runtime_registration(pool.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        cleanup_nxm_runtime_registration(pool.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        assert!(settings.get_nexus_nxm_pending_download().await?.is_none());
+        assert_eq!(
+            settings.get_nexus_nxm_protocol_backup().await?,
+            Some(backup)
+        );
+
+        Ok(())
     }
 }

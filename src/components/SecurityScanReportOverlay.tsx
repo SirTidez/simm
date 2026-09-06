@@ -49,6 +49,7 @@ const severityOrder: Record<Severity, number> = {
 };
 
 const filterOptions: Array<Severity | 'All'> = ['All', 'Critical', 'High', 'Medium', 'Low'];
+const emptyFindings: Finding[] = [];
 
 const summaryStyles = {
   verified: {
@@ -216,7 +217,7 @@ export function SecurityScanReportView({
   const files = activeReport?.files || [];
   const activeFile = files[activeFileIndex] || files[0] || null;
   const activeResult = activeFile?.result || null;
-  const findings = activeResult?.findings || [];
+  const findings = activeResult?.findings ?? emptyFindings;
   const families = activeResult?.threatFamilies || [];
 
   const filteredFindings = useMemo(() => {
@@ -323,14 +324,14 @@ export function SecurityScanReportView({
                   {busy ? 'Working...' : confirmLabel}
                 </SimmButton>
               )}
-              <SimmButton className="btn btn-secondary btn-small" onClick={onClose}>
+              <SimmButton className="btn btn-secondary btn-small" onClick={onClose} disabled={busy}>
                 <Icon name="fas fa-arrow-left" />
                 Back
               </SimmButton>
             </>
           )}
           {showCloseActions && (
-            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose}>×</SimmButton>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} disabled={busy}>×</SimmButton>
           )}
         </div>
 
@@ -719,7 +720,7 @@ export function SecurityScanReportView({
             }}
           >
             {showCloseActions && (
-              <SimmButton className="btn btn-secondary" onClick={onClose}>
+              <SimmButton className="btn btn-secondary" onClick={onClose} disabled={busy}>
                 Close
               </SimmButton>
             )}
@@ -736,7 +737,7 @@ export function SecurityScanReportView({
   if (presentation === 'overlay') {
     return (
       <Dialog open={open} onOpenChange={(nextOpen) => {
-        if (!nextOpen) {
+        if (!nextOpen && !busy) {
           onClose?.();
         }
       }}>

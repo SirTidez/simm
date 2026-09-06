@@ -6,10 +6,10 @@ use std::path::PathBuf;
 /// Creates: home/SIMM/{downloads, backups, logs, depots}
 /// Returns: (directory_path, was_just_created)
 pub fn initialize_simm_directory() -> Result<(PathBuf, bool)> {
-    let home_dir = resolve_home_dir()?;
+    initialize_simm_directory_at(resolve_data_dir()?)
+}
 
-    let simm_dir = home_dir.join("SIMM");
-
+fn initialize_simm_directory_at(simm_dir: PathBuf) -> Result<(PathBuf, bool)> {
     // Check if directory already exists
     let was_just_created = !simm_dir.exists();
 
@@ -34,12 +34,24 @@ pub fn initialize_simm_directory() -> Result<(PathBuf, bool)> {
 
 /// Get the depots directory path
 pub fn get_depots_dir() -> Result<PathBuf> {
-    let home_dir = resolve_home_dir()?;
-
-    let depots_dir = home_dir.join("SIMM").join("depots");
+    let depots_dir = resolve_data_dir()?.join("depots");
     std::fs::create_dir_all(&depots_dir).context("Failed to create depots directory")?;
 
     Ok(depots_dir)
+}
+
+/// Resolves the single owner for every SIMM-managed artifact.  `SIMMRUST_DATA_DIR`
+/// is intentionally the complete data root (not its parent), so portable runs do
+/// not split database state from logs, depots, credentials, or backups.
+fn resolve_data_dir() -> Result<PathBuf> {
+    if let Ok(override_dir) = env::var("SIMMRUST_DATA_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    Ok(resolve_home_dir()?.join("SIMM"))
 }
 
 fn resolve_home_dir() -> Result<PathBuf> {
@@ -83,23 +95,36 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn initialize_simm_directory_creates_structure() -> Result<()> {
         let temp = tempdir()?;
-        let _guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let expected_dir = temp.path().join("SIMM");
 
-        let (simm_dir, was_created) = initialize_simm_directory()?;
+        let (simm_dir, was_created) = initialize_simm_directory_at(expected_dir.clone())?;
         assert!(was_created);
-        assert!(simm_dir.ends_with("SIMM"));
+        assert_eq!(simm_dir, expected_dir);
         assert!(simm_dir.join("downloads").exists());
         assert!(simm_dir.join("backups").exists());
         assert!(simm_dir.join("logs").exists());
         assert!(simm_dir.join("depots").exists());
         assert!(simm_dir.join("Mods").exists());
 
-        let (_, was_created_again) = initialize_simm_directory()?;
+        let (_, was_created_again) = initialize_simm_directory_at(simm_dir)?;
         assert!(!was_created_again);
 
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn data_dir_override_is_the_complete_directory_root() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("portable-state");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let (simm_dir, _) = initialize_simm_directory()?;
+        assert_eq!(simm_dir, override_dir);
+        assert!(simm_dir.join("logs").is_dir());
+        assert_eq!(get_depots_dir()?, override_dir.join("depots"));
         Ok(())
     }
 }

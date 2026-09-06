@@ -65,13 +65,8 @@ ${StrLoc}
 !define STARTMENUFOLDER "{{start_menu_folder}}"
 !define PREREQ_VCREDIST_NAME "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
 !define PREREQ_VCREDIST_FILENAME "vc_redist.x64.exe"
-!define PREREQ_VCREDIST_URL "https://aka.ms/vs/16/release/vc_redist.x64.exe"
+!define PREREQ_VCREDIST_URL "https://aka.ms/vc14/vc_redist.x64.exe"
 !define PREREQ_VCREDIST_ARGS "/install /quiet /norestart"
-!define PREREQ_DOTNET_NAME ".NET Desktop Runtime 6.0.19 (x64)"
-!define PREREQ_DOTNET_VERSION_PREFIX "6.0."
-!define PREREQ_DOTNET_FILENAME "windowsdesktop-runtime-6.0.19-win-x64.exe"
-!define PREREQ_DOTNET_URL "https://dotnetcli.azureedge.net/dotnet/WindowsDesktop/6.0.19/windowsdesktop-runtime-6.0.19-win-x64.exe"
-!define PREREQ_DOTNET_ARGS "/install /quiet /norestart"
 !define PREREQ_DEPOTDOWNLOADER_WINGET_ID "SteamRE.DepotDownloader"
 !define PREREQ_DEPOTDOWNLOADER_WINGET_ARGS "install --exact --id SteamRE.DepotDownloader --accept-package-agreements --accept-source-agreements --disable-interactivity"
 !define PREREQ_CACHE_DIR "$TEMP\\SIMM-Prerequisites"
@@ -84,7 +79,6 @@ Var OldMainBinaryName
 Var PrereqPage
 Var PrereqSummaryLabel
 Var PrereqVCRedistLabel
-Var PrereqDotNetLabel
 Var PrereqDepotDownloaderLabel
 Var PrereqRetryButton
 Var PrereqNextButton
@@ -897,6 +891,11 @@ Section Uninstall
     SetShellVarContext current
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    ; SIMM's normal data root is intentionally separate from Tauri's bundle
+    ; paths. Delete the current user's default root only after an explicit
+    ; uninstall checkbox choice. Historical SIMMRUST_DATA_DIR overrides cannot
+    ; be inferred safely by an NSIS uninstaller and are left untouched.
+    RmDir /r "$PROFILE\SIMM"
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
@@ -940,19 +939,17 @@ Function PagePrerequisitesIntro
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 18u "Before SIMM installs, setup needs to confirm the Windows components used by MelonLoader, DepotDownloader, and admin-backed symlink operations."
+  ${NSD_CreateLabel} 0 0 100% 18u "Before SIMM installs, setup needs to confirm the Windows components used by MelonLoader, DepotDownloader, and managed mod operations."
   Pop $1
 
   ${NSD_CreateLabel} 0 28u 100% 12u "Required components:"
   Pop $1
   ${NSD_CreateLabel} 8u 42u 100% 12u "- Microsoft Visual C++ 2015-2022 Redistributable (x64)"
   Pop $1
-  ${NSD_CreateLabel} 8u 56u 100% 12u "- .NET Desktop Runtime 6 (x64)"
-  Pop $1
-  ${NSD_CreateLabel} 8u 70u 100% 12u "- DepotDownloader CLI"
+  ${NSD_CreateLabel} 8u 56u 100% 12u "- DepotDownloader CLI (official self-contained Windows package)"
   Pop $1
 
-  ${NSD_CreateLabel} 0 92u 100% 26u "On the next page, SIMM will check each dependency, download anything missing, and show a live installer log. The Continue button will stay disabled until every required dependency is verified."
+  ${NSD_CreateLabel} 0 80u 100% 26u "On the next page, SIMM will check each dependency, download anything missing, and show a live installer log. The Continue button will stay disabled until every required dependency is verified."
   Pop $1
 
   nsDialogs::Show
@@ -972,23 +969,20 @@ Function PagePrerequisites
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 14u "SIMM will check VC++ Runtime, .NET Desktop Runtime 6, and DepotDownloader here. Missing items will be installed automatically."
+  ${NSD_CreateLabel} 0 0 100% 14u "SIMM will check VC++ Runtime and DepotDownloader here. Missing items will be installed automatically."
   Pop $PrereqSummaryLabel
 
   ${NSD_CreateLabel} 0 20u 100% 12u "VC++ Runtime: Pending"
   Pop $PrereqVCRedistLabel
 
-  ${NSD_CreateLabel} 0 32u 100% 12u ".NET Desktop Runtime 6: Pending"
-  Pop $PrereqDotNetLabel
-
-  ${NSD_CreateLabel} 0 44u 100% 12u "DepotDownloader CLI: Pending"
+  ${NSD_CreateLabel} 0 32u 100% 12u "DepotDownloader CLI: Pending"
   Pop $PrereqDepotDownloaderLabel
 
-  ${NSD_CreateButton} 0 60u 118u 14u "Retry dependency check"
+  ${NSD_CreateButton} 0 48u 118u 14u "Retry dependency check"
   Pop $PrereqRetryButton
   ${NSD_OnClick} $PrereqRetryButton RetryPrerequisites
 
-  nsDialogs::CreateControl /NOUNLOAD "EDIT" ${DEFAULT_STYLES}|${WS_TABSTOP}|${ES_MULTILINE}|${ES_AUTOVSCROLL}|${ES_WANTRETURN}|${ES_READONLY}|${WS_VSCROLL} ${WS_EX_CLIENTEDGE} 0 78u 100% 90u "$PrereqLogBuffer"
+  nsDialogs::CreateControl /NOUNLOAD "EDIT" ${DEFAULT_STYLES}|${WS_TABSTOP}|${ES_MULTILINE}|${ES_AUTOVSCROLL}|${ES_WANTRETURN}|${ES_READONLY}|${WS_VSCROLL} ${WS_EX_CLIENTEDGE} 0 66u 100% 102u "$PrereqLogBuffer"
   Pop $PrereqConsole
   ${If} $PrereqConsoleFont == ""
     CreateFont $PrereqConsoleFont "$(^Font)" 7
@@ -1077,15 +1071,6 @@ Function SetVCRedistText
   Pop $0
 FunctionEnd
 
-Function SetDotNetText
-  Exch $0
-  ${If} $PrereqDotNetLabel != ""
-    ${NSD_SetText} $PrereqDotNetLabel "$0"
-  ${EndIf}
-  Call FlushInstallerWindow
-  Pop $0
-FunctionEnd
-
 Function SetDepotDownloaderText
   Exch $0
   ${If} $PrereqDepotDownloaderLabel != ""
@@ -1113,21 +1098,9 @@ Function EnsurePrerequisites
   Call EnsureVCRedist
   Pop $0
   ${If} $0 <> 1
-    Push ".NET Desktop Runtime 6: Skipped"
-    Call SetDotNetText
     Push "DepotDownloader CLI: Skipped"
     Call SetDepotDownloaderText
     Push "The VC++ runtime is still missing. Fix the issue and retry."
-    Call SetSummaryText
-    Goto prereq_done
-  ${EndIf}
-
-  Call EnsureDotNetDesktopRuntime
-  Pop $0
-  ${If} $0 <> 1
-    Push "DepotDownloader CLI: Skipped"
-    Call SetDepotDownloaderText
-    Push ".NET Desktop Runtime 6 is still missing. Fix the issue and retry."
     Call SetSummaryText
     Goto prereq_done
   ${EndIf}
@@ -1184,6 +1157,22 @@ Function EnsureVCRedist
   Push "Download complete: $PrereqCacheDir\${PREREQ_VCREDIST_FILENAME}"
   Call AppendPrereqLog
 
+  Push "Verifying the downloaded VC++ installer is valid and signed by Microsoft..."
+  Call AppendPrereqLog
+  Call VerifyVCRedistSignature
+  Pop $0
+  ${If} $0 <> 1
+    Delete "$PrereqCacheDir\${PREREQ_VCREDIST_FILENAME}"
+    Push "VC++ installer signature validation failed. The downloaded file will not be executed."
+    Call AppendPrereqLog
+    Push "VC++ Runtime: Failed signature check"
+    Call SetVCRedistText
+    Push 0
+    Return
+  ${EndIf}
+  Push "VC++ installer Authenticode signature is valid and belongs to Microsoft Corporation."
+  Call AppendPrereqLog
+
   Push "VC++ Runtime: Installing"
   Call SetVCRedistText
   Push "Running VC++ installer silently..."
@@ -1221,72 +1210,17 @@ Function EnsureVCRedist
   Push 0
 FunctionEnd
 
-Function EnsureDotNetDesktopRuntime
-  Push "Checking .NET Desktop Runtime 6 installation..."
-  Call AppendPrereqLog
-  Call DetectDotNetDesktopRuntime
+Function VerifyVCRedistSignature
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$path = Join-Path $$env:TEMP ''SIMM-Prerequisites\${PREREQ_VCREDIST_FILENAME}''; $$signature = Get-AuthenticodeSignature -LiteralPath $$path; if ($$signature.Status -ne ''Valid'' -or -not ($$signature.SignerCertificate.Subject.Split('','').Trim() -contains ''O=Microsoft Corporation'')) { exit 1 }"'
   Pop $0
-  ${If} $0 = 1
-    Push ".NET Desktop Runtime 6: Detected"
-    Call SetDotNetText
-    Push ".NET Desktop Runtime 6 detection succeeded."
-    Call AppendPrereqLog
+  Pop $1
+  ${If} $0 = 0
     Push 1
-    Return
-  ${EndIf}
-
-  Push ".NET Desktop Runtime 6: Downloading"
-  Call SetDotNetText
-  Push "Downloading ${PREREQ_DOTNET_URL}"
-  Call AppendPrereqLog
-  NSISdl::download "${PREREQ_DOTNET_URL}" "$PrereqCacheDir\${PREREQ_DOTNET_FILENAME}"
-  Pop $0
-  ${If} $0 != "success"
-    Push "Failed to download ${PREREQ_DOTNET_NAME}: $0"
+  ${Else}
+    Push "Authenticode verification output: $1"
     Call AppendPrereqLog
-    Push ".NET Desktop Runtime 6: Failed"
-    Call SetDotNetText
     Push 0
-    Return
   ${EndIf}
-  Push "Download complete: $PrereqCacheDir\${PREREQ_DOTNET_FILENAME}"
-  Call AppendPrereqLog
-
-  Push ".NET Desktop Runtime 6: Installing"
-  Call SetDotNetText
-  Push "Running .NET Desktop Runtime installer silently..."
-  Call AppendPrereqLog
-  ExecWait '"$PrereqCacheDir\${PREREQ_DOTNET_FILENAME}" ${PREREQ_DOTNET_ARGS}' $0
-  ${If} $0 <> 0
-  ${AndIf} $0 <> 3010
-    Push "${PREREQ_DOTNET_NAME} installer exited with code $0"
-    Call AppendPrereqLog
-    Push ".NET Desktop Runtime 6: Failed"
-    Call SetDotNetText
-    Push 0
-    Return
-  ${EndIf}
-  Push ".NET installer exit code: $0"
-  Call AppendPrereqLog
-
-  Push "Re-checking .NET Desktop Runtime 6 after install..."
-  Call AppendPrereqLog
-  Call DetectDotNetDesktopRuntime
-  Pop $0
-  ${If} $0 = 1
-    Push ".NET Desktop Runtime 6: Verified"
-    Call SetDotNetText
-    Push ".NET Desktop Runtime 6 verification succeeded."
-    Call AppendPrereqLog
-    Push 1
-    Return
-  ${EndIf}
-
-  Push "${PREREQ_DOTNET_NAME} installer finished but verification failed."
-  Call AppendPrereqLog
-  Push ".NET Desktop Runtime 6: Failed"
-  Call SetDotNetText
-  Push 0
 FunctionEnd
 
 Function EnsureDepotDownloader
@@ -1390,56 +1324,6 @@ Function DetectVCRedist
   detect_vc_done:
   ${If} $3 = 0
     Push "VC++ runtime was not detected."
-    Call AppendPrereqLog
-  ${EndIf}
-  Push $3
-FunctionEnd
-
-Function DetectDotNetDesktopRuntime
-  StrCpy $3 0
-
-  nsExec::ExecToStack '"$SYSDIR\cmd.exe" /C dotnet --list-runtimes'
-  Pop $0
-  Pop $1
-  Push "dotnet --list-runtimes exit code: $0"
-  Call AppendPrereqLog
-  ${If} $1 != ""
-    Push "dotnet --list-runtimes output: $1"
-    Call AppendPrereqLog
-  ${EndIf}
-  ${If} $0 == 0
-    ${StrLoc} $2 $1 "Microsoft.WindowsDesktop.App ${PREREQ_DOTNET_VERSION_PREFIX}" ">"
-    ${If} $2 != ""
-      Push "Matched .NET Desktop Runtime 6 via dotnet CLI."
-      Call AppendPrereqLog
-      StrCpy $3 1
-      Goto detect_dotnet_done
-    ${EndIf}
-  ${EndIf}
-
-  SetRegView 64
-  IfFileExists "$PROGRAMFILES64\dotnet\shared\Microsoft.WindowsDesktop.App\${PREREQ_DOTNET_VERSION_PREFIX}*" 0 +3
-    Push "Matched .NET Desktop Runtime 6 in Program Files shared runtime folder."
-    Call AppendPrereqLog
-    StrCpy $3 1
-    Goto detect_dotnet_done
-
-  StrCpy $0 0
-  detect_dotnet_reg_loop:
-    EnumRegValue $1 HKLM "SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App" $0
-    StrCmp $1 "" detect_dotnet_done
-    IntOp $0 $0 + 1
-    ${StrLoc} $2 $1 "${PREREQ_DOTNET_VERSION_PREFIX}" ">"
-    ${If} $2 == ""
-      Goto detect_dotnet_reg_loop
-    ${EndIf}
-    Push "Matched .NET Desktop Runtime 6 registry value: $1"
-    Call AppendPrereqLog
-    StrCpy $3 1
-
-  detect_dotnet_done:
-  ${If} $3 = 0
-    Push ".NET Desktop Runtime 6 was not detected."
     Call AppendPrereqLog
   ${EndIf}
   Push $3

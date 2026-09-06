@@ -1,4 +1,4 @@
-import { useState, useEffect, useId, useRef } from "react";
+import { useState, useEffect, useId, useRef, useCallback } from "react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useEnvironmentStore } from "../stores/environmentStore";
 import { ApiService } from "../services/api";
@@ -6,8 +6,14 @@ import {
   batchUpdateCheckRef,
   lastUpdateCheckTimeRef,
   notifyBatchUpdateCheckStarted,
-} from "./EnvironmentList";
-import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
+} from "../services/updateCheckCoordinator";
+import type {
+  CustomThemeDefinition,
+  LinuxReadinessCheckStatus,
+  LinuxReadinessStatus,
+  SecurityScannerStatus,
+  TelemetryPreferences,
+} from "../types";
 import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
@@ -87,6 +93,82 @@ function getActiveBuiltInTheme(
   return BUILT_IN_THEME_OPTIONS.find((theme) => theme.id === selectedThemeId)?.id || "modern-blue";
 }
 
+function TelemetrySettingsPanel() {
+  const [preferences, setPreferences] = useState<TelemetryPreferences | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    const loadPreferences = ApiService.getTelemetryPreferences;
+    if (typeof loadPreferences === 'function') {
+      void loadPreferences().then(setPreferences).catch((error) => {
+        setFeedback(error instanceof Error ? error.message : 'Failed to load telemetry preferences.');
+      });
+    }
+  }, []);
+  const save = async (updates: Partial<TelemetryPreferences>) => {
+    const savePreferences = ApiService.saveTelemetryPreferences;
+    if (typeof savePreferences === 'function') {
+      setSaving(true);
+      try {
+        const next = await savePreferences(updates);
+        setPreferences(next);
+        setFeedback('Telemetry preference saved.');
+      } catch (error) {
+        setFeedback(error instanceof Error ? error.message : 'Failed to save telemetry preference.');
+      } finally {
+        setSaving(false);
+      }
+    }
+  };
+  return (
+    <div className="settings-subsection">
+      <div className="settings-subsection__header">
+        <div>
+          <span className="settings-section__eyebrow">Live Telemetry</span>
+          <h3><Icon name="waveSquare" /> Local diagnostic collection</h3>
+        </div>
+        <p>Collection stays on this device until you review an export preview. SIMM never uploads from these controls.</p>
+      </div>
+      <div className="settings-field-grid">
+        <div className="settings-field settings-field--toggle"><SettingsToggle label="Collect local telemetry" description="Monitor warnings and errors while a registered Schedule I environment is running." checked={preferences?.collectionEnabled ?? false} onChange={(collectionEnabled) => void save({ collectionEnabled })} /></div>
+        <div className="settings-field settings-field--toggle"><SettingsToggle label="Permit sanitized diagnostic excerpts" description="Always send structured error identity. When you enable this, reviewed uploads may also retain a bounded, sanitized readable excerpt for administrator diagnosis." checked={preferences?.errorExcerptsEnabled ?? false} onChange={(errorExcerptsEnabled) => void save({ errorExcerptsEnabled })} /></div>
+        <div className="settings-field settings-field--compact"><label>Local retention</label><SettingsSelect ariaLabel="Telemetry retention" value={String(preferences?.retentionDays ?? 30)} onValueChange={(value) => void save({ retentionDays: Number(value) })} options={[{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }, { value: '90', label: '90 days' }]} /></div>
+      </div>
+      {feedback && <p className="settings-inline-feedback" role={feedback.includes('Failed') || feedback.includes('not available') ? 'alert' : 'status'}>{feedback}</p>}
+      {saving && <p className="settings-inline-feedback" role="status">Saving telemetry preference…</p>}
+    </div>
+  );
+}
+
+function WindowBehaviorSettingsPanel() {
+  const { settings, updateSettings, loading } = useSettingsStore();
+
+  return (
+    <div className="settings-subsection">
+      <div className="settings-subsection__header">
+        <div>
+          <span className="settings-section__eyebrow">Application behavior</span>
+          <h3><Icon name="times" /> When SIMM closes</h3>
+        </div>
+        <p>Choose whether closing the main window asks for a decision, keeps SIMM available in the tray, or exits the application.</p>
+      </div>
+      <div className="settings-field-grid">
+        <div className="settings-field settings-field--compact">
+          <label>Window close behavior</label>
+          <SettingsSelect
+            ariaLabel="Window close behavior"
+            value={settings?.windowCloseBehavior ?? 'ask'}
+            onValueChange={(windowCloseBehavior) => void updateSettings({ windowCloseBehavior: windowCloseBehavior as 'ask' | 'tray' | 'quit' })}
+            disabled={loading}
+            options={[{ value: 'ask', label: 'Ask every time' }, { value: 'tray', label: 'Hide to tray' }, { value: 'quit', label: 'Quit SIMM' }]}
+          />
+          <small>This setting is independent of local telemetry collection.</small>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function normalizeModIconCacheLimitMb(value: unknown): number {
   const parsed =
     typeof value === "number"
@@ -152,11 +234,40 @@ function extractReleaseApiLastUpdated(
   return null;
 }
 
+function getReadinessStatusLabel(status: LinuxReadinessCheckStatus): string {
+  switch (status) {
+    case "ready":
+      return "Ready";
+    case "warning":
+      return "Needs Review";
+    case "missing":
+      return "Missing";
+    case "unknown":
+      return "Unknown";
+    case "notApplicable":
+      return "Not Applicable";
+    default:
+      return status;
+  }
+}
+
+function getReadinessTone(status: LinuxReadinessCheckStatus): "online" | "offline" | "checking" {
+  if (status === "ready") {
+    return "online";
+  }
+
+  if (status === "missing") {
+    return "offline";
+  }
+
+  return "checking";
+}
+
 function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
   return {
     defaultDownloadDir: settings.defaultDownloadDir || "",
     maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
-    platform: "windows",
+    platform: settings.platform ?? "windows",
     language: "english",
     theme: settings.theme || "modern-blue",
     melonLoaderVersion: settings.melonLoaderVersion || "",
@@ -168,7 +279,7 @@ function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
     showSecurityScanBadges: settings.showSecurityScanBadges ?? true,
     updateCheckInterval: settings.updateCheckInterval || 60,
     autoCheckUpdates: settings.autoCheckUpdates !== false,
-    appUpdateChannel: settings.appUpdate?.channel ?? "beta",
+    appUpdateChannel: settings.appUpdate?.channel ?? "stable",
     logLevel:
       (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
     modIconCacheLimitMb: normalizeModIconCacheLimitMb(
@@ -309,6 +420,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const [releaseApiError, setReleaseApiError] = useState<string | null>(null);
   const [checkingReleaseApi, setCheckingReleaseApi] = useState(false);
   const [backingUpDatabase, setBackingUpDatabase] = useState(false);
+  const [repairingDatabase, setRepairingDatabase] = useState(false);
   const [openingBackupsFolder, setOpeningBackupsFolder] = useState(false);
   const [databaseBackupFeedback, setDatabaseBackupFeedback] = useState<{
     tone: "success" | "error";
@@ -333,7 +445,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
-    appUpdateChannel: "beta",
+    appUpdateChannel: "stable",
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
@@ -341,6 +453,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     showAdvancedGameTools: true,
   });
   const [error, setError] = useState<string | null>(null);
+  const [telemetryAvailable, setTelemetryAvailable] = useState<boolean | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [directoryPath, setDirectoryPath] = useState("");
   const [directoryList, setDirectoryList] = useState<
@@ -359,9 +472,52 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     useState(false);
   const [installingSecurityScanner, setInstallingSecurityScanner] =
     useState(false);
+  const [linuxReadinessStatus, setLinuxReadinessStatus] =
+    useState<LinuxReadinessStatus | null>(null);
+  const [loadingLinuxReadiness, setLoadingLinuxReadiness] = useState(false);
+  const [repairingLinuxDesktopIntegration, setRepairingLinuxDesktopIntegration] =
+    useState(false);
+  const [linuxReadinessFeedback, setLinuxReadinessFeedback] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
   const [openingThemesFolder, setOpeningThemesFolder] = useState(false);
   const [reloadingThemes, setReloadingThemes] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveRef = useRef<SettingsFormData | null>(null);
+  const persistedFormDataRef = useRef<SettingsFormData | null>(null);
+  const skipNextAutoSaveRef = useRef(false);
+  const formDataRef = useRef(formData);
+  const settingsRef = useRef(settings);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    formDataRef.current = formData;
+  }, [formData]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => () => {
+    isMountedRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!isOpen) return () => { disposed = true; };
+
+    void ApiService.getTelemetryCapability()
+      .then((capability) => {
+        if (!disposed) setTelemetryAvailable(capability.available);
+      })
+      .catch(() => {
+        // Settings should not expose actions the backend says it cannot serve.
+        if (!disposed) setTelemetryAvailable(false);
+      });
+    return () => { disposed = true; };
+  }, [isOpen]);
 
   const runCheckAllUpdates = async () => {
     try {
@@ -408,6 +564,23 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   useEffect(() => {
     if (settings) {
       const nextFormData = buildFormDataFromSettings(settings);
+      const currentFormData = formDataRef.current;
+      const previousPersisted = persistedFormDataRef.current;
+
+      // A settings-store refresh can arrive after the user has made a newer
+      // local edit. Never replace that draft with the older response.
+      if (
+        previousPersisted
+        && !areFormDataEqual(currentFormData, previousPersisted)
+        && !areFormDataEqual(currentFormData, nextFormData)
+      ) {
+        return;
+      }
+
+      persistedFormDataRef.current = nextFormData;
+      if (!areFormDataEqual(currentFormData, nextFormData)) {
+        skipNextAutoSaveRef.current = true;
+      }
       setFormData((current) =>
         areFormDataEqual(current, nextFormData) ? current : nextFormData,
       );
@@ -473,70 +646,132 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
   }, [isOpen]);
 
-  // Auto-save with debouncing
   useEffect(() => {
-    if (!settings) return; // Don't save on initial load
-
-    const currentPersistedFormData = buildFormDataFromSettings(settings);
-    if (areFormDataEqual(formData, currentPersistedFormData)) {
+    if (!isOpen || settings?.platform !== "linux") {
+      setLinuxReadinessStatus(null);
       return;
     }
 
-    // Clear existing timeout
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
+    setLoadingLinuxReadiness(true);
+    setLinuxReadinessFeedback(null);
+    ApiService.getLinuxReadinessStatus()
+      .then((status) => {
+        setLinuxReadinessStatus(status);
+      })
+      .catch((err) => {
+        console.error("Failed to load Linux readiness status:", err);
+        setLinuxReadinessStatus(null);
+        setLinuxReadinessFeedback({
+          tone: "error",
+          message:
+            err instanceof Error
+              ? err.message
+              : "Failed to load Linux readiness status",
+        });
+      })
+      .finally(() => {
+        setLoadingLinuxReadiness(false);
+      });
+  }, [isOpen, settings?.platform]);
+
+  const enqueueSettingsSave = useCallback((snapshot: SettingsFormData) => {
+    const persisted = persistedFormDataRef.current;
+    if (!settingsRef.current || (persisted && areFormDataEqual(snapshot, persisted))) {
+      return;
     }
 
-    // Set new timeout to save after 500ms of no changes
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        setError(null);
-        // Always set platform to 'windows' and language to 'english' since they're not user-configurable
-        const normalizedFormData = {
-          defaultDownloadDir: formData.defaultDownloadDir,
-          maxConcurrentDownloads: formData.maxConcurrentDownloads,
-          theme: formData.theme,
-          melonLoaderVersion: formData.melonLoaderVersion,
-          autoInstallMelonLoader: formData.autoInstallMelonLoader,
-          enableSecurityScanner: formData.enableSecurityScanner,
-          autoInstallSecurityScanner: formData.autoInstallSecurityScanner,
-          blockCriticalScans: formData.blockCriticalScans,
-          promptOnHighScans: formData.promptOnHighScans,
-          showSecurityScanBadges: formData.showSecurityScanBadges,
-          updateCheckInterval: formData.updateCheckInterval,
-          autoCheckUpdates: formData.autoCheckUpdates,
-          appUpdate: {
-            ...(settings?.appUpdate ?? {}),
-            channel: formData.appUpdateChannel,
-          },
-          logLevel: formData.logLevel,
-          modIconCacheLimitMb: normalizeModIconCacheLimitMb(
-            formData.modIconCacheLimitMb,
-          ),
-          databaseBackupCount: normalizeDatabaseBackupCount(
-            formData.databaseBackupCount,
-          ),
-          experienceMode: formData.experienceMode,
-          showAdvancedGameTools: formData.showAdvancedGameTools,
-          setupGuideCompleted: true,
-          platform: "windows" as const,
-          language: "english",
-        };
-        await updateSettings(normalizedFormData);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to save settings",
-        );
-      }
+    saveQueueRef.current = saveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const settingsSnapshot = settingsRef.current;
+        if (!settingsSnapshot) return;
+
+        try {
+          if (isMountedRef.current) setError(null);
+          // Platform and language are not user-configurable here, but they
+          // must preserve the backend defaults for the host OS.
+          await updateSettings({
+            defaultDownloadDir: snapshot.defaultDownloadDir,
+            maxConcurrentDownloads: snapshot.maxConcurrentDownloads,
+            theme: snapshot.theme,
+            melonLoaderVersion: snapshot.melonLoaderVersion,
+            autoInstallMelonLoader: snapshot.autoInstallMelonLoader,
+            enableSecurityScanner: snapshot.enableSecurityScanner,
+            autoInstallSecurityScanner: snapshot.autoInstallSecurityScanner,
+            blockCriticalScans: snapshot.blockCriticalScans,
+            promptOnHighScans: snapshot.promptOnHighScans,
+            showSecurityScanBadges: snapshot.showSecurityScanBadges,
+            updateCheckInterval: snapshot.updateCheckInterval,
+            autoCheckUpdates: snapshot.autoCheckUpdates,
+            appUpdate: {
+              ...(settingsSnapshot.appUpdate ?? {}),
+              channel: snapshot.appUpdateChannel,
+            },
+            logLevel: snapshot.logLevel,
+            modIconCacheLimitMb: normalizeModIconCacheLimitMb(snapshot.modIconCacheLimitMb),
+            databaseBackupCount: normalizeDatabaseBackupCount(snapshot.databaseBackupCount),
+            experienceMode: snapshot.experienceMode,
+            showAdvancedGameTools: snapshot.showAdvancedGameTools,
+            setupGuideCompleted: true,
+            platform: snapshot.platform,
+            language: "english",
+          });
+          persistedFormDataRef.current = snapshot;
+        } catch (err) {
+          if (isMountedRef.current) {
+            setError(err instanceof Error ? err.message : "Failed to save settings");
+          }
+        }
+      });
+  }, [updateSettings]);
+
+  const flushPendingSettingsSave = useCallback(() => {
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    const snapshot = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    if (snapshot) enqueueSettingsSave(snapshot);
+  }, [enqueueSettingsSave]);
+
+  // Auto-save with debouncing. Keep the pending snapshot in a ref so closing
+  // or unmounting Settings flushes it instead of silently dropping the edit.
+  useEffect(() => {
+    if (!settings || !isOpen) return;
+
+    if (skipNextAutoSaveRef.current) {
+      skipNextAutoSaveRef.current = false;
+      return;
+    }
+
+    const currentPersistedFormData = persistedFormDataRef.current ?? buildFormDataFromSettings(settings);
+    if (areFormDataEqual(formData, currentPersistedFormData)) return;
+
+    pendingSaveRef.current = formData;
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      const snapshot = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (snapshot) enqueueSettingsSave(snapshot);
     }, 500);
 
-    // Cleanup on unmount
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
       }
     };
-  }, [formData, settings, updateSettings]);
+  }, [enqueueSettingsSave, formData, isOpen, settings]);
+
+  useEffect(() => {
+    if (!isOpen) flushPendingSettingsSave();
+  }, [flushPendingSettingsSave, isOpen]);
+
+  useEffect(() => () => {
+    flushPendingSettingsSave();
+  }, [flushPendingSettingsSave]);
 
   const getParentPath = (currentPath: string): string | null => {
     if (!currentPath) return null;
@@ -624,7 +859,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     setNewFolderName("");
   };
 
-  const depotStatusLabel = depotDownloader ? "Installed" : "Missing";
+  const depotInstalled = depotDownloader?.installed === true;
+  const depotStatusLabel = depotInstalled ? "Installed" : "Missing";
   const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
   const releaseApiTone = checkingReleaseApi
     ? "checking"
@@ -636,11 +872,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     : releaseApiError
       ? "Offline"
       : "Online";
-  const depotStatusDetail = depotDownloader
+  const depotStatusDetail = depotInstalled
     ? depotDownloader.method
       ? `Managed via ${depotDownloader.method}`
       : "Managed automatically for advanced branch installs"
-    : "Installed automatically when advanced branch installs need it";
+    : depotDownloader?.installHint || "Install DepotDownloader before using advanced branch installs";
   const releaseApiDetail = checkingReleaseApi
     ? "Checking release metadata"
     : releaseApiError
@@ -648,6 +884,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       : releaseApiLastUpdated
         ? `Last updated ${releaseApiLastUpdated}`
         : "Release metadata available";
+  const linuxReadinessSummary = linuxReadinessStatus
+    ? getReadinessStatusLabel(linuxReadinessStatus.summary)
+    : loadingLinuxReadiness
+      ? "Checking"
+      : "Unavailable";
+  const linuxReadinessTone = linuxReadinessStatus
+    ? getReadinessTone(linuxReadinessStatus.summary)
+    : loadingLinuxReadiness
+      ? "checking"
+      : "offline";
 
   const handleBackupDatabase = async () => {
     try {
@@ -672,9 +918,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const handleOpenBackupsFolder = async () => {
     try {
       setOpeningBackupsFolder(true);
-      const homeDirectory = await ApiService.getHomeDirectory();
-      const normalizedHome = homeDirectory.replace(/[\\/]+$/, "");
-      await ApiService.openPath(`${normalizedHome}\\backups`);
+      const backupsDirectory = await ApiService.getBackupsDirectory();
+      await ApiService.openPath(backupsDirectory);
     } catch (err) {
       setDatabaseBackupFeedback({
         tone: "error",
@@ -685,6 +930,25 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
     } finally {
       setOpeningBackupsFolder(false);
+    }
+  };
+
+  const handleRepairDatabase = async () => {
+    try {
+      setRepairingDatabase(true);
+      setDatabaseBackupFeedback(null);
+      const result = await ApiService.repairDatabase();
+      setDatabaseBackupFeedback({
+        tone: "success",
+        message: `Database repair completed. Backup created at ${result.backupPath}`,
+      });
+    } catch (err) {
+      setDatabaseBackupFeedback({
+        tone: "error",
+        message: err instanceof Error ? err.message : "Failed to repair the database",
+      });
+    } finally {
+      setRepairingDatabase(false);
     }
   };
 
@@ -729,6 +993,48 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
     } finally {
       setReloadingThemes(false);
+    }
+  };
+
+  const handleRefreshLinuxReadiness = async () => {
+    try {
+      setLoadingLinuxReadiness(true);
+      setLinuxReadinessFeedback(null);
+      const status = await ApiService.getLinuxReadinessStatus();
+      setLinuxReadinessStatus(status);
+    } catch (err) {
+      setLinuxReadinessFeedback({
+        tone: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to refresh Linux readiness status",
+      });
+    } finally {
+      setLoadingLinuxReadiness(false);
+    }
+  };
+
+  const handleRepairLinuxDesktopIntegration = async () => {
+    try {
+      setRepairingLinuxDesktopIntegration(true);
+      setLinuxReadinessFeedback(null);
+      const status = await ApiService.repairLinuxDesktopIntegration();
+      setLinuxReadinessStatus(status);
+      setLinuxReadinessFeedback({
+        tone: "success",
+        message: "Re-registered SIMM desktop links for this executable.",
+      });
+    } catch (err) {
+      setLinuxReadinessFeedback({
+        tone: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to repair Linux desktop links",
+      });
+    } finally {
+      setRepairingLinuxDesktopIntegration(false);
     }
   };
 
@@ -1019,6 +1325,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                 <hr className="settings-divider" />
 
+                <WindowBehaviorSettingsPanel />
+
+                {telemetryAvailable && <>
+                  <hr className="settings-divider" />
+
+                  <TelemetrySettingsPanel />
+                </>}
+
+                <hr className="settings-divider" />
+
                 <div className="settings-subsection">
                   <div className="settings-subsection__header">
                     <div>
@@ -1162,6 +1478,80 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </SimmButton>
                     </div>
                   </div>
+
+                  {formData.platform === "linux" && (
+                    <div className="settings-inline-status-grid">
+                      <div className="settings-inline-status">
+                        <span>Linux Readiness</span>
+                        <strong>{linuxReadinessSummary}</strong>
+                        <small>
+                          Steam, Protontricks, DepotDownloader, MLVScan, and desktop link checks for Linux parity.
+                        </small>
+                      </div>
+                      {(linuxReadinessStatus?.checks ?? []).map((check) => (
+                        <div className="settings-inline-status" key={check.id}>
+                          <span>{check.label}</span>
+                          <strong>
+                            {getReadinessStatusLabel(check.status)}
+                          </strong>
+                          <small title={check.path || check.command || undefined}>
+                            {check.detail}
+                          </small>
+                        </div>
+                      ))}
+                      {(linuxReadinessStatus?.schemeHandlers ?? []).map((scheme) => (
+                        <div className="settings-inline-status" key={scheme.scheme}>
+                          <span>{scheme.scheme}:// handler</span>
+                          <strong>{scheme.ready ? "SIMM" : "Needs Repair"}</strong>
+                          <small title={scheme.handler || undefined}>
+                            {scheme.detail}
+                          </small>
+                        </div>
+                      ))}
+                      <div className="settings-inline-status settings-inline-status--action">
+                        <span>Linux Actions</span>
+                        <strong>
+                          <span
+                            className={`settings-status-pill settings-status-pill--${linuxReadinessTone}`}
+                          >
+                            {linuxReadinessSummary}
+                          </span>
+                        </strong>
+                        <small>
+                          Repair is useful after moving an AppImage or changing desktop defaults.
+                        </small>
+                        <div className="settings-backup-panel__actions">
+                          <SimmButton
+                            type="button"
+                            onClick={() => void handleRefreshLinuxReadiness()}
+                            disabled={loadingLinuxReadiness}
+                            className="btn btn-secondary btn-small"
+                          >
+                            {loadingLinuxReadiness ? "Checking..." : "Refresh"}
+                          </SimmButton>
+                          <SimmButton
+                            type="button"
+                            onClick={() => void handleRepairLinuxDesktopIntegration()}
+                            disabled={repairingLinuxDesktopIntegration}
+                            className="btn btn-secondary btn-small"
+                          >
+                            {repairingLinuxDesktopIntegration
+                              ? "Repairing..."
+                              : "Repair Desktop Links"}
+                          </SimmButton>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {linuxReadinessFeedback && (
+                    <div
+                      className={`settings-inline-feedback settings-inline-feedback--${linuxReadinessFeedback.tone}`}
+                      role={linuxReadinessFeedback.tone === "error" ? "alert" : "status"}
+                    >
+                      {linuxReadinessFeedback.message}
+                    </div>
+                  )}
                 </div>
 
                 <hr className="settings-divider" />
@@ -1233,6 +1623,20 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       />
                       <small>
                         Stable uses production releases. Beta opts this app into prerelease updater manifests.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>Manual app update check</label>
+                      <SimmButton
+                        type="button"
+                        onClick={() => window.dispatchEvent(new CustomEvent("simm:check-app-update"))}
+                        className="btn btn-secondary"
+                      >
+                        Check for App Updates
+                      </SimmButton>
+                      <small>
+                        Check the selected app update channel now, even when automatic checks are disabled.
                       </small>
                     </div>
 
@@ -1352,7 +1756,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       <p>
                         SIMM automatically backs up the SQLite database before
                         app-version upgrades and migration work. You can also
-                        create a manual snapshot at any time.
+                        create a manual snapshot or repair safe additive schema
+                        after switching between installed and development builds.
                       </p>
                     </div>
 
@@ -1360,7 +1765,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       <SimmButton
                         type="button"
                         onClick={() => void handleBackupDatabase()}
-                        disabled={backingUpDatabase}
+                        disabled={backingUpDatabase || repairingDatabase}
                         className="btn btn-secondary"
                       >
                         {backingUpDatabase
@@ -1369,8 +1774,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </SimmButton>
                       <SimmButton
                         type="button"
+                        onClick={() => void handleRepairDatabase()}
+                        disabled={repairingDatabase || backingUpDatabase}
+                        className="btn btn-secondary"
+                      >
+                        <Icon name="wrench" /> {repairingDatabase ? "Repairing..." : "Repair Database"}
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         onClick={() => void handleOpenBackupsFolder()}
-                        disabled={openingBackupsFolder}
+                        disabled={openingBackupsFolder || repairingDatabase}
                         className="btn btn-secondary"
                       >
                         {openingBackupsFolder

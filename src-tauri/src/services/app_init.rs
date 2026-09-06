@@ -6,8 +6,8 @@ use crate::services::mods_snapshot_cache;
 use crate::utils::directory_init;
 use anyhow::Result;
 use sqlx::SqlitePool;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -27,6 +27,12 @@ pub fn initialize_simm_directory() -> Result<bool> {
             Ok(false)
         }
     }
+}
+
+async fn mods_storage_dir_from_runtime_settings(
+    runtime_settings: &crate::services::settings::RuntimeSettingsState,
+) -> PathBuf {
+    PathBuf::from(runtime_settings.snapshot().await.default_download_dir).join("Mods")
 }
 
 /// Initialize services (async part)
@@ -57,6 +63,63 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         }
     };
 
+    // Reconcile interrupted environment deletions before reading environments or
+    // arming filesystem watchers. Rows that survived a failed transaction regain
+    // their staged tree; committed deletions finish removing their verified tree.
+    match env_service.recover_pending_environment_deletions().await {
+        Ok(report) => {
+            if report.restored > 0 || report.finalized > 0 || report.pending > 0 {
+                log::info!(
+                    "Environment deletion recovery completed (restored={}, finalized={}, pending={})",
+                    report.restored,
+                    report.finalized,
+                    report.pending
+                );
+            }
+        }
+        Err(error) => log::error!(
+            "Failed to load durable environment deletion recovery state: {}",
+            error
+        ),
+    }
+
+    let runtime_settings = match app.try_state::<crate::services::settings::RuntimeSettingsState>()
+    {
+        Some(state) => state.inner().clone(),
+        None => {
+            log::error!(
+                "Runtime settings state not registered; skipping background update scheduler"
+            );
+            return Ok(());
+        }
+    };
+
+    let startup_mods_service =
+        ModsService::new(pool.clone()).with_runtime_settings(runtime_settings.snapshot().await);
+    let startup_storage_dir = mods_storage_dir_from_runtime_settings(&runtime_settings).await;
+    match startup_mods_service
+        .migrate_legacy_symlink_installs_to_managed_copies_at(&startup_storage_dir)
+        .await
+    {
+        Ok(affected_envs) => {
+            for env_id in affected_envs {
+                if let Err(err) = crate::events::emit_mods_changed(&app, env_id.clone()) {
+                    log::warn!(
+                        "Failed to emit mods_changed after legacy symlink migration for {}: {}",
+                        env_id,
+                        err
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            log::warn!(
+                "Failed to migrate legacy symlink-backed mod installs: {}",
+                err
+            );
+        }
+    }
+
     match env_service.get_environments().await {
         Ok(environments) => {
             let env_count = environments.len();
@@ -64,8 +127,10 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
 
             let cache_seed_environments = environments.clone();
             let cache_seed_pool = pool.clone();
+            let cache_seed_settings = runtime_settings.snapshot().await;
             tokio::spawn(async move {
-                let mods_service = ModsService::new(cache_seed_pool);
+                let mods_service =
+                    ModsService::new(cache_seed_pool).with_runtime_settings(cache_seed_settings);
                 for env in cache_seed_environments {
                     if env.output_dir.is_empty() {
                         continue;
@@ -128,17 +193,62 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         }
     }
 
-    let maintenance_mods_service = ModsService::new(pool.clone());
+    crate::services::runtime_update_scheduler::start(
+        pool.clone(),
+        app.clone(),
+        runtime_settings.clone(),
+    );
+    log::info!("Background update scheduler initialized after environment recovery");
+
+    // The telemetry monitor's interval also ticks immediately and reads environment
+    // paths. Start it after deletion recovery and watcher reconciliation for the
+    // same reason as the update scheduler.
+    if crate::services::telemetry::telemetry_feature_enabled() {
+        crate::services::game_session_monitor::GameSessionMonitor::new(pool.clone(), app.clone())
+            .start();
+        log::info!("Live telemetry game-session monitor initialized");
+    } else {
+        log::info!("Live telemetry capability is unavailable in this SIMM package");
+    }
+
+    let maintenance_mods_service =
+        ModsService::new(pool.clone()).with_runtime_settings(runtime_settings.snapshot().await);
+    match maintenance_mods_service
+        .reconcile_tracked_mod_state_at(&startup_storage_dir)
+        .await
+    {
+        Ok(affected_envs) => {
+            for env_id in affected_envs {
+                if let Err(err) = crate::events::emit_mods_changed(&app, env_id.clone()) {
+                    log::warn!("Failed to emit mods_changed for {}: {}", env_id, err);
+                }
+            }
+        }
+        Err(err) => log::warn!("Failed to run startup mod metadata reconciliation: {}", err),
+    }
+
     let maintenance_app = app.clone();
+    let maintenance_runtime_settings = runtime_settings.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        // Filesystem watchers handle normal changes. This slower sweep is only
+        // a safety net for missed/out-of-band changes while SIMM stays open.
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30 * 60),
+            std::time::Duration::from_secs(30 * 60),
+        );
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             interval.tick().await;
-
-            match maintenance_mods_service.reconcile_tracked_mod_state().await {
+            let started_at = std::time::Instant::now();
+            let storage_dir =
+                mods_storage_dir_from_runtime_settings(&maintenance_runtime_settings).await;
+            match maintenance_mods_service
+                .reconcile_tracked_mod_state_at(&storage_dir)
+                .await
+            {
                 Ok(affected_envs) => {
+                    let affected_count = affected_envs.len();
                     for env_id in affected_envs {
                         if let Err(err) =
                             crate::events::emit_mods_changed(&maintenance_app, env_id.clone())
@@ -146,14 +256,17 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
                             log::warn!("Failed to emit mods_changed for {}: {}", env_id, err);
                         }
                     }
+                    log::info!(
+                        "[ModsMaintenance] Fallback reconciliation completed (affected_environments={}, elapsed_ms={})",
+                        affected_count,
+                        started_at.elapsed().as_millis()
+                    );
                 }
-                Err(err) => {
-                    log::warn!("Failed to run mod metadata reconciliation: {}", err);
-                }
+                Err(err) => log::warn!("Failed to run mod metadata reconciliation: {}", err),
             }
         }
     });
-    log::info!("Started mod metadata reconciliation maintenance task");
+    log::info!("Started 30-minute mod metadata reconciliation fallback task");
 
     log::info!("Application initialization complete");
 

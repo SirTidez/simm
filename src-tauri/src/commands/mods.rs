@@ -1,13 +1,20 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
+use crate::services::mod_profiles::ModProfilesService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
-use crate::types::{LocalModOwnershipCandidate, LocalModSourcePreview, SecurityScanReport};
+use crate::services::mods_snapshot_refresh;
+use crate::services::settings::RuntimeSettingsState;
+use crate::types::{
+    LocalModOwnershipCandidate, LocalModSourcePreview, ModLibraryResult, SecurityScanReport,
+    Settings,
+};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -19,6 +26,181 @@ macro_rules! eprintln {
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+static MOD_LIBRARY_CACHE: Lazy<AsyncMutex<Option<ModLibraryCacheEntry>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+
+#[cfg(test)]
+struct SecurityScanTestHook {
+    file_path: String,
+    report: SecurityScanReport,
+    call_count: usize,
+}
+
+#[cfg(test)]
+static SECURITY_SCAN_TEST_HOOK: Lazy<std::sync::Mutex<Option<SecurityScanTestHook>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+pub(crate) struct SecurityScanTestHookGuard {
+    file_path: String,
+}
+
+#[cfg(test)]
+impl SecurityScanTestHookGuard {
+    pub(crate) fn call_count(&self) -> usize {
+        SECURITY_SCAN_TEST_HOOK
+            .lock()
+            .expect("security scan test hook lock")
+            .as_ref()
+            .filter(|hook| hook.file_path == self.file_path)
+            .map(|hook| hook.call_count)
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+impl Drop for SecurityScanTestHookGuard {
+    fn drop(&mut self) {
+        let mut hook = SECURITY_SCAN_TEST_HOOK
+            .lock()
+            .expect("security scan test hook lock");
+        if hook
+            .as_ref()
+            .is_some_and(|active| active.file_path == self.file_path)
+        {
+            *hook = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_security_scan_test_hook(
+    file_path: impl Into<String>,
+    report: SecurityScanReport,
+) -> SecurityScanTestHookGuard {
+    let file_path = file_path.into();
+    let mut hook = SECURITY_SCAN_TEST_HOOK
+        .lock()
+        .expect("security scan test hook lock");
+    assert!(
+        hook.is_none(),
+        "only one deterministic security scan test hook may be active"
+    );
+    *hook = Some(SecurityScanTestHook {
+        file_path: file_path.clone(),
+        report,
+        call_count: 0,
+    });
+    SecurityScanTestHookGuard { file_path }
+}
+
+#[cfg(test)]
+pub(crate) fn blocked_security_scan_report_for_test() -> SecurityScanReport {
+    SecurityScanReport {
+        summary: crate::types::SecurityScanSummary {
+            state: crate::types::SecurityScanState::Unavailable,
+            verified: false,
+            disposition: None,
+            highest_severity: None,
+            total_findings: 0,
+            threat_family_count: 0,
+            scanned_at: None,
+            scanner_version: None,
+            schema_version: None,
+            status_message: Some("Test scanner unavailable".to_string()),
+        },
+        policy: crate::types::SecurityScanPolicy {
+            enabled: true,
+            requires_confirmation: false,
+            blocked: true,
+            prompt_on_high_findings: true,
+            block_critical_findings: true,
+            status_message: Some("Test scanner unavailable".to_string()),
+        },
+        files: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+fn security_scan_test_report_for(file_path: &str) -> Option<SecurityScanReport> {
+    let mut hook = SECURITY_SCAN_TEST_HOOK
+        .lock()
+        .expect("security scan test hook lock");
+    let hook = hook.as_mut()?;
+    if hook.file_path != file_path {
+        return None;
+    }
+    hook.call_count += 1;
+    Some(hook.report.clone())
+}
+
+// Mutation and watcher paths explicitly invalidate this cache. Keep a long
+// fallback TTL for external changes that bypass SIMM instead of rescanning the
+// entire library on every pane mount.
+const MOD_LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+struct ModLibraryCacheEntry {
+    loaded_at: Instant,
+    library: ModLibraryResult,
+}
+
+/// Filesystem watcher and mutation paths call this as soon as their refreshed
+/// projection is authoritative; TTL alone cannot make a stale library result
+/// self-correct when no later event occurs.
+pub(crate) async fn invalidate_mod_library_cache(reason: &'static str) {
+    let mut cache = MOD_LIBRARY_CACHE.lock().await;
+    if cache.take().is_some() {
+        log::debug!("[ModLibrary] Invalidated cached library ({})", reason);
+    }
+}
+
+fn emit_environment_payload_changed_for_envs(
+    app: &AppHandle,
+    environment_ids: impl IntoIterator<Item = String>,
+) {
+    for environment_id in environment_ids {
+        if let Err(error) = crate::events::emit_mods_changed(app, environment_id.clone()) {
+            log::warn!(
+                "Failed to emit mods_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+        if let Err(error) = crate::events::emit_plugins_changed(app, environment_id.clone()) {
+            log::warn!(
+                "Failed to emit plugins_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+        if let Err(error) = crate::events::emit_userlibs_changed(app, environment_id.clone()) {
+            log::warn!(
+                "Failed to emit userlibs_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+    }
+}
+
+async fn sync_active_profiles_for_envs(
+    pool: Arc<SqlitePool>,
+    environment_ids: impl IntoIterator<Item = String>,
+) {
+    let profile_service = ModProfilesService::new(pool);
+    for environment_id in environment_ids {
+        if let Err(error) = profile_service
+            .sync_active_profile_from_environment(&environment_id)
+            .await
+        {
+            log::warn!(
+                "Failed to sync active profile for {} after install: {}",
+                environment_id,
+                error
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadKind {
@@ -53,11 +235,12 @@ fn detect_upload_kind(file_path: &str) -> UploadKind {
 
 async fn upload_mod_impl(
     db: Arc<SqlitePool>,
+    settings: &Settings,
     environment_id: String,
     file_path: String,
     original_file_name: String,
-    runtime: String,
-    branch: String,
+    _runtime: String,
+    _branch: String,
     metadata: Option<serde_json::Value>,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
@@ -72,7 +255,13 @@ async fn upload_mod_impl(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.clone());
+    // The environment record is the runtime authority. In particular, custom
+    // branches are valid and cannot safely be inferred from their name or a
+    // stale UI label supplied with this request.
+    let runtime = env.runtime.canonical_label().to_string();
+    let branch = env.branch.clone();
+
+    let mods_service = ModsService::new(db.clone()).with_runtime_settings(settings.clone());
 
     let upload_kind = detect_upload_kind(&file_path);
     if matches!(upload_kind, UploadKind::Unsupported) {
@@ -81,13 +270,17 @@ async fn upload_mod_impl(
         );
     }
 
-    let (metadata, security_report) =
-        match prepare_security_scan(db, &file_path, metadata, security_override.unwrap_or(false))
-            .await?
-        {
-            SecurityGateResult::Continue { metadata, report } => (metadata, report),
-            SecurityGateResult::EarlyResponse(response) => return Ok(response),
-        };
+    let (metadata, security_report) = match prepare_security_scan_with_settings(
+        settings,
+        &file_path,
+        metadata,
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => return Ok(response),
+    };
 
     let response = match upload_kind {
         UploadKind::Archive => mods_service
@@ -120,11 +313,7 @@ async fn upload_mod_impl(
 }
 
 fn parse_runtime_label(runtime: Option<&str>) -> Option<crate::types::Runtime> {
-    runtime.and_then(|value| match value.trim().to_lowercase().as_str() {
-        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
-        "mono" => Some(crate::types::Runtime::Mono),
-        _ => None,
-    })
+    runtime.and_then(crate::types::Runtime::parse_label)
 }
 
 fn build_s1api_library_metadata(version_tag: &str) -> serde_json::Value {
@@ -134,7 +323,7 @@ fn build_s1api_library_metadata(version_tag: &str) -> serde_json::Value {
         "sourceVersion": version_tag,
         "sourceUrl": "https://github.com/ifBars/S1API",
         "modName": "S1API",
-        "author": "ScheduleI-Dev",
+        "author": "ifBars",
     })
 }
 
@@ -155,21 +344,6 @@ fn ensure_metadata_object(
     metadata
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default()
-}
-
-fn should_skip_security_scan(metadata: &Option<serde_json::Value>) -> bool {
-    let source_id = metadata
-        .as_ref()
-        .and_then(|value| value.get("sourceId"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-
-    matches!(
-        source_id.as_str(),
-        "ifbars/mlvscan" | "ifbars/mlvscan.devcli"
-    )
 }
 
 fn security_scan_summary_value(report: &SecurityScanReport) -> Result<serde_json::Value, String> {
@@ -200,21 +374,27 @@ fn security_gate_response(report: &SecurityScanReport) -> Option<serde_json::Val
     None
 }
 
-pub(crate) async fn prepare_security_scan(
-    db: Arc<SqlitePool>,
+pub(crate) async fn prepare_security_scan_with_settings(
+    settings: &Settings,
     file_path: &str,
     metadata: Option<serde_json::Value>,
     security_override: bool,
 ) -> Result<SecurityGateResult, String> {
-    if should_skip_security_scan(&metadata) {
-        return Ok(SecurityGateResult::Continue {
-            metadata,
-            report: None,
-        });
-    }
+    #[cfg(test)]
+    let report = if let Some(report) = security_scan_test_report_for(file_path) {
+        report
+    } else {
+        crate::commands::security_scanner::scan_artifact_for_security_with_settings(
+            settings, file_path,
+        )
+        .await?
+    };
 
-    let report =
-        crate::commands::security_scanner::scan_artifact_for_security(db, file_path).await?;
+    #[cfg(not(test))]
+    let report = crate::commands::security_scanner::scan_artifact_for_security_with_settings(
+        settings, file_path,
+    )
+    .await?;
 
     if report.summary.state == crate::types::SecurityScanState::Disabled {
         return Ok(SecurityGateResult::Continue {
@@ -223,7 +403,7 @@ pub(crate) async fn prepare_security_scan(
         });
     }
 
-    if !security_override {
+    if report.policy.blocked || (!security_override && report.policy.requires_confirmation) {
         if let Some(response) = security_gate_response(&report) {
             return Ok(SecurityGateResult::EarlyResponse(response));
         }
@@ -295,6 +475,14 @@ pub(crate) async fn finalize_security_scan_response(
     report: Option<&SecurityScanReport>,
     operation: &str,
 ) -> serde_json::Value {
+    if response
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+    {
+        invalidate_mod_library_cache("library mutation completed").await;
+    }
+
     if let Err(error) = persist_security_scan_report(mods_service, &response, report).await {
         log::warn!(
             "Failed to persist security scan report after {}: {}",
@@ -329,61 +517,46 @@ async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
 pub async fn get_mods(
     app: tauri::AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     refresh: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let settings = runtime_settings.snapshot().await;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+
+    // Never serve a cached projection before proving that its owning
+    // environment still exists.  Deletion invalidates the cache as well, but
+    // this guard closes races with an in-flight cache read.
+    let existing_environment = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if existing_environment.is_none() {
+        mods_snapshot_cache::remove(&environment_id).await;
+        return Err("Environment not found".to_string());
+    }
+
     if !refresh.unwrap_or(false) {
         if let Some(cached) = mods_snapshot_cache::get(&environment_id).await {
-            let db_pool = db.inner().clone();
-            let environment_id_for_refresh = environment_id.clone();
-            let app_for_refresh = app.clone();
-
-            tokio::spawn(async move {
-                let env_service = match EnvironmentService::new(db_pool.clone()) {
-                    Ok(service) => service,
-                    Err(_) => return,
-                };
-
-                let env = match env_service
-                    .get_environment(&environment_id_for_refresh)
-                    .await
-                {
-                    Ok(Some(env)) => env,
-                    _ => return,
-                };
-
-                if env.output_dir.is_empty() {
-                    return;
-                }
-
-                let mods_service = ModsService::new(db_pool);
-                if let Ok(snapshot) = mods_service.list_mods(&env.output_dir).await {
-                    mods_snapshot_cache::set(environment_id_for_refresh.clone(), snapshot.clone())
-                        .await;
-                    let _ = crate::events::emit_mods_snapshot_updated(
-                        &app_for_refresh,
-                        environment_id_for_refresh,
-                        snapshot,
-                    );
-                }
-            });
+            mods_snapshot_refresh::request_mods_snapshot_refresh(
+                app,
+                db.inner().clone(),
+                environment_id,
+                "get_mods cache revalidation",
+            )
+            .await;
 
             return Ok(cached);
         }
     }
 
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service
-        .get_environment(&environment_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
+    let env = existing_environment.expect("environment presence checked above");
 
     if env.output_dir.is_empty() {
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings);
     let result = mods_service
         .list_mods(&env.output_dir)
         .await
@@ -396,6 +569,7 @@ pub async fn get_mods(
 #[tauri::command]
 pub async fn get_mods_count(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
@@ -409,7 +583,8 @@ pub async fn get_mods_count(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let count = mods_service
         .count_mods(&env.output_dir)
         .await
@@ -419,18 +594,36 @@ pub async fn get_mods_count(
 }
 
 #[tauri::command]
-pub async fn get_mod_library(db: State<'_, Arc<SqlitePool>>) -> Result<serde_json::Value, String> {
-    let mods_service = ModsService::new(db.inner().clone());
+pub async fn get_mod_library(
+    db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
+) -> Result<serde_json::Value, String> {
+    let mut cache = MOD_LIBRARY_CACHE.lock().await;
+    if let Some(entry) = cache.as_ref() {
+        if entry.loaded_at.elapsed() <= MOD_LIBRARY_CACHE_TTL {
+            return serde_json::to_value(entry.library.clone()).map_err(|e| e.to_string());
+        }
+    }
+
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let library = mods_service
         .get_mod_library()
         .await
         .map_err(|e| e.to_string())?;
+
+    *cache = Some(ModLibraryCacheEntry {
+        loaded_at: Instant::now(),
+        library: library.clone(),
+    });
+
     serde_json::to_value(library).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn preview_local_mod_source_link(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     file_name: String,
     source_url: String,
@@ -446,7 +639,8 @@ pub async fn preview_local_mod_source_link(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .preview_local_mod_source_link(&env.output_dir, &file_name, &source_url)
         .await
@@ -456,6 +650,7 @@ pub async fn preview_local_mod_source_link(
 #[tauri::command]
 pub async fn get_local_mod_existing_source_hint(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     file_name: String,
 ) -> Result<Option<LocalModSourcePreview>, String> {
@@ -470,7 +665,8 @@ pub async fn get_local_mod_existing_source_hint(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .get_local_mod_existing_source_hint(&env.output_dir, &file_name)
         .await
@@ -480,6 +676,7 @@ pub async fn get_local_mod_existing_source_hint(
 #[tauri::command]
 pub async fn get_local_mod_ownership_candidates(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     file_name: String,
     linked_name: Option<String>,
@@ -495,7 +692,8 @@ pub async fn get_local_mod_ownership_candidates(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .get_local_mod_ownership_candidates(&env.output_dir, &file_name, linked_name.as_deref())
         .await
@@ -504,7 +702,9 @@ pub async fn get_local_mod_ownership_candidates(
 
 #[tauri::command]
 pub async fn promote_local_mod_to_managed(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     file_name: String,
     source_url: String,
@@ -522,8 +722,9 @@ pub async fn promote_local_mod_to_managed(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
+    let result = mods_service
         .promote_local_mod_to_managed(
             &env.output_dir,
             &file_name,
@@ -532,50 +733,120 @@ pub async fn promote_local_mod_to_managed(
             owned_file_ids.as_deref().unwrap_or(&[]),
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn install_downloaded_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     storage_id: String,
     environment_ids: Vec<String>,
 ) -> Result<serde_json::Value, String> {
-    let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
+    let result = mods_service
         .install_storage_mod_to_envs(&storage_id, environment_ids)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let affected_envs = result
+        .get("results")
+        .and_then(|value| value.as_array())
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|result| {
+                    result
+                        .get("environmentId")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    sync_active_profiles_for_envs(db.inner().clone(), affected_envs.clone()).await;
+    emit_environment_payload_changed_for_envs(&app, affected_envs);
+    invalidate_mod_library_cache("managed mod installed").await;
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn uninstall_downloaded_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     storage_id: String,
     environment_ids: Vec<String>,
 ) -> Result<serde_json::Value, String> {
-    let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
+    let result = mods_service
         .uninstall_storage_mod_from_envs(&storage_id, environment_ids)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let affected_envs = result
+        .get("results")
+        .and_then(|value| value.as_array())
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|result| {
+                    result
+                        .get("environmentId")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    emit_environment_payload_changed_for_envs(&app, affected_envs);
+    invalidate_mod_library_cache("managed mod uninstalled").await;
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn delete_downloaded_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     storage_id: String,
 ) -> Result<serde_json::Value, String> {
-    let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
+    let result = mods_service
         .delete_downloaded_mod(&storage_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let affected_envs = result
+        .get("removedFrom")
+        .and_then(|value| value.as_array())
+        .map(|envs| {
+            envs.iter()
+                .filter_map(|env_id| env_id.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    emit_environment_payload_changed_for_envs(&app, affected_envs);
+    invalidate_mod_library_cache("managed library entry deleted").await;
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn delete_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     mod_file_name: String,
 ) -> Result<(), String> {
@@ -590,16 +861,23 @@ pub async fn delete_mod(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .delete_mod(&env.output_dir, &mod_file_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn enable_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     mod_file_name: String,
 ) -> Result<(), String> {
@@ -614,16 +892,23 @@ pub async fn enable_mod(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .enable_mod(&env.output_dir, &mod_file_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn disable_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     mod_file_name: String,
 ) -> Result<(), String> {
@@ -638,11 +923,16 @@ pub async fn disable_mod(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .disable_mod(&env.output_dir, &mod_file_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -672,6 +962,7 @@ pub async fn open_mods_folder(
 #[tauri::command]
 pub async fn check_mod_installed(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     source_id: Option<String>,
     source_version: Option<String>,
@@ -687,7 +978,8 @@ pub async fn check_mod_installed(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let requested_runtime = Some(env.runtime.clone());
     match mods_service
         .find_existing_mod_installation(
@@ -713,11 +1005,13 @@ pub async fn check_mod_installed(
 #[tauri::command]
 pub async fn find_existing_mod_storage(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     source_id: String,
     source_version: String,
     runtime: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let runtime_parsed =
         runtime
             .as_deref()
@@ -749,8 +1043,10 @@ pub async fn find_existing_mod_storage(
 #[tauri::command]
 pub async fn cleanup_duplicate_mod_storage(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<serde_json::Value, String> {
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .cleanup_duplicate_mod_storage()
         .await
@@ -760,6 +1056,7 @@ pub async fn cleanup_duplicate_mod_storage(
 #[tauri::command]
 pub async fn get_s1api_installation_status(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
@@ -778,7 +1075,8 @@ pub async fn get_s1api_installation_status(
         crate::types::Runtime::Mono => "Mono",
     };
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     mods_service
         .get_s1api_installation_status(&env.output_dir, runtime_str)
         .await
@@ -787,7 +1085,9 @@ pub async fn get_s1api_installation_status(
 
 #[tauri::command]
 pub async fn upload_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     file_path: String,
     original_file_name: String,
@@ -796,9 +1096,11 @@ pub async fn upload_mod(
     metadata: Option<serde_json::Value>,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    upload_mod_impl(
+    let settings = runtime_settings.snapshot().await;
+    let result = upload_mod_impl(
         db.inner().clone(),
-        environment_id,
+        &settings,
+        environment_id.clone(),
         file_path,
         original_file_name,
         runtime,
@@ -806,12 +1108,24 @@ pub async fn upload_mod(
         metadata,
         security_override,
     )
-    .await
+    .await?;
+
+    if result
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        sync_active_profiles_for_envs(db.inner().clone(), [environment_id.clone()]).await;
+        emit_environment_payload_changed_for_envs(&app, [environment_id]);
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn store_mod_archive(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     file_path: String,
     original_file_name: String,
     runtime: Option<String>,
@@ -821,10 +1135,11 @@ pub async fn store_mod_archive(
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let runtime_parsed = parse_runtime_label(runtime.as_deref());
+    let settings = runtime_settings.snapshot().await;
 
-    let mods_service = ModsService::new(db.inner().clone());
-    let (metadata, security_report) = match prepare_security_scan(
-        db.inner().clone(),
+    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings.clone());
+    let (metadata, security_report) = match prepare_security_scan_with_settings(
+        &settings,
         &file_path,
         metadata,
         security_override.unwrap_or(false),
@@ -863,6 +1178,7 @@ pub async fn store_mod_archive(
 pub async fn install_s1api(
     db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
@@ -901,7 +1217,8 @@ pub async fn install_s1api(
     };
 
     // Check if we already have this version stored before downloading
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let source_id = "ifBars/S1API".to_string();
     if let Ok(Some(existing_mod_id)) = mods_service
         .find_existing_mod_storage_by_source_version(
@@ -917,6 +1234,7 @@ pub async fn install_s1api(
             .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
             .await
             .map_err(|e| e.to_string())?;
+        emit_environment_payload_changed_for_envs(&app, [environment_id.clone()]);
         return Ok(serde_json::json!({
             "success": true,
             "fromStorage": true,
@@ -1039,7 +1357,8 @@ pub async fn install_s1api(
     );
 
     // Install from the temp file
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
 
     let result = mods_service
         .install_s1api(
@@ -1057,7 +1376,16 @@ pub async fn install_s1api(
     // The service returns Ok(serde_json::Value) with success/error fields
     // So we just return it directly
     match result {
-        Ok(json_result) => Ok(json_result),
+        Ok(json_result) => {
+            if json_result
+                .get("success")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                emit_environment_payload_changed_for_envs(&app, [environment_id]);
+            }
+            Ok(json_result)
+        }
         Err(e) => error_json(format!("Installation failed: {}", e)),
     }
 }
@@ -1065,10 +1393,12 @@ pub async fn install_s1api(
 #[tauri::command]
 pub async fn download_s1api_to_library(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     app: AppHandle,
     version_tag: String,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let settings = runtime_settings.snapshot().await;
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({
             "success": false,
@@ -1202,11 +1532,11 @@ pub async fn download_s1api_to_library(
 
     let metadata = build_s1api_library_metadata(&version_tag);
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings.clone());
     let temp_zip_path_string = temp_zip_path.to_string_lossy().to_string();
 
-    let (metadata, security_report) = match prepare_security_scan(
-        db.inner().clone(),
+    let (metadata, security_report) = match prepare_security_scan_with_settings(
+        &settings,
         &temp_zip_path_string,
         Some(metadata),
         security_override.unwrap_or(false),
@@ -1259,10 +1589,12 @@ pub async fn download_s1api_to_library(
 #[tauri::command]
 pub async fn download_mlvscan_to_library(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     app: AppHandle,
     version_tag: String,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let settings = runtime_settings.snapshot().await;
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({
             "success": false,
@@ -1460,11 +1792,11 @@ pub async fn download_mlvscan_to_library(
 
     let metadata = build_mlvscan_library_metadata(&version_tag);
 
-    let mods_service = ModsService::new(db.inner().clone());
+    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings.clone());
     let temp_path_string = temp_path.to_string_lossy().to_string();
 
-    let (metadata, security_report) = match prepare_security_scan(
-        db.inner().clone(),
+    let (metadata, security_report) = match prepare_security_scan_with_settings(
+        &settings,
         &temp_path_string,
         Some(metadata),
         security_override.unwrap_or(false),
@@ -1516,7 +1848,9 @@ pub async fn download_mlvscan_to_library(
 
 #[tauri::command]
 pub async fn uninstall_s1api(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
@@ -1530,29 +1864,62 @@ pub async fn uninstall_s1api(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let mods_service = ModsService::new(db.inner().clone())
+        .with_runtime_settings(runtime_settings.snapshot().await);
+    let result = mods_service
         .uninstall_s1api(&env.output_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    if result
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        emit_environment_payload_changed_for_envs(&app, [environment_id]);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
-        parse_runtime_label, persist_security_scan_report, upload_mod_impl, UploadKind,
+        blocked_security_scan_report_for_test, build_mlvscan_library_metadata,
+        build_s1api_library_metadata, detect_upload_kind, install_security_scan_test_hook,
+        invalidate_mod_library_cache, parse_runtime_label, persist_security_scan_report,
+        prepare_security_scan_with_settings, upload_mod_impl, ModLibraryCacheEntry,
+        SecurityGateResult, UploadKind, MOD_LIBRARY_CACHE,
     };
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
     use crate::services::settings::SettingsService;
     use crate::types::{
-        schedule_i_config, SecurityScanDisposition, SecurityScanDispositionClassification,
-        SecurityScanPolicy, SecurityScanReport, SecurityScanState, SecurityScanSummary,
+        schedule_i_config, ModLibraryResult, SecurityScanDisposition,
+        SecurityScanDispositionClassification, SecurityScanPolicy, SecurityScanReport,
+        SecurityScanState, SecurityScanSummary,
     };
     use serial_test::serial;
+    use std::time::Instant;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    #[serial]
+    async fn library_cache_invalidation_discards_a_fresh_entry_after_snapshot_completion() {
+        *MOD_LIBRARY_CACHE.lock().await = Some(ModLibraryCacheEntry {
+            loaded_at: Instant::now(),
+            library: ModLibraryResult {
+                downloaded: Vec::new(),
+            },
+        });
+
+        invalidate_mod_library_cache("test snapshot completion").await;
+        assert!(
+            MOD_LIBRARY_CACHE.lock().await.is_none(),
+            "a watcher/snapshot completion must bypass the remaining TTL"
+        );
+    }
     use tokio::fs;
 
     struct EnvVarGuard {
@@ -1627,6 +1994,10 @@ mod tests {
             metadata.get("sourceVersion").and_then(|v| v.as_str()),
             Some("v1.2.3")
         );
+        assert_eq!(
+            metadata.get("author").and_then(|v| v.as_str()),
+            Some("ifBars")
+        );
     }
 
     #[test]
@@ -1648,6 +2019,106 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn security_scan_does_not_trust_caller_provided_mlvscan_source_id() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "enableSecurityScanner": true,
+                "autoInstallSecurityScanner": false
+            }))
+            .await?;
+        let settings = settings_service.load_settings().await?;
+        let artifact = temp.path().join("spoofed-mlvscan.dll");
+        fs::write(&artifact, b"not-a-scanner").await?;
+
+        let result = prepare_security_scan_with_settings(
+            &settings,
+            artifact.to_string_lossy().as_ref(),
+            Some(serde_json::json!({ "sourceId": "ifBars/MLVScan" })),
+            false,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        match result {
+            SecurityGateResult::EarlyResponse(response) => {
+                assert_eq!(
+                    response
+                        .get("securityScanBlocked")
+                        .and_then(|value| value.as_bool()),
+                    Some(true)
+                );
+            }
+            SecurityGateResult::Continue { .. } => {
+                anyhow::bail!("caller-provided MLVScan source metadata bypassed the scanner")
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn blocked_security_scan_cannot_be_overridden() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let artifact = temp.path().join("blocked-override.dll");
+        fs::write(&artifact, b"blocked").await?;
+        let scan_hook = install_security_scan_test_hook(
+            artifact.to_string_lossy().to_string(),
+            blocked_security_scan_report_for_test(),
+        );
+        let settings = SettingsService::default_settings();
+
+        let result = prepare_security_scan_with_settings(
+            &settings,
+            artifact.to_string_lossy().as_ref(),
+            None,
+            true,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert!(matches!(result, SecurityGateResult::EarlyResponse(_)));
+        assert_eq!(scan_hook.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn security_review_confirmation_can_be_overridden() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let artifact = temp.path().join("review-override.dll");
+        fs::write(&artifact, b"review").await?;
+        let mut review_report = blocked_security_scan_report_for_test();
+        review_report.summary.state = SecurityScanState::Review;
+        review_report.policy.blocked = false;
+        review_report.policy.requires_confirmation = true;
+        let scan_hook =
+            install_security_scan_test_hook(artifact.to_string_lossy().to_string(), review_report);
+        let settings = SettingsService::default_settings();
+
+        let result = prepare_security_scan_with_settings(
+            &settings,
+            artifact.to_string_lossy().as_ref(),
+            None,
+            true,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert!(matches!(result, SecurityGateResult::Continue { .. }));
+        assert_eq!(scan_hook.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn persist_security_scan_report_skips_already_stored_responses() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
@@ -1663,7 +2134,6 @@ mod tests {
                 "defaultDownloadDir": download_dir.to_string_lossy().to_string()
             }))
             .await?;
-
         let original_report = SecurityScanReport {
             summary: SecurityScanSummary {
                 state: SecurityScanState::Verified,
@@ -1845,6 +2315,7 @@ mod tests {
                 "defaultDownloadDir": download_dir.to_string_lossy().to_string()
             }))
             .await?;
+        let settings = settings_service.load_settings().await?;
 
         let output_dir = temp.path().join("envs").join("env-rar-upload");
         fs::create_dir_all(&output_dir).await?;
@@ -1863,6 +2334,7 @@ mod tests {
 
         let response = upload_mod_impl(
             pool.clone(),
+            &settings,
             env.id,
             rar_path.to_string_lossy().to_string(),
             "invalid-upload.rar".to_string(),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { InstallTargetsDialog } from './InstallTargetsDialog';
 
 describe('InstallTargetsDialog', () => {
@@ -7,7 +7,7 @@ describe('InstallTargetsDialog', () => {
     cleanup();
   });
 
-  it('uses normalized runtime values for both row labels and quick actions', () => {
+  it('uses the backend runtime value, including legacy MONO casing, for row labels and quick actions', () => {
     render(
       <InstallTargetsDialog
         isOpen={true}
@@ -33,7 +33,7 @@ describe('InstallTargetsDialog', () => {
             appId: '3164500',
             branch: 'alternate-beta',
             outputDir: 'C:/envs/alt-beta',
-            runtime: 'IL2CPP',
+            runtime: 'MONO',
             status: 'completed',
           },
         ]}
@@ -54,6 +54,47 @@ describe('InstallTargetsDialog', () => {
     expect(screen.getByText('Mono • alternate-beta')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'All Mono' })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: 'All IL2CPP' })).toBeDisabled();
+  });
+
+  it('does not offer a fake cancellation path while installation is in progress', () => {
+    const onClose = vi.fn();
+    render(
+      <InstallTargetsDialog
+        isOpen={true}
+        title="Install"
+        entries={[{
+          storageId: 'storage-1',
+          displayName: 'Example Mod',
+          files: ['Example.dll'],
+          attachedUserLibs: [],
+          source: 'local',
+          managed: true,
+          installedIn: [],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'storage-1' },
+          installedInByRuntime: { IL2CPP: [] },
+          filesByRuntime: { IL2CPP: ['Example.dll'] },
+        }]}
+        compatibleEnvironments={[]}
+        excludedEnvironments={[]}
+        lockedEnvironmentIds={[]}
+        mode="select"
+        selectedEnvironmentIds={new Set<string>()}
+        onToggleEnvironment={vi.fn()}
+        onSelectAllCompatible={vi.fn()}
+        onSelectRuntime={vi.fn()}
+        onClear={vi.fn()}
+        onClose={onClose}
+        onConfirm={vi.fn()}
+        installing={true}
+      />,
+    );
+
+    const closeButton = screen.getByRole('button', { name: 'Close install target dialog' });
+    expect(closeButton).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Installation in progress' })).toBeDisabled();
+    fireEvent.click(closeButton);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('disables bulk runtime buttons when all matching environments are locked', () => {

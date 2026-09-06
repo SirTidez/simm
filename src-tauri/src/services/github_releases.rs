@@ -1,7 +1,10 @@
 use crate::utils::http_identity;
 use anyhow::{Context, Result};
+use std::time::Duration;
 
 const DEFAULT_RELEASE_API_BASE_URL: &str = "https://api.lockwirelabs.dev";
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GitHubReleasesService {
@@ -18,6 +21,8 @@ impl GitHubReleasesService {
 
         let client = reqwest::Client::builder()
             .user_agent(http_identity::user_agent())
+            .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+            .timeout(PROVIDER_REQUEST_TIMEOUT)
             .build()
             .expect("Failed to build releases HTTP client");
 

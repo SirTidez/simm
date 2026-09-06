@@ -183,6 +183,51 @@ describe('SettingsStore', () => {
     expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('light');
   });
 
+  it('coalesces duplicate initial settings and DepotDownloader refreshes while requests are pending', async () => {
+    let resolveSettings: (value: Settings) => void = () => {};
+    let resolveThemes: (value: CustomThemeDefinition[]) => void = () => {};
+    let resolveThemesDirectory: (value: string) => void = () => {};
+    let resolveDepotDownloader: (value: { installed: boolean }) => void = () => {};
+
+    apiMocks.getSettings.mockReturnValueOnce(new Promise<Settings>((resolve) => {
+      resolveSettings = resolve;
+    }));
+    apiMocks.getCustomThemes.mockReturnValueOnce(new Promise<CustomThemeDefinition[]>((resolve) => {
+      resolveThemes = resolve;
+    }));
+    apiMocks.getThemesDirectory.mockReturnValueOnce(new Promise<string>((resolve) => {
+      resolveThemesDirectory = resolve;
+    }));
+    apiMocks.detectDepotDownloader.mockReturnValueOnce(new Promise<{ installed: boolean }>((resolve) => {
+      resolveDepotDownloader = resolve;
+    }));
+
+    render(
+      <React.StrictMode>
+        <SettingsStoreProvider>
+          <Consumer />
+        </SettingsStoreProvider>
+      </React.StrictMode>
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getSettings).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getCustomThemes).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getThemesDirectory).toHaveBeenCalledTimes(1);
+      expect(apiMocks.detectDepotDownloader).toHaveBeenCalledTimes(1);
+    });
+
+    resolveSettings(baseSettings);
+    resolveThemes([]);
+    resolveThemesDirectory('C:/SIMM/themes');
+    resolveDepotDownloader({ installed: true });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    expect(screen.getByTestId('theme').textContent).toBe('light');
+  });
+
   it('updates settings and theme without full refresh', async () => {
     apiMocks.getSettings.mockResolvedValueOnce(baseSettings);
     apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });

@@ -28,13 +28,14 @@ import {
 } from '@/components/ui/select';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { ProfileExportDialog } from './ProfileExportDialog';
 import {
   SecurityScanReportOverlay,
   type SecurityScanReportOption,
 } from './SecurityScanReportOverlay';
 import { type SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
-import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
+import { onModMetadataRefreshStatus, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { getSecurityBadgeConfig } from './securityScanHelpers';
 import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
@@ -45,13 +46,16 @@ import type {
   LocalModSourcePreview,
   LocalModSourceVersionOption,
   ModLibraryEntry,
+  ModProfileManifest,
+  ModProfileItem,
   NexusMod,
   SecurityScanReport,
   SecurityScanSummary,
 } from '../types';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { Icon } from './Icon';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
+import { useModLibraryStore } from '../stores/modLibraryStore';
 
 interface ModInfo {
   name: string;
@@ -80,6 +84,45 @@ type ModUpdateInfo = {
   currentVersion?: string;
   latestVersion?: string;
 };
+
+type ProfileExportState = {
+  isOpen: boolean;
+  manifest: ModProfileManifest | null;
+  selectedItemKeys: Set<string>;
+  profileName: string;
+  loading: boolean;
+  saving: boolean;
+};
+
+const emptyProfileExportState: ProfileExportState = {
+  isOpen: false,
+  manifest: null,
+  selectedItemKeys: new Set(),
+  profileName: '',
+  loading: false,
+  saving: false,
+};
+
+function profileItemKey(item: ModProfileItem, index: number): string {
+  return [
+    item.itemType,
+    item.name,
+    item.fileName ?? '',
+    item.sourceId ?? '',
+    item.sourceVersion ?? '',
+    index,
+  ].join('|');
+}
+
+function profileFileName(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return `${slug || 'simm-profile'}.json`;
+}
 
 export interface ModViewState {
   id: string;
@@ -530,6 +573,7 @@ export function ModsOverlay({
   navigationState,
   onNavigationStateChange,
 }: Props) {
+  const { library: sharedLibrary, ensureLibrary, refreshLibrary } = useModLibraryStore();
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
   const defaultSearchSource = useMemo<'thunderstore' | 'nexusmods'>(() => {
     if (navigationState?.searchSource) {
@@ -564,7 +608,10 @@ export function ModsOverlay({
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
+  const securityReportOperationRef = useRef(0);
   const [, setToastMessage] = useState<string | null>(null);
+  const [profileExport, setProfileExport] = useState<ProfileExportState>(emptyProfileExportState);
+  const profileExportOperationRef = useRef(0);
 
   // Search state
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -592,8 +639,6 @@ export function ModsOverlay({
   const [installedSearchTerm, setInstalledSearchTerm] = useState(() => navigationState?.installedSearchTerm ?? '');
   const [activeModView, setActiveModView] = useState<ModViewState | null>(() => navigationState?.activeModView ?? null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
-  const suppressWatcherReloadUntilRef = useRef(0);
-  const modsReloadTimerRef = useRef<number | null>(null);
   const activeLoadRequestRef = useRef(0);
   const modsScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const modsScrollTopRef = useRef(0);
@@ -604,7 +649,16 @@ export function ModsOverlay({
   const navigationChangeHandlerRef = useRef(onNavigationStateChange);
   const [localSourceLinkState, setLocalSourceLinkState] = useState<LocalSourceLinkState | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
-
+  const adjustedProfileManifest = profileExport.manifest ? {
+    ...profileExport.manifest,
+    profile: {
+      ...profileExport.manifest.profile,
+      name: profileExport.profileName.trim() || profileExport.manifest.profile.name,
+    },
+    items: profileExport.manifest.items.filter((item, index) =>
+      profileExport.selectedItemKeys.has(profileItemKey(item, index))
+    ),
+  } : null;
   useEffect(() => {
     navigationChangeHandlerRef.current = onNavigationStateChange;
   }, [onNavigationStateChange]);
@@ -669,16 +723,16 @@ export function ModsOverlay({
   useEffect(() => {
     navigationChangeHandlerRef.current?.(reportedNavigationState);
   }, [reportedNavigationState]);
-  const loadEnvironment = async () => {
+  const loadEnvironment = useCallback(async () => {
     try {
       const env = await ApiService.getEnvironment(environmentId);
       setEnvironment(env);
     } catch (err) {
       console.error('Failed to load environment:', err);
     }
-  };
+  }, [environmentId]);
 
-  const refreshNexusDownloadAccess = async () => {
+  const refreshNexusDownloadAccess = useCallback(async () => {
     try {
       const status = await ApiService.getNexusOAuthStatus();
       const isConnected = !!status.connected;
@@ -691,7 +745,7 @@ export function ModsOverlay({
       setHasNexusDownloadAccess(false);
       setNexusRequiresSiteConfirmation(true);
     }
-  };
+  }, []);
 
   const clearNexusManualTimeout = () => {
     if (nexusManualTimeoutRef.current !== null) {
@@ -733,6 +787,7 @@ export function ModsOverlay({
     : 'Adding...';
 
   const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
+    securityReportOperationRef.current += 1;
     if (onOpenSecurityReport) {
       onOpenSecurityReport(request);
       return;
@@ -746,23 +801,32 @@ export function ModsOverlay({
       return;
     }
 
+    securityReportOperationRef.current += 1;
     activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
   };
 
   const handleSecurityReportConfirm = async () => {
-    if (!activeSecurityReport?.onConfirm) {
+    const request = activeSecurityReport;
+    if (!request?.onConfirm) {
       return;
     }
 
+    const operationId = securityReportOperationRef.current;
     setSecurityActionBusy(true);
     try {
-      await activeSecurityReport.onConfirm();
-      setActiveSecurityReport(null);
+      await request.onConfirm();
+      if (operationId === securityReportOperationRef.current) {
+        setActiveSecurityReport(null);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to continue after reviewing the MLVScan findings.');
+      if (operationId === securityReportOperationRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to continue after reviewing the MLVScan findings.');
+      }
     } finally {
-      setSecurityActionBusy(false);
+      if (operationId === securityReportOperationRef.current) {
+        setSecurityActionBusy(false);
+      }
     }
   };
 
@@ -982,7 +1046,7 @@ export function ModsOverlay({
     }
   };
 
-  const loadInstalledMods = async (showSpinner: boolean = true, refresh: boolean = false) => {
+  const loadInstalledMods = useCallback(async (showSpinner: boolean = true, refresh: boolean = false) => {
     const requestId = ++activeLoadRequestRef.current;
     if (showSpinner) {
       setLoading(true);
@@ -1016,18 +1080,33 @@ export function ModsOverlay({
         setLoading(false);
       }
     }
-  };
+  }, [environmentId]);
 
-  const loadDownloadedLibrary = async () => {
+  const loadDownloadedLibrary = useCallback(async () => {
     try {
-      const library = await ApiService.getModLibrary();
+      const library = sharedLibrary ?? await ensureLibrary();
       setDownloadedMods(library.downloaded || []);
     } catch (err) {
       console.warn('Failed to load downloaded mod library:', err);
     }
-  };
+  }, [ensureLibrary, sharedLibrary]);
 
-  const loadCachedModUpdates = async () => {
+  const refreshDownloadedLibrary = useCallback(async () => {
+    try {
+      const library = await refreshLibrary();
+      setDownloadedMods(library.downloaded || []);
+    } catch (err) {
+      console.warn('Failed to refresh downloaded mod library:', err);
+    }
+  }, [refreshLibrary]);
+
+  useEffect(() => {
+    if (sharedLibrary) {
+      setDownloadedMods(sharedLibrary.downloaded || []);
+    }
+  }, [sharedLibrary]);
+
+  const loadCachedModUpdates = useCallback(async () => {
     try {
       const summary = await ApiService.getModUpdatesSummary(environmentId);
       const updatesMap = new Map<string, ModUpdateInfo>();
@@ -1043,13 +1122,13 @@ export function ModsOverlay({
     } catch (err) {
       console.warn('Failed to load cached mod update summary:', err);
     }
-  };
+  }, [environmentId, onModUpdatesChecked]);
 
-  const loadModsPanelData = async () => {
+  const loadModsPanelData = useCallback(async () => {
     await loadInstalledMods(true, false);
     await loadDownloadedLibrary();
     void loadCachedModUpdates();
-  };
+  }, [loadCachedModUpdates, loadDownloadedLibrary, loadInstalledMods]);
 
   useEffect(() => {
     if (isOpen && environmentId) {
@@ -1058,33 +1137,10 @@ export function ModsOverlay({
       void refreshNexusDownloadAccess();
 
       // Listen for filesystem changes
-      let unlistenModsChanged: (() => void) | null = null;
       let unlistenModsSnapshot: (() => void) | null = null;
-
-      const scheduleInstalledModsRefresh = () => {
-        if (modsReloadTimerRef.current) {
-          window.clearTimeout(modsReloadTimerRef.current);
-        }
-
-        modsReloadTimerRef.current = window.setTimeout(() => {
-          modsReloadTimerRef.current = null;
-          if (Date.now() < suppressWatcherReloadUntilRef.current) {
-            return;
-          }
-          void loadInstalledMods(false, true);
-          void loadCachedModUpdates();
-          onModsChanged?.();
-        }, 350);
-      };
 
       const setupListener = async () => {
         try {
-          unlistenModsChanged = await onModsChangedEvent((data) => {
-            if (data.environmentId === environmentId) {
-              scheduleInstalledModsRefresh();
-            }
-          });
-
           unlistenModsSnapshot = await onModsSnapshotUpdated((data) => {
             if (data.environmentId !== environmentId || !data.snapshot) {
               return;
@@ -1097,6 +1153,7 @@ export function ModsOverlay({
 
             setMods(previous => mergeModSnapshots(previous, normalizedMods));
             setModsDirectory(data.snapshot.modsDirectory || '');
+            void loadCachedModUpdates();
           });
         } catch (error) {
           console.error('Failed to set up mods changed listener:', error);
@@ -1107,21 +1164,20 @@ export function ModsOverlay({
 
       return () => {
         activeLoadRequestRef.current += 1;
-        if (modsReloadTimerRef.current) {
-          window.clearTimeout(modsReloadTimerRef.current);
-          modsReloadTimerRef.current = null;
-        }
-        if (unlistenModsChanged) unlistenModsChanged();
         if (unlistenModsSnapshot) unlistenModsSnapshot();
       };
     }
 
     activeLoadRequestRef.current += 1;
-    if (modsReloadTimerRef.current) {
-      window.clearTimeout(modsReloadTimerRef.current);
-      modsReloadTimerRef.current = null;
-    }
-  }, [isOpen, environmentId]);
+  }, [
+    environmentId,
+    isOpen,
+    loadCachedModUpdates,
+    loadEnvironment,
+    loadInstalledMods,
+    loadModsPanelData,
+    refreshNexusDownloadAccess,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !environmentId) {
@@ -1156,14 +1212,14 @@ export function ModsOverlay({
       unlisten?.();
       metadataRefreshRunningRef.current = false;
     };
-  }, [isOpen, environmentId]);
+  }, [environmentId, isOpen, loadDownloadedLibrary, loadInstalledMods]);
 
-  const openModView = (nextView: ModViewState) => {
+  const openModView = useCallback((nextView: ModViewState) => {
     if (modsScrollContainerRef.current) {
       modsScrollTopRef.current = modsScrollContainerRef.current.scrollTop;
     }
     setActiveModView(nextView);
-  };
+  }, []);
   // Refresh library when notified (e.g. after download in another view) or when opening
   useEffect(() => {
     if (!isOpen || !environmentId) return;
@@ -1175,7 +1231,7 @@ export function ModsOverlay({
       void loadDownloadedLibrary();
     }
     return () => window.removeEventListener('library-updated', handler);
-  }, [isOpen, environmentId]);
+  }, [environmentId, isOpen, loadDownloadedLibrary]);
 
   useEffect(() => {
     const handleManualDownloadResult = async (event: Event) => {
@@ -1211,7 +1267,7 @@ export function ModsOverlay({
       if (detail?.success) {
         setError(null);
         await loadInstalledMods(false, true);
-        await loadDownloadedLibrary();
+        await refreshDownloadedLibrary();
         await loadCachedModUpdates();
         onModsChanged?.();
         const installedEnvironmentNames =
@@ -1240,7 +1296,16 @@ export function ModsOverlay({
       clearNexusManualTimeout();
       window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
     };
-  }, [environment?.name, environmentId, installingNexusMod, onModsChanged, showToast]);
+  }, [
+    environment?.name,
+    environmentId,
+    installingNexusMod,
+    loadCachedModUpdates,
+    refreshDownloadedLibrary,
+    loadInstalledMods,
+    onModsChanged,
+    showToast,
+  ]);
 
   const checkModUpdates = async (showErrors: boolean = false) => {
     try {
@@ -1272,11 +1337,79 @@ export function ModsOverlay({
     try {
       await checkModUpdates(true); // Show errors when manually triggered
       await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
+      await refreshDownloadedLibrary();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to check for mod updates');
     } finally {
       setCheckingModUpdates(false);
+    }
+  };
+
+  const handleShareProfile = async () => {
+    const operationId = ++profileExportOperationRef.current;
+    setProfileExport({
+      isOpen: true,
+      manifest: null,
+      selectedItemKeys: new Set(),
+      profileName: environment?.name ?? 'SIMM Profile',
+      loading: true,
+      saving: false,
+    });
+    try {
+      const manifest = await ApiService.exportEnvironmentProfile(environmentId);
+      if (operationId !== profileExportOperationRef.current) return;
+      setProfileExport({
+        isOpen: true,
+        manifest,
+        selectedItemKeys: new Set(manifest.items.map((item, index) => profileItemKey(item, index))),
+        profileName: manifest.profile.name,
+        loading: false,
+        saving: false,
+      });
+      setError(null);
+    } catch (err) {
+      if (operationId !== profileExportOperationRef.current) return;
+      setProfileExport(emptyProfileExportState);
+      setError(err instanceof Error ? err.message : 'Failed to export profile.');
+    }
+  };
+
+  const closeProfileExport = useCallback(() => {
+    profileExportOperationRef.current += 1;
+    setProfileExport(emptyProfileExportState);
+  }, []);
+
+  const handleToggleProfileItem = (item: ModProfileItem, index: number, checked: boolean) => {
+    const key = profileItemKey(item, index);
+    setProfileExport((previous) => {
+      const nextKeys = new Set(previous.selectedItemKeys);
+      if (checked) {
+        nextKeys.add(key);
+      } else {
+        nextKeys.delete(key);
+      }
+      return { ...previous, selectedItemKeys: nextKeys };
+    });
+  };
+
+  const handleSaveProfile = async () => {
+    if (!adjustedProfileManifest) return;
+    try {
+      setProfileExport((previous) => ({ ...previous, saving: true }));
+      const destination = await save({
+        defaultPath: profileFileName(adjustedProfileManifest.profile.name),
+        filters: [{ name: 'SIMM Profile', extensions: ['json'] }],
+      });
+      if (!destination) return;
+
+      await ApiService.saveModProfileFile(adjustedProfileManifest, destination);
+      setProfileExport(emptyProfileExportState);
+      showToast(`Profile exported to ${destination}.`);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save profile.');
+    } finally {
+      setProfileExport((previous) => previous.isOpen ? { ...previous, saving: false } : previous);
     }
   };
 
@@ -1286,7 +1419,7 @@ export function ModsOverlay({
       await ApiService.deleteMod(environmentId, mod.fileName);
       // Reload mods list after deletion
       await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
+      await refreshDownloadedLibrary();
       await loadCachedModUpdates();
       // Notify parent that mods changed (so it can refresh the count)
       if (onModsChanged) {
@@ -1299,12 +1432,19 @@ export function ModsOverlay({
     }
   };
 
-  const handleUpdateMod = async (mod: ModInfo) => {
+  const handleUpdateMod = async (mod: ModInfo, securityOverride = false): Promise<void> => {
     setUpdatingMod(mod.fileName);
     setError(null);
     try {
-      const result = await ApiService.updateMod(environmentId, mod.fileName);
+      const result = await ApiService.updateMod(environmentId, mod.fileName, securityOverride);
       if (!result.success) {
+        if (handleSecurityGateResponse(
+          `Security Findings - ${mod.name}`,
+          result,
+          () => handleUpdateMod(mod, true),
+        )) {
+          return;
+        }
         if (result.errorCode === 'nexus_auth_required' && onOpenAccounts) {
           setConfirmDialog({
             title: 'Nexus Login Required',
@@ -1341,7 +1481,7 @@ export function ModsOverlay({
       }
 
       await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
+      await refreshDownloadedLibrary();
       await loadCachedModUpdates();
       if (onModsChanged) {
         onModsChanged();
@@ -1357,7 +1497,7 @@ export function ModsOverlay({
     const dialog: ConfirmDialog = {
       title: isManagedInstall ? 'Uninstall Managed Mod?' : 'Delete Installed File?',
       message: isManagedInstall
-        ? `Remove "${mod.name}" from this environment? SIMM will uninstall the managed link from this environment and keep the downloaded library copy.`
+        ? `Remove "${mod.name}" from this environment? SIMM will delete the managed files from this environment and keep the downloaded library copy.`
         : `Delete "${mod.name}" from this environment? This removes the installed file from the Mods folder.`,
       confirmText: isManagedInstall ? 'Uninstall from Environment' : 'Delete File',
       cancelText: 'Cancel',
@@ -1373,7 +1513,6 @@ export function ModsOverlay({
   const handleDisableMod = async (mod: ModInfo) => {
     setDisablingMod(mod.fileName);
     try {
-      suppressWatcherReloadUntilRef.current = Date.now() + 1500;
       await ApiService.disableMod(environmentId, mod.fileName);
       // Update the specific mod in-place to avoid a full list reload flash
       setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: true } : m));
@@ -1390,7 +1529,6 @@ export function ModsOverlay({
   const handleEnableMod = async (mod: ModInfo) => {
     setEnablingMod(mod.fileName);
     try {
-      suppressWatcherReloadUntilRef.current = Date.now() + 1500;
       await ApiService.enableMod(environmentId, mod.fileName);
       // Update the specific mod in-place to avoid a full list reload flash
       setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: false } : m));
@@ -1598,7 +1736,7 @@ export function ModsOverlay({
 
     if (successCount > 0) {
       await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
+      await refreshDownloadedLibrary();
       await loadCachedModUpdates();
       if (onModsChanged) {
         onModsChanged();
@@ -1643,7 +1781,7 @@ export function ModsOverlay({
       const sourceInfo = await detectModSource(nextItem.fileName);
       const detectedRuntime =
         detectRuntimeFromFileName(nextItem.fileName) ||
-        (isArchiveFile(nextItem.fileName) ? environment?.runtime ?? null : null);
+        (isArchiveFile(nextItem.fileName) ? normalizeNexusRuntime(environment?.runtime) ?? null : null);
 
       if (!detectedRuntime) {
         setPendingRuntimeSelection({
@@ -2036,7 +2174,7 @@ export function ModsOverlay({
       showToast('Mod linked and added to Mod Library.');
       closeLocalSourceLink();
       await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
+      await refreshDownloadedLibrary();
       await loadCachedModUpdates();
       onModsChanged?.();
     } catch (err) {
@@ -2046,7 +2184,15 @@ export function ModsOverlay({
         error: err instanceof Error ? err.message : 'Failed to link local mod source.',
       } : current);
     }
-  }, [closeLocalSourceLink, environmentId, onModsChanged, showToast]);
+  }, [
+    closeLocalSourceLink,
+    environmentId,
+    loadCachedModUpdates,
+    refreshDownloadedLibrary,
+    loadInstalledMods,
+    onModsChanged,
+    showToast,
+  ]);
 
   const prepareLocalOwnershipStep = useCallback(async (
     mod: ModInfo,
@@ -2156,7 +2302,7 @@ export function ModsOverlay({
         || (mod.version || '').toLowerCase().includes(query);
     });
 
-  const openInstalledModView = (mod: ModInfo) => {
+  const openInstalledModView = useCallback((mod: ModInfo) => {
     const update = modUpdates.get(mod.fileName);
     openModView({
       id: `${mod.fileName}-${mod.path}`,
@@ -2178,7 +2324,8 @@ export function ModsOverlay({
       securityScan: mod.securityScan,
       kind: 'installed',
     });
-  };  const selectedInstalledMod = useMemo(() => {
+  }, [modUpdates, openModView]);
+  const selectedInstalledMod = useMemo(() => {
     if (!isOpen || activeModView?.kind !== 'installed') {
       return null;
     }
@@ -2206,7 +2353,7 @@ export function ModsOverlay({
     if (!stillValid) {
       openInstalledModView(filteredMods[0]);
     }
-  }, [activeModView, filteredMods, isOpen]);
+  }, [activeModView, filteredMods, isOpen, openInstalledModView]);
 
   if (!isOpen) return null;
 
@@ -2421,6 +2568,9 @@ export function ModsOverlay({
                     title="Add one or more mod files (.dll, .zip, .rar, .7z, .tar.gz, or .tgz)"
                   >
                     {uploading ? uploadButtonBusyLabel : 'Add Mod'}
+                  </SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => void handleShareProfile()}>
+                    Share Profile
                   </SimmButton>
                   <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
                     Open Folder
@@ -2984,65 +3134,104 @@ export function ModsOverlay({
                   <div><span>Installed</span><strong>{selectedInstalledMod.version || 'unknown'}</strong></div>
                   <div><span>Latest</span><strong>{getInstalledModLatestVersion(selectedInstalledMod, modUpdates.get(selectedInstalledMod.fileName)) || 'unknown'}</strong></div>
                 </div>
-                <div className="workspace-inspector-card__actions">
-                  {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
+                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
+                    {selectedInstalledMod.disabled ? (
+                      <SimmButton type="button" className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>
+                        <Icon name="fas fa-check" />
+                        <span>Enable</span>
+                      </SimmButton>
+                    ) : (
+                      <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>
+                        <Icon name="fas fa-ban" />
+                        <span>Disable</span>
+                      </SimmButton>
+                    )}
                     <SimmButton
                       type="button"
                       variant="secondary"
                       className="btn btn-secondary"
-                      onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
+                      onClick={() => void handleUpdateMod(selectedInstalledMod)}
+                      disabled={!!getUpdateDisabledReason(
+                        selectedInstalledMod,
+                        modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                      )}
+                      title={getUpdateDisabledReason(
+                        selectedInstalledMod,
+                        modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                      ) || undefined}
                     >
-                      Security Report
+                      <Icon name="fas fa-arrow-up" />
+                      <span>Update</span>
                     </SimmButton>
-                  )}
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
-                    disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
-                  >
-                    {scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
-                      ? 'Scanning...'
-                      : selectedInstalledMod.securityScan
-                        ? 'Rescan Security'
-                        : 'Scan Security'}
-                  </SimmButton>
-                  {selectedInstalledMod.disabled ? (
-                    <SimmButton type="button" className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</SimmButton>
-                  ) : (
-                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</SimmButton>
-                  )}
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() => void handleUpdateMod(selectedInstalledMod)}
-                    disabled={!!getUpdateDisabledReason(
-                      selectedInstalledMod,
-                      modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                    {isLinkableLocalMod(selectedInstalledMod) && (
+                      <SimmButton type="button" className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
+                        <Icon name="fas fa-plug" />
+                        <span>Link Source</span>
+                      </SimmButton>
                     )}
-                    title={getUpdateDisabledReason(
-                      selectedInstalledMod,
-                      modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
-                    ) || undefined}
-                  >
-                    Update
-                  </SimmButton>
-                  {activeModViewSourceUrl && (
-                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
-                      Open Source Page
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
+                    {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
+                        className="btn btn-secondary"
+                        aria-label="Security Report"
+                        onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
+                      >
+                        <Icon name="fas fa-shield-halved" />
+                        <span>Report</span>
+                      </SimmButton>
+                    )}
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      className="btn btn-secondary"
+                      aria-label={
+                        scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
+                          ? 'Scanning...'
+                          : selectedInstalledMod.securityScan
+                            ? 'Rescan Security'
+                            : 'Scan Security'
+                      }
+                      onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
+                      disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
+                    >
+                      <Icon name={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` ? 'fas fa-spinner fa-spin' : 'fas fa-shield-alt'} />
+                      <span>
+                        {scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
+                          ? 'Scanning...'
+                          : selectedInstalledMod.securityScan
+                            ? 'Rescan'
+                            : 'Scan'}
+                      </span>
                     </SimmButton>
-                  )}
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</SimmButton>
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</SimmButton>
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</SimmButton>
-                  {isLinkableLocalMod(selectedInstalledMod) && (
-                    <SimmButton type="button" className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
-                      Link Source
+                    {activeModViewSourceUrl && (
+                      <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open Source Page" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
+                        <Icon name="fas fa-arrow-up-right-from-square" />
+                        <span>Source</span>
+                      </SimmButton>
+                    )}
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open Folder" onClick={handleOpenFolder}>
+                      <Icon name="fas fa-folder-open" />
+                      <span>Folder</span>
                     </SimmButton>
-                  )}
-                  <SimmButton type="button" variant="destructive" className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</SimmButton>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open Config" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>
+                      <Icon name="fas fa-file-lines" />
+                      <span>Config</span>
+                    </SimmButton>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open in Mod Library" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>
+                      <Icon name="fas fa-box-archive" />
+                      <span>Library</span>
+                    </SimmButton>
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--danger">
+                    <SimmButton type="button" variant="destructive" className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>
+                      <Icon name="fas fa-trash" />
+                      <span>Uninstall from Environment</span>
+                    </SimmButton>
+                  </div>
                 </div>
               </div>
             )}
@@ -3058,6 +3247,24 @@ export function ModsOverlay({
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      <ProfileExportDialog
+        open={profileExport.isOpen}
+        loading={profileExport.loading}
+        saving={profileExport.saving}
+        manifest={profileExport.manifest}
+        profileName={profileExport.profileName}
+        selectedItemKeys={profileExport.selectedItemKeys}
+        inputId="mods-profile-export-name"
+        saveDisabled={profileExport.loading || profileExport.saving || !adjustedProfileManifest || adjustedProfileManifest.items.length === 0}
+        onClose={closeProfileExport}
+        onProfileNameChange={(profileName) => setProfileExport((previous) => ({
+          ...previous,
+          profileName,
+        }))}
+        onToggleItem={handleToggleProfileItem}
+        onSave={() => void handleSaveProfile()}
+      />
     </>
   );
 }

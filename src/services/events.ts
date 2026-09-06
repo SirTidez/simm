@@ -1,5 +1,51 @@
 import { listen } from '@tauri-apps/api/event';
-import type { DownloadProgress, TrackedDownload, UpdateCheckResult } from '../types';
+import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult } from '../types';
+
+export type EventUnlisten = () => void;
+
+/**
+ * Own asynchronous Tauri listener registration for a React effect.
+ *
+ * `listen()` resolves asynchronously.  A normal effect cleanup can therefore
+ * run before it yields its unlisten callback, leaking a stale listener.  Keep
+ * the listener and the callback's liveness in one small scope so callers can
+ * safely register several listeners without hand-rolled mutable variables.
+ */
+export interface AsyncListenerScope {
+  register: (subscribe: () => Promise<EventUnlisten>) => void;
+  dispose: () => void;
+  isActive: () => boolean;
+}
+
+export function createAsyncListenerScope(onError?: (error: unknown) => void): AsyncListenerScope {
+  let disposed = false;
+  const unlisteners = new Set<EventUnlisten>();
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const unlisten of unlisteners) {
+      unlisten();
+    }
+    unlisteners.clear();
+  };
+
+  return {
+    register: (subscribe) => {
+      void subscribe()
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+            return;
+          }
+          unlisteners.add(unlisten);
+        })
+        .catch((error: unknown) => onError?.(error));
+    },
+    dispose,
+    isActive: () => !disposed,
+  };
+}
 
 export interface ProgressEvent {
   downloadId: string;
@@ -8,11 +54,13 @@ export interface ProgressEvent {
 
 export interface CompleteEvent {
   downloadId: string;
+  operationId: string;
   manifestId?: string;
 }
 
 export interface ErrorEvent {
   downloadId: string;
+  operationId: string;
   error: string;
 }
 
@@ -28,6 +76,10 @@ export interface AuthSuccessEvent {
 export interface AuthErrorEvent {
   downloadId: string;
   error: string;
+}
+
+export interface SteamAuthQrLineEvent {
+  line: string;
 }
 
 export interface MelonLoaderInstallingEvent {
@@ -58,6 +110,8 @@ export interface UpdateCheckCompleteEvent {
   environmentId: string;
   updateResult: UpdateCheckResult;
 }
+
+export type RuntimeSwitchEvent = RuntimeSwitchResult;
 
 export interface ModsChangedEvent {
   environmentId: string;
@@ -109,6 +163,14 @@ export interface ModMetadataRefreshStatusEvent {
 
 export type TrackedDownloadUpdatedEvent = TrackedDownload;
 
+export async function onLiveTelemetryEvent(handler: (data: LiveTelemetryEvent) => void): Promise<() => void> {
+  return await listen<LiveTelemetryEvent>('live_telemetry_event', (event) => handler(event.payload));
+}
+
+export async function onLiveTelemetryStatus(handler: (data: LiveTelemetryStatus) => void): Promise<() => void> {
+  return await listen<LiveTelemetryStatus>('live_telemetry_status', (event) => handler(event.payload));
+}
+
 export async function onProgress(handler: (data: DownloadProgress) => void): Promise<() => void> {
   return await listen<ProgressEvent>('download_progress', (event) => {
     handler(event.payload.progress);
@@ -145,6 +207,12 @@ export async function onAuthError(handler: (data: AuthErrorEvent) => void): Prom
   });
 }
 
+export async function onSteamAuthQrLine(handler: (data: SteamAuthQrLineEvent) => void): Promise<() => void> {
+  return await listen<SteamAuthQrLineEvent>('steam_auth_qr_line', (event) => {
+    handler(event.payload);
+  });
+}
+
 export async function onMelonLoaderInstalling(handler: (data: MelonLoaderInstallingEvent) => void): Promise<() => void> {
   return await listen<MelonLoaderInstallingEvent>('melonloader_installing', (event) => {
     handler(event.payload);
@@ -171,6 +239,12 @@ export async function onUpdateAvailable(handler: (data: UpdateAvailableEvent) =>
 
 export async function onUpdateCheckComplete(handler: (data: UpdateCheckCompleteEvent) => void): Promise<() => void> {
   return await listen<UpdateCheckCompleteEvent>('update_check_complete', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onRuntimeSwitch(handler: (data: RuntimeSwitchEvent) => void): Promise<() => void> {
+  return await listen<RuntimeSwitchEvent>('steam_runtime_switched', (event) => {
     handler(event.payload);
   });
 }

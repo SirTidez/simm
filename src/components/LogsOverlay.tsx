@@ -13,16 +13,20 @@ import {
 } from '@/components/ui/select';
 
 import { ApiService } from '../services/api';
+import { createAsyncListenerScope } from '../services/events';
 import type { Environment } from '../types';
 import { Icon } from './Icon';
 import { SimmBadge, SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
+import { useModLibraryStore } from '../stores/modLibraryStore';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
 const INITIAL_LOG_LINE_LIMIT = 4000;
 const LOG_LINE_CHUNK_SIZE = 4000;
 const LOG_FILE_CACHE_LIMIT = 10;
 const LOG_ROW_ESTIMATED_HEIGHT = 58;
+const LOG_ROW_CONTENT_LINE_HEIGHT = 18;
+const LOG_ROW_WRAP_CHARACTER_ESTIMATE = 140;
 const LOG_ROW_OVERSCAN = 14;
 const LOG_LOAD_OLDER_THRESHOLD = LOG_ROW_ESTIMATED_HEIGHT * 8;
 
@@ -41,6 +45,12 @@ interface LogLine {
   timestamp: string | null;
   modTag: string | null;
   category: 'melonloader' | 'mod' | 'general';
+}
+
+interface LogWatchUpdate {
+  sourcePath: string;
+  sessionId: number;
+  lines: LogLine[];
 }
 
 interface CachedLogFile {
@@ -104,6 +114,42 @@ function normalizeModTag(modTag: string): string {
 
 function getLineKey(line: LogLine): string {
   return `${line.lineNumber}-${line.timestamp ?? 'none'}-${line.modTag ?? 'none'}-${line.content}`;
+}
+
+function estimateLogRowHeight(line: LogLine): number {
+  const visualContentLines = line.content.split('\n').reduce((total, segment) => (
+    total + Math.max(1, Math.ceil(segment.length / LOG_ROW_WRAP_CHARACTER_ESTIMATE))
+  ), 0);
+
+  return LOG_ROW_ESTIMATED_HEIGHT + Math.max(0, visualContentLines - 1) * LOG_ROW_CONTENT_LINE_HEIGHT;
+}
+
+function buildLogRowOffsets(lines: LogLine[]): number[] {
+  const offsets = [0];
+  let totalHeight = 0;
+
+  for (const line of lines) {
+    totalHeight += estimateLogRowHeight(line);
+    offsets.push(totalHeight);
+  }
+
+  return offsets;
+}
+
+function findLogRowIndexAtOffset(offsets: number[], targetOffset: number): number {
+  let low = 0;
+  let high = Math.max(0, offsets.length - 1);
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (offsets[mid + 1] <= targetOffset) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
 }
 
 function areLogLinesEqual(left: LogLine[], right: LogLine[]): boolean {
@@ -192,9 +238,16 @@ function areLogFilesEqual(left: LogFile[], right: LogFile[]): boolean {
 }
 
 function getEffectiveLevel(line: LogLine): EffectiveLevel {
-  const sourceText = `${line.level ?? ''} ${line.content}`.toLowerCase();
+  const normalizedLevel = line.level?.toUpperCase();
 
-  if (/\berror\b|\bfatal\b/.test(sourceText)) return 'ERROR';
+  if (normalizedLevel === 'ERROR' || normalizedLevel === 'FATAL') return 'ERROR';
+  if (normalizedLevel === 'WARN' || normalizedLevel === 'WARNING') return 'WARN';
+  if (normalizedLevel === 'DEBUG' || normalizedLevel === 'TRACE') return 'DEBUG';
+  if (normalizedLevel === 'INFO') return 'INFO';
+
+  const sourceText = line.content.toLowerCase();
+
+  if (/\b(error|fatal|exception|failed|failure)\b/.test(sourceText)) return 'ERROR';
   if (/\bwarn(ing)?\b/.test(sourceText)) return 'WARN';
   if (/\bdebug\b|\btrace\b/.test(sourceText)) return 'DEBUG';
   return 'INFO';
@@ -460,8 +513,9 @@ const LogStream = memo(function LogStream({
     if (!container) return;
 
     const { scrollTop, scrollHeight, clientHeight } = container;
-    onScrollStateChange(Math.abs(scrollHeight - clientHeight - scrollTop) < 12);
-    if (scrollTop <= LOG_LOAD_OLDER_THRESHOLD) {
+    const atBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 12;
+    onScrollStateChange(atBottom);
+    if (!atBottom && scrollHeight > clientHeight && scrollTop <= LOG_LOAD_OLDER_THRESHOLD) {
       onLoadOlder();
     }
 
@@ -507,15 +561,20 @@ const LogStream = memo(function LogStream({
     }
   }, []);
 
+  const rowOffsets = useMemo(() => buildLogRowOffsets(visibleLines), [visibleLines]);
+  const totalEstimatedHeight = rowOffsets[rowOffsets.length - 1] ?? 0;
   const effectiveStreamViewportHeight = scrollMetrics.height > 0 ? scrollMetrics.height : 720;
-  const virtualStartIndex = Math.max(0, Math.floor(scrollMetrics.top / LOG_ROW_ESTIMATED_HEIGHT) - LOG_ROW_OVERSCAN);
+  const virtualStartIndex = Math.max(
+    0,
+    findLogRowIndexAtOffset(rowOffsets, scrollMetrics.top) - LOG_ROW_OVERSCAN,
+  );
   const virtualEndIndex = Math.min(
     visibleLines.length,
-    Math.ceil((scrollMetrics.top + effectiveStreamViewportHeight) / LOG_ROW_ESTIMATED_HEIGHT) + LOG_ROW_OVERSCAN,
+    findLogRowIndexAtOffset(rowOffsets, scrollMetrics.top + effectiveStreamViewportHeight) + LOG_ROW_OVERSCAN + 1,
   );
   const virtualLines = visibleLines.slice(virtualStartIndex, virtualEndIndex);
-  const virtualTopPadding = virtualStartIndex * LOG_ROW_ESTIMATED_HEIGHT;
-  const virtualBottomPadding = Math.max(0, (visibleLines.length - virtualEndIndex) * LOG_ROW_ESTIMATED_HEIGHT);
+  const virtualTopPadding = rowOffsets[virtualStartIndex] ?? 0;
+  const virtualBottomPadding = Math.max(0, totalEstimatedHeight - (rowOffsets[virtualEndIndex] ?? totalEstimatedHeight));
 
   return (
     <div
@@ -598,6 +657,7 @@ const LogStream = memo(function LogStream({
 });
 
 export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibraryView }: Props) {
+  const { library: sharedLibrary, ensureLibrary } = useModLibraryStore();
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
   const [selectedLogPath, setSelectedLogPath] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
@@ -615,6 +675,14 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const [exporting, setExporting] = useState(false);
   const [isWatching, setIsWatching] = useState(false);
   const [watchedPath, setWatchedPath] = useState<string | null>(null);
+  const isWatchingRef = useRef(isWatching);
+  const watchedPathRef = useRef(watchedPath);
+  const watchedSessionIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    isWatchingRef.current = isWatching;
+    watchedPathRef.current = watchedPath;
+  }, [isWatching, watchedPath]);
   const [autoScroll, setAutoScroll] = useState(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -630,6 +698,8 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const selectedLogPathRef = useRef<string | null>(null);
   const loadedLogLineLimitRef = useRef(INITIAL_LOG_LINE_LIMIT);
   const loadingOlderRef = useRef(false);
+  const watchGenerationRef = useRef(0);
+  const watchOperationRef = useRef<Promise<void>>(Promise.resolve());
 
   const selectedLogFile = useMemo(
     () => logFiles.find((file) => file.path === selectedLogPath) ?? null,
@@ -859,8 +929,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     const targetIndex = visibleLines.findIndex((candidate) => getLineKey(candidate) === key);
     if (targetIndex >= 0 && logContainerRef.current) {
+      const rowOffsets = buildLogRowOffsets(visibleLines);
       logContainerRef.current.scrollTo({
-        top: Math.max(0, targetIndex * LOG_ROW_ESTIMATED_HEIGHT - LOG_ROW_ESTIMATED_HEIGHT),
+        top: Math.max(0, (rowOffsets[targetIndex] ?? 0) - LOG_ROW_ESTIMATED_HEIGHT),
         behavior: 'auto',
       });
     }
@@ -890,10 +961,27 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     }
     setToastMessage(null);
 
-    if (isWatching || watchedPath) {
-      void ApiService.stopWatchingLog().catch((err) => {
-        console.error('Failed to stop watching log file during environment switch:', err);
-      });
+    const generation = ++watchGenerationRef.current;
+    const sessionId = watchedSessionIdRef.current;
+    if (sessionId !== null) {
+      watchOperationRef.current = watchOperationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await ApiService.stopWatchingLog(sessionId);
+          if (generation !== watchGenerationRef.current) return;
+          isWatchingRef.current = false;
+          watchedPathRef.current = null;
+          if (watchedSessionIdRef.current === sessionId) {
+            watchedSessionIdRef.current = null;
+          }
+          setIsWatching(false);
+          setWatchedPath(null);
+        })
+        .catch((err) => {
+          if (generation === watchGenerationRef.current) {
+            console.error('Failed to stop watching log file during environment switch:', err);
+          }
+        });
     }
     setIsWatching(false);
     setWatchedPath(null);
@@ -1065,57 +1153,95 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   };
 
   useEffect(() => {
-    if (!selectedLogFile) return;
+    const generation = ++watchGenerationRef.current;
+    const targetPath = selectedLogFile && isLiveLogFile(selectedLogFile)
+      ? selectedLogFile.path
+      : null;
 
-    const syncWatching = async () => {
-      try {
-        if (isLiveLogFile(selectedLogFile)) {
-          if (watchedPath === selectedLogFile.path && isWatching) {
-            return;
+    // Tauri owns a single global watcher. Serialize source transitions so a
+    // delayed A start cannot win after the user has selected B.
+    watchOperationRef.current = watchOperationRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== watchGenerationRef.current) return;
+
+        const currentPath = watchedPathRef.current;
+        if (currentPath && currentPath !== targetPath) {
+          const sessionId = watchedSessionIdRef.current;
+          if (sessionId !== null) {
+            await ApiService.stopWatchingLog(sessionId);
           }
-          if (isWatching && watchedPath && watchedPath !== selectedLogFile.path) {
-            await ApiService.stopWatchingLog();
+          if (generation !== watchGenerationRef.current) return;
+          isWatchingRef.current = false;
+          watchedPathRef.current = null;
+          if (watchedSessionIdRef.current === sessionId) {
+            watchedSessionIdRef.current = null;
           }
-          await ApiService.watchLogFile(selectedLogFile.path);
-          setIsWatching(true);
-          setWatchedPath(selectedLogFile.path);
-        } else if (isWatching) {
-          await ApiService.stopWatchingLog();
           setIsWatching(false);
           setWatchedPath(null);
         }
-      } catch (err) {
-        console.error('Failed to synchronize live log watching:', err);
-      }
-    };
 
-    void syncWatching();
+        if (!targetPath) return;
+        if (watchedPathRef.current === targetPath && isWatchingRef.current) return;
+
+        const session = await ApiService.watchLogFile(targetPath);
+        if (generation !== watchGenerationRef.current) {
+          // This queued operation was superseded before it completed. The
+          // next serialized operation will establish the current source.
+          await ApiService.stopWatchingLog(session.sessionId);
+          return;
+        }
+
+        isWatchingRef.current = true;
+        watchedPathRef.current = targetPath;
+        watchedSessionIdRef.current = session.sessionId;
+        setIsWatching(true);
+        setWatchedPath(targetPath);
+      })
+      .catch((err) => {
+        if (generation === watchGenerationRef.current) {
+          console.error('Failed to synchronize live log watching:', err);
+        }
+      });
   }, [isLiveLogFile, isWatching, selectedLogFile, watchedPath]);
 
   useEffect(() => {
-    if (!isWatching) return;
+    if (!isWatching || !watchedPath) return;
 
-    let unlisten: (() => void) | null = null;
-    const bindListener = async () => {
-      unlisten = await listen<{ lines: LogLine[] }>('log-update', (event) => {
+    const sourcePath = watchedPath;
+    const sessionId = watchedSessionIdRef.current;
+    if (sessionId === null) return;
+    const listeners = createAsyncListenerScope((error) => {
+      console.error('Failed to bind log-update listener:', error);
+    });
+    listeners.register(() => listen<LogWatchUpdate>('log-update', (event) => {
+        // Both source and session are immutable backend identities. Checking
+        // them protects against an event emitted by A after B is selected,
+        // including a later watch of the same source path.
+        if (
+          !listeners.isActive()
+          || event.payload.sourcePath !== sourcePath
+          || event.payload.sessionId !== sessionId
+          || selectedLogPathRef.current !== sourcePath
+          || watchedPathRef.current !== sourcePath
+          || watchedSessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
         setLogLines((current) => {
           const nextLines = [...current, ...event.payload.lines].slice(-loadedLogLineLimitRef.current);
-          if (selectedLogFile) {
-            cacheLogLines(selectedLogFile, nextLines, loadedLogLineLimitRef.current);
+          const sourceFile = logFiles.find((file) => file.path === sourcePath);
+          if (sourceFile) {
+            cacheLogLines(sourceFile, nextLines, loadedLogLineLimitRef.current);
           }
           return nextLines;
         });
-      });
-    };
-
-    void bindListener();
+      }));
 
     return () => {
-      if (unlisten) {
-        unlisten();
-      }
+      listeners.dispose();
     };
-  }, [cacheLogLines, isWatching, selectedLogFile]);
+  }, [cacheLogLines, isWatching, logFiles, watchedPath]);
 
   useEffect(() => {
     if (selectedModTag && !modActivity.some((item) => normalizeModTag(item.modTag) === normalizeModTag(selectedModTag))) {
@@ -1146,13 +1272,29 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   useEffect(() => {
     if (!isOpen) return;
     return () => {
-      if (isWatching) {
-        void ApiService.stopWatchingLog().catch((err) => {
-          console.error('Failed to stop watching log file:', err);
+      const generation = ++watchGenerationRef.current;
+      const sessionId = watchedSessionIdRef.current;
+      if (sessionId === null) return;
+      watchOperationRef.current = watchOperationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await ApiService.stopWatchingLog(sessionId);
+          if (generation !== watchGenerationRef.current) return;
+          isWatchingRef.current = false;
+          watchedPathRef.current = null;
+          if (watchedSessionIdRef.current === sessionId) {
+            watchedSessionIdRef.current = null;
+          }
+          setIsWatching(false);
+          setWatchedPath(null);
+        })
+        .catch((err) => {
+          if (generation === watchGenerationRef.current) {
+            console.error('Failed to stop watching log file:', err);
+          }
         });
-      }
     };
-  }, [isOpen, isWatching]);
+  }, [isOpen]);
 
   const loadOlderLogEntries = useCallback(() => {
     if (!selectedLogFile || loadingOlderRef.current) return;
@@ -1246,7 +1388,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     try {
       setOpeningModView(true);
-      const library = await ApiService.getModLibrary();
+      const library = sharedLibrary ?? await ensureLibrary();
       const normalizedTag = normalizeModTag(modTag);
       const remoteSources = new Set(['thunderstore', 'nexusmods', 'github']);
       const matches = library.downloaded.filter((entry) => {

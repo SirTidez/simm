@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
 
 const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
 const saveMock = vi.hoisted(() => vi.fn());
+const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
@@ -29,6 +30,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   save: saveMock,
 }));
+vi.mock('../stores/modLibraryStore', () => ({ useModLibraryStore: modLibraryStoreMocks.useModLibraryStore }));
 
 const environment: Environment = {
   id: 'env-1',
@@ -90,6 +92,11 @@ describe('LogsOverlay', () => {
   const originalInnerWidth = window.innerWidth;
 
   beforeEach(() => {
+    modLibraryStoreMocks.useModLibraryStore.mockReset();
+    modLibraryStoreMocks.useModLibraryStore.mockReturnValue({
+      library: null,
+      ensureLibrary: apiMocks.getModLibrary,
+    });
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       writable: true,
@@ -106,7 +113,11 @@ describe('LogsOverlay', () => {
     listenMock.mockReset();
     saveMock.mockReset();
 
-    apiMocks.watchLogFile.mockResolvedValue(undefined);
+    let nextWatchSessionId = 1;
+    apiMocks.watchLogFile.mockImplementation(async (sourcePath: string) => ({
+      sourcePath,
+      sessionId: nextWatchSessionId++,
+    }));
     apiMocks.stopWatchingLog.mockResolvedValue(undefined);
     apiMocks.openPath.mockResolvedValue(undefined);
     apiMocks.revealPath.mockResolvedValue(undefined);
@@ -153,6 +164,39 @@ describe('LogsOverlay', () => {
     const viewerHeader = container.querySelector('.logs-panel__viewer-header');
     expect(viewerHeader).toBeTruthy();
     expect(within(viewerHeader as HTMLElement).getByRole('heading', { name: 'Session-latest.log' })).toBeTruthy();
+  });
+
+  it('drops a late event from a previously selected live source', async () => {
+    type LiveLogPayload = {
+      sourcePath: string;
+      sessionId: number;
+      lines: ReturnType<typeof makeLogLine>[];
+    };
+    const listenerCallbacks: Array<(event: { payload: LiveLogPayload }) => void> = [];
+    listenMock.mockImplementation((async (_eventName: string, callback: (event: { payload: LiveLogPayload }) => void) => {
+      listenerCallbacks.push(callback);
+      return () => {};
+    }) as any);
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({ name: 'A.log', path: 'C:/Logs/A.log', isLatest: true }),
+      makeLogFile({ name: 'B.log', path: 'C:/Logs/B.log', isLatest: true }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue([]);
+
+    render(<LogsOverlay isOpen={true} onClose={vi.fn()} environmentId="env-1" environment={environment} />);
+    await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledWith('C:/Logs/A.log'));
+    fireEvent.click(screen.getByRole('button', { name: /b\.log/i }));
+    await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledWith('C:/Logs/B.log'));
+
+    listenerCallbacks[0]?.({
+      payload: {
+        sourcePath: 'C:/Logs/A.log',
+        sessionId: 1,
+        lines: [makeLogLine({ content: 'late A line' })],
+      },
+    });
+
+    expect(screen.queryByText('late A line')).toBeNull();
   });
 
   it('shows a loading state immediately after selecting a different log file', async () => {
@@ -777,6 +821,39 @@ describe('LogsOverlay', () => {
     expect(directChildren[1]?.classList.contains('logs-panel__line-content')).toBe(true);
   });
 
+  it('uses backend warning severity even when recovered IL2CPP messages contain failed text', async () => {
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue([
+      makeLogLine({
+        lineNumber: 184,
+        timestamp: '23:49:03.471',
+        level: 'WARN',
+        category: 'melonloader',
+        modTag: null,
+        content: '[Il2CppInterop] Failed to init IL2CPP patch backend for void UnityEngine.WaitForSeconds::.ctor(float seconds), using normal patch handlers: Derived classes must provide an implementation.',
+      }),
+    ]);
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText(/Failed to init IL2CPP patch backend/)).toBeTruthy();
+    expect(screen.getByText('Warning')).toBeTruthy();
+    expect(screen.queryByText('Error')).toBeNull();
+  });
+
   it('virtualizes large log files instead of mounting every line at once', async () => {
     apiMocks.getLogFiles.mockResolvedValue([
       makeLogFile({
@@ -806,6 +883,47 @@ describe('LogsOverlay', () => {
     expect(screen.queryByText(/500 Lines loaded/)).toBeNull();
     expect(container.querySelectorAll('.logs-panel__line').length).toBeLessThan(80);
     expect(container.querySelector('.logs-panel__virtual-spacer')).toBeTruthy();
+  });
+
+  it('accounts for merged multi-line log entry height while virtualizing', async () => {
+    const stackTrace = Array.from({ length: 80 }, (_, index) => (
+      `   at Example.Namespace.Type.Method${index}() in <00000000000000000000000000000000>:0`
+    )).join('\n');
+
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue([
+      makeLogLine({
+        lineNumber: 1,
+        content: `Merged IL2CPP exception\n${stackTrace}`,
+        category: 'melonloader',
+        level: 'ERROR',
+      }),
+      ...Array.from({ length: 99 }, (_, index) => makeLogLine({
+        lineNumber: index + 2,
+        content: `Following live line ${index + 2}`,
+        category: 'general',
+      })),
+    ]);
+
+    const { container } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText(/Merged IL2CPP exception/)).toBeTruthy();
+    const spacers = Array.from(container.querySelectorAll('.logs-panel__virtual-spacer')) as HTMLDivElement[];
+    const spacerHeights = spacers.map((spacer) => Number.parseFloat(spacer.style.height || '0'));
+    expect(Math.max(...spacerHeights)).toBeGreaterThan(4800);
   });
 
   it('loads an older log chunk when scrolling near the top of a tailed file', async () => {
@@ -870,7 +988,62 @@ describe('LogsOverlay', () => {
       })),
     );
 
-    expect(await screen.findByText('Expanded log line 1')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getAllByText('4100').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('does not load older entries when a tailed live log is already at the bottom', async () => {
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue(
+      Array.from({ length: 10 }, (_, index) => makeLogLine({
+        lineNumber: index + 101,
+        content: `Visible live line ${index + 101}`,
+        category: 'general',
+      })),
+    );
+
+    const { container } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Visible live line 101')).toBeTruthy();
+
+    const stream = container.querySelector('.logs-panel__stream') as HTMLDivElement | null;
+    expect(stream).toBeTruthy();
+
+    if (stream) {
+      Object.defineProperty(stream, 'scrollHeight', {
+        configurable: true,
+        value: 720,
+      });
+      Object.defineProperty(stream, 'clientHeight', {
+        configurable: true,
+        value: 720,
+      });
+      Object.defineProperty(stream, 'scrollTop', {
+        configurable: true,
+        value: 0,
+        writable: true,
+      });
+      fireEvent.scroll(stream);
+    }
+
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByText('Loading earlier entries')).toBeNull();
   });
 
   it('keeps edge-case metadata visible for missing timestamps and long mod tags', async () => {

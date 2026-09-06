@@ -7,8 +7,91 @@ permissions:
   contents: write
 
 jobs:
-  publish-beta-release:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.5"
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify release version metadata
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content 'package.json' -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $cargoVersion = (Select-String -Path 'src-tauri/Cargo.toml' -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          $lockMatch = [regex]::Match((Get-Content 'Cargo.lock' -Raw), '(?ms)^\[\[package\]\]\s+name = "simmrust"\s+version = "([^"]+)"')
+          if (-not $lockMatch.Success) {
+            throw 'Cargo.lock does not contain a simmrust package stanza.'
+          }
+          $lockVersion = $lockMatch.Groups[1].Value
+          $versions = @($packageVersion, $tauriVersion, $cargoVersion, $lockVersion) | Select-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Release version metadata is not aligned. package.json=$packageVersion tauri=$tauriVersion Cargo.toml=$cargoVersion Cargo.lock=$lockVersion"
+          }
+
+          $stableManifestPath = 'updater/stable/latest.json'
+          if (-not (Test-Path -LiteralPath $stableManifestPath -PathType Leaf)) {
+            throw 'Beta publication requires the current updater/stable/latest.json manifest.'
+          }
+          $stableVersion = (Get-Content $stableManifestPath -Raw | ConvertFrom-Json).version
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --version-only `
+            --channel beta `
+            --package-version $packageVersion `
+            --minimum-version $stableVersion
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Beta release version identity validation failed.'
+          }
+
+      - name: Type check frontend
+        run: bunx tsc --noEmit
+
+      - name: Lint frontend
+        run: bun run lint
+
+      - name: Run frontend tests
+        run: bun run test
+
+      - name: Build frontend
+        run: bun run build
+
+      - name: Run release contract tests
+        run: bun run test:release
+
+      - name: Install Linux system dependencies (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  build-windows:
+    needs: validate
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +112,18 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Configure Windows Authenticode signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          .\scripts\prepare-windows-signing.ps1 `
+            -ConfigPath 'src-tauri/tauri.conf.json' `
+            -CertificateBase64 $env:WINDOWS_CERTIFICATE `
+            -CertificatePassword $env:WINDOWS_CERTIFICATE_PASSWORD `
+            -CertificatePath (Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx')
+
       - name: Resolve app version and beta tag
         id: version
         shell: pwsh
@@ -39,12 +134,8 @@ jobs:
             throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
           }
 
-          $tag = "v${version}-beta"
-          $assetName = "SIMM_${version}_Setup.exe"
-
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v${version}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Enable updater artifacts for release build
         shell: pwsh
@@ -56,6 +147,9 @@ jobs:
           }
           $config.bundle.createUpdaterArtifacts = $true
           $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+
+      - name: Validate Windows app launch manifest
+        run: bash scripts/validate-windows-app-manifest.sh
 
       - name: Build Windows installer
         env:
@@ -69,58 +163,241 @@ jobs:
         shell: pwsh
         run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
 
-      - name: Prepare release assets
-        id: asset
+      - name: Prepare Windows release assets
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path 'artifacts/windows' -Force | Out-Null
 
           $setupSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe')
           if ($setupSources.Count -ne 1) {
             throw "Expected exactly one NSIS setup executable, found $($setupSources.Count)."
           }
+
           $setupSource = $setupSources[0]
           $signaturePath = Join-Path $setupSource.DirectoryName "$($setupSource.Name).sig"
           if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
             throw "Updater signature '$signaturePath' was not generated for installer '$($setupSource.Name)'."
           }
-          $signatureSource = Get-Item -LiteralPath $signaturePath
 
-          $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
+          $setupTarget = "artifacts/windows/SIMM_${version}_Setup.exe"
+          $signatureTarget = "$setupTarget.sig"
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
+          Copy-Item -LiteralPath $signaturePath -Destination $signatureTarget -Force
 
-          $signatureTarget = Join-Path 'artifacts' $signatureSource.Name
-          Copy-Item -LiteralPath $signatureSource.FullName -Destination $signatureTarget -Force
+          .\scripts\verify-windows-signatures.ps1 `
+            -Path @('target/release/simmrust.exe', $setupTarget) `
+            -ExpectedThumbprint $env:SIMM_WINDOWS_SIGNING_THUMBPRINT
 
-          "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "signature_file=$signatureTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Upload workflow artifact
+      - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:
-          name: SIMM_${{ steps.version.outputs.version }}_ReleaseAssets
-          path: |
-            ${{ steps.asset.outputs.setup_file }}
-            ${{ steps.asset.outputs.signature_file }}
+          name: SIMM_${{ steps.version.outputs.version }}_Windows
+          path: artifacts/windows/*
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish beta GitHub release
+      - name: Remove Windows signing material
+        if: always()
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx'
+          if (Test-Path -LiteralPath $certificatePath) {
+            Remove-Item -LiteralPath $certificatePath -Force
+          }
+          if ($env:SIMM_WINDOWS_SIGNING_THUMBPRINT) {
+            $storePath = "Cert:\CurrentUser\My\$env:SIMM_WINDOWS_SIGNING_THUMBPRINT"
+            if (Test-Path -LiteralPath $storePath) {
+              Remove-Item -LiteralPath $storePath -Force
+            }
+          }
+
+  build-linux:
+    needs: validate
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.5"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config \
+            librsvg2-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve app version
+        id: version
+        shell: pwsh
+        run: |
+          $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = $config.version
+          if (-not $version) {
+            throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Enable updater artifacts for release build
+        shell: pwsh
+        run: |
+          $configPath = 'src-tauri/tauri.conf.json'
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+          if (-not $config.ContainsKey('bundle') -or $null -eq $config.bundle) {
+            $config.bundle = @{}
+          }
+          $config.bundle.createUpdaterArtifacts = $true
+          $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+
+      - name: Build Linux packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
+        run: bun run tauri:build:linux
+
+      - name: Restore tauri config
+        if: always()
+        shell: pwsh
+        run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
+
+      - name: Prepare Linux release assets
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path 'artifacts/linux' -Force | Out-Null
+
+          $bundleRoots = @('target/release/bundle', 'src-tauri/target/release/bundle') | Where-Object { Test-Path -LiteralPath $_ }
+          if ($bundleRoots.Count -eq 0) {
+            throw 'No Tauri bundle output directory was found.'
+          }
+
+          $appImageSources = @($bundleRoots | ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_ 'appimage') -File -Filter '*.AppImage' -ErrorAction SilentlyContinue
+          })
+          if ($appImageSources.Count -ne 1) {
+            throw "Expected exactly one AppImage, found $($appImageSources.Count)."
+          }
+
+          $appImageSource = $appImageSources[0]
+          $appImageSignaturePath = "$($appImageSource.FullName).sig"
+          if (-not (Test-Path -LiteralPath $appImageSignaturePath -PathType Leaf)) {
+            throw "Updater signature '$appImageSignaturePath' was not generated for AppImage '$($appImageSource.Name)'."
+          }
+
+          $debSources = @($bundleRoots | ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_ 'deb') -File -Filter '*.deb' -ErrorAction SilentlyContinue
+          })
+          if ($debSources.Count -ne 1) {
+            throw "Expected exactly one deb package, found $($debSources.Count)."
+          }
+
+          $appImageTarget = "artifacts/linux/SIMM_${version}_x86_64.AppImage"
+          $appImageSignatureTarget = "$appImageTarget.sig"
+          $debTarget = "artifacts/linux/SIMM_${version}_amd64.deb"
+          Copy-Item -LiteralPath $appImageSource.FullName -Destination $appImageTarget -Force
+          Copy-Item -LiteralPath $appImageSignaturePath -Destination $appImageSignatureTarget -Force
+          Copy-Item -LiteralPath $debSources[0].FullName -Destination $debTarget -Force
+          Copy-Item -LiteralPath 'install.sh' -Destination 'artifacts/linux/install.sh' -Force
+          bash -lc 'cd artifacts/linux && rm -f SHA256SUMS && sha256sum * > SHA256SUMS'
+
+      - name: Validate Linux desktop scheme handlers
+        shell: bash
+        run: |
+          bash -n install.sh
+          bash scripts/validate-linux-desktop-mime.sh "artifacts/linux/SIMM_${{ steps.version.outputs.version }}_amd64.deb"
+          bash scripts/validate-linux-desktop-mime.sh "artifacts/linux/SIMM_${{ steps.version.outputs.version }}_x86_64.AppImage"
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMM_${{ steps.version.outputs.version }}_Linux
+          path: artifacts/linux/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-beta-release:
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-linux
+    concurrency:
+      group: publish-beta-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build and validate release checksums
+        shell: pwsh
+        run: |
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $checksumPath = Join-Path 'artifacts' 'SHA256SUMS'
+          $checksumLines = @(Get-ChildItem -Path 'artifacts' -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          })
+          Set-Content -LiteralPath $checksumPath -Encoding ascii -Value $checksumLines
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --artifacts-only `
+            --artifact-dir artifacts `
+            --package-version $version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Beta release artifact validation failed.'
+          }
+
+      - name: Create or update draft beta GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
-          $assetPath = '${{ steps.asset.outputs.setup_file }}'
-          $signatureAssetPath = '${{ steps.asset.outputs.signature_file }}'
-          $assetName = '${{ steps.version.outputs.asset_name }}'
-          $signatureAssetName = Split-Path -Path $signatureAssetPath -Leaf
+          $tag = '${{ needs.build-windows.outputs.tag }}'
+          $assetPaths = @(Get-ChildItem -Path 'artifacts' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+          if ($assetPaths.Count -eq 0) {
+            throw 'No release assets were downloaded.'
+          }
 
-          gh release view $tag *> $null
+          $existing = gh release view $tag --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "$assetPath#$assetName" "$signatureAssetPath#$signatureAssetName" --clobber
+            $releaseState = $existing | ConvertFrom-Json
+            if (-not $releaseState.isDraft) {
+              throw "Release '$tag' is already public. Refusing to replace assets before updater validation."
+            }
+            gh release upload $tag @assetPaths --clobber
           } else {
-            gh release create $tag "$assetPath#$assetName" "$signatureAssetPath#$signatureAssetName" --title $tag --generate-notes --prerelease --target $env:GITHUB_SHA
+            gh release create $tag @assetPaths --title $tag --generate-notes --draft --prerelease --target $env:GITHUB_SHA
           }
 
       - name: Generate beta updater manifest
@@ -128,32 +405,69 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
-          $installerAssetPath = '${{ steps.asset.outputs.setup_file }}'
-          $signaturePath = '${{ steps.asset.outputs.signature_file }}'
-          $installerAssetName = Split-Path -Path $installerAssetPath -Leaf
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $tag = '${{ needs.build-windows.outputs.tag }}'
           $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
-          $assetUrl = "https://github.com/SirTidez/simm/releases/download/$tag/$installerAssetName"
-          $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { '' }
+          $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { [DateTimeOffset]::UtcNow.ToString('o') }
+          $stableManifestPath = 'updater/stable/latest.json'
+          if (-not (Test-Path -LiteralPath $stableManifestPath -PathType Leaf)) {
+            throw 'Beta manifest generation requires updater/stable/latest.json.'
+          }
+          $stableVersion = (Get-Content $stableManifestPath -Raw | ConvertFrom-Json).version
+
+          $windowsInstaller = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_Setup.exe" | Select-Object -First 1
+          $windowsSignature = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_Setup.exe.sig" | Select-Object -First 1
+          $linuxAppImage = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_x86_64.AppImage" | Select-Object -First 1
+          $linuxSignature = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_x86_64.AppImage.sig" | Select-Object -First 1
+
+          if (-not $windowsInstaller -or -not $windowsSignature -or -not $linuxAppImage -or -not $linuxSignature) {
+            throw 'Missing one or more signed updater assets required for manifest generation.'
+          }
 
           .\scripts\generate-updater-manifest.ps1 `
-            -Version '${{ steps.version.outputs.version }}' `
-            -AssetUrl $assetUrl `
-            -SignaturePath $signaturePath `
+            -Version $version `
+            -Channel Beta `
+            -PackageVersion $version `
+            -MinimumVersion $stableVersion `
+            -AssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($windowsInstaller.Name)" `
+            -SignaturePath $windowsSignature.FullName `
+            -LinuxAssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($linuxAppImage.Name)" `
+            -LinuxSignaturePath $linuxSignature.FullName `
             -OutputPath 'updater/beta/latest-beta.json' `
             -Notes ($release.body ?? '') `
             -PubDate $publishedAtIso
 
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --manifest updater/beta/latest-beta.json `
+            --channel beta `
+            --package-version $version `
+            --minimum-version $stableVersion `
+            --artifact-dir artifacts
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Generated Beta updater manifest validation failed.'
+          }
+
           $manifest = Get-Content 'updater/beta/latest-beta.json' -Raw | ConvertFrom-Json
-          $platform = $manifest.platforms.'windows-x86_64'
-          if (-not $platform) {
+          $windowsPlatform = $manifest.platforms.'windows-x86_64'
+          if (-not $windowsPlatform) {
             throw 'Beta updater manifest is missing the windows-x86_64 platform entry.'
           }
-          if (-not $platform.url.EndsWith('.exe')) {
-            throw "Beta updater manifest must point to the signed installer, got '$($platform.url)'."
+          if (-not $windowsPlatform.url.EndsWith('.exe')) {
+            throw "Beta updater manifest must point Windows to the signed installer, got '$($windowsPlatform.url)'."
           }
-          if (-not $platform.signature) {
-            throw 'Beta updater manifest is missing the updater signature.'
+          if (-not $windowsPlatform.signature) {
+            throw 'Beta updater manifest is missing the Windows updater signature.'
+          }
+
+          $linuxPlatform = $manifest.platforms.'linux-x86_64'
+          if (-not $linuxPlatform) {
+            throw 'Beta updater manifest is missing the linux-x86_64 platform entry.'
+          }
+          if (-not $linuxPlatform.url.EndsWith('.AppImage')) {
+            throw "Beta updater manifest must point Linux to the signed AppImage, got '$($linuxPlatform.url)'."
+          }
+          if (-not $linuxPlatform.signature) {
+            throw 'Beta updater manifest is missing the Linux updater signature.'
           }
 
       - name: Upload beta updater manifest to release
@@ -161,8 +475,67 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
+          $tag = '${{ needs.build-windows.outputs.tag }}'
           gh release upload $tag "updater/beta/latest-beta.json#latest-beta.json" --clobber
+
+      - name: Verify final beta draft assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ needs.build-windows.outputs.tag }}'
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $verificationRoot = Join-Path $env:RUNNER_TEMP 'simm-beta-release-verification'
+          if (Test-Path -LiteralPath $verificationRoot) {
+            Remove-Item -LiteralPath $verificationRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $verificationRoot | Out-Null
+
+          $release = gh release view $tag --json isDraft | ConvertFrom-Json
+          if (-not $release.isDraft) {
+            throw "Release '$tag' became public before final asset verification."
+          }
+          gh release download $tag --dir $verificationRoot --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download draft release assets for '$tag'."
+          }
+
+          $expectedPaths = @(
+            @(Get-ChildItem -Path 'artifacts' -File | ForEach-Object { $_.FullName })
+            (Resolve-Path 'updater/beta/latest-beta.json').Path
+          )
+          $expectedNames = @($expectedPaths | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+          $actualNames = @(Get-ChildItem -Path $verificationRoot -File | ForEach-Object { $_.Name } | Sort-Object)
+          if (Compare-Object -ReferenceObject $expectedNames -DifferenceObject $actualNames) {
+            throw "Draft release '$tag' contains missing or unexpected assets."
+          }
+          foreach ($expectedPath in $expectedPaths) {
+            $assetName = [IO.Path]::GetFileName($expectedPath)
+            $downloadedPath = Join-Path $verificationRoot $assetName
+            $expectedHash = (Get-FileHash -LiteralPath $expectedPath -Algorithm SHA256).Hash
+            $actualHash = (Get-FileHash -LiteralPath $downloadedPath -Algorithm SHA256).Hash
+            if ($actualHash -cne $expectedHash) {
+              throw "Draft release asset '$assetName' no longer matches the validated build artifact."
+            }
+          }
+
+          $manifest = Get-Content 'updater/beta/latest-beta.json' -Raw | ConvertFrom-Json
+          $windowsName = "SIMM_${version}_Setup.exe"
+          $linuxName = "SIMM_${version}_x86_64.AppImage"
+          $windowsSignature = (Get-Content "artifacts/$windowsName.sig" -Raw).Trim()
+          $linuxSignature = (Get-Content "artifacts/$linuxName.sig" -Raw).Trim()
+          if (-not $manifest.platforms.'windows-x86_64'.url.EndsWith("/$windowsName") -or $manifest.platforms.'windows-x86_64'.signature -cne $windowsSignature) {
+            throw 'Beta Windows updater manifest entry does not match the final signed draft assets.'
+          }
+          if (-not $manifest.platforms.'linux-x86_64'.url.EndsWith("/$linuxName") -or $manifest.platforms.'linux-x86_64'.signature -cne $linuxSignature) {
+            throw 'Beta Linux updater manifest entry does not match the final signed draft assets.'
+          }
+
+          $release = gh release view $tag --json isDraft | ConvertFrom-Json
+          if (-not $release.isDraft) {
+            throw "Release '$tag' became public before final publication."
+          }
+          gh release edit $tag --draft=false --prerelease
 
       - name: Commit beta updater manifest
         shell: pwsh
@@ -175,8 +548,25 @@ jobs:
             exit 0
           }
 
-          git commit -m "chore(release): update beta updater manifest for ${{ steps.version.outputs.version }}"
+          git commit -m "chore(release): update beta updater manifest for ${{ needs.build-windows.outputs.version }}"
           $branch = '${{ github.event.repository.default_branch }}'
           git fetch origin $branch
           git rebase "origin/$branch"
           git push origin HEAD:$branch
+
+      - name: Verify committed beta updater feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $branch = '${{ github.event.repository.default_branch }}'
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $encoded = gh api "repos/$env:GITHUB_REPOSITORY/contents/updater/beta/latest-beta.json?ref=$branch" --jq .content
+          if ($LASTEXITCODE -ne 0 -or -not $encoded) {
+            throw 'The committed Beta updater feed is not readable from the default branch.'
+          }
+          $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($encoded -replace '\s', '')))
+          $manifest = $json | ConvertFrom-Json
+          if ($manifest.version -cne $version -or -not $manifest.platforms.'windows-x86_64' -or -not $manifest.platforms.'linux-x86_64') {
+            throw "The default-branch Beta updater feed is stale or incomplete for '$version'."
+          }

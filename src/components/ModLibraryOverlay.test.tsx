@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -12,6 +13,8 @@ import {
   type ModLibraryNavigationState,
 } from "./ModLibraryOverlay";
 import type { ModLibraryEntry } from "../types";
+import { EnvironmentStoreProvider } from "../stores/environmentStore";
+import { ModLibraryStoreProvider } from "../stores/modLibraryStore";
 
 const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
@@ -27,6 +30,7 @@ const apiMocks = vi.hoisted(() => ({
   searchNexusMods: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   getNexusModsModFiles: vi.fn(),
+  getNexusModFileDependencies: vi.fn(),
   getNexusModsLatestUpdated: vi.fn(),
   getNexusModsTrending: vi.fn(),
   getNexusModsLatestAdded: vi.fn(),
@@ -50,6 +54,22 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 const eventMocks = vi.hoisted(() => ({
+  createAsyncListenerScope: vi.fn(() => ({
+    register: vi.fn(),
+    dispose: vi.fn(),
+    isActive: () => true,
+  })),
+  onProgress: vi.fn(),
+  onComplete: vi.fn(),
+  onError: vi.fn(),
+  onUpdateAvailable: vi.fn(),
+  onUpdateCheckComplete: vi.fn(),
+  onRuntimeSwitch: vi.fn(),
+  onModsChanged: vi.fn(),
+  onModsSnapshotUpdated: vi.fn(),
+  onPluginsChanged: vi.fn(),
+  onUserLibsChanged: vi.fn(),
+  onModUpdatesChecked: vi.fn(),
   onModMetadataRefreshStatus: vi.fn(),
 }));
 
@@ -161,15 +181,19 @@ function renderLibraryOverlay({
   onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
 } = {}) {
   return render(
-    <ModLibraryOverlay
-      isOpen={true}
-      onClose={() => {}}
-      onOpenSecurityReport={onOpenSecurityReport}
-      onNavigationStateChange={onNavigationStateChange}
-      navigationState={
-        navigationState ?? (libraryTab ? { libraryTab } : undefined)
-      }
-    />,
+    <EnvironmentStoreProvider>
+      <ModLibraryStoreProvider>
+        <ModLibraryOverlay
+          isOpen={true}
+          onClose={() => {}}
+          onOpenSecurityReport={onOpenSecurityReport}
+          onNavigationStateChange={onNavigationStateChange}
+          navigationState={
+            navigationState ?? (libraryTab ? { libraryTab } : undefined)
+          }
+        />
+      </ModLibraryStoreProvider>
+    </EnvironmentStoreProvider>,
   );
 }
 
@@ -179,6 +203,18 @@ async function chooseAvailableLibraryVersion(optionName: RegExp) {
 }
 
 vi.mock("../services/events", () => ({
+  createAsyncListenerScope: eventMocks.createAsyncListenerScope,
+  onProgress: eventMocks.onProgress,
+  onComplete: eventMocks.onComplete,
+  onError: eventMocks.onError,
+  onUpdateAvailable: eventMocks.onUpdateAvailable,
+  onUpdateCheckComplete: eventMocks.onUpdateCheckComplete,
+  onRuntimeSwitch: eventMocks.onRuntimeSwitch,
+  onModsChanged: eventMocks.onModsChanged,
+  onModsSnapshotUpdated: eventMocks.onModsSnapshotUpdated,
+  onPluginsChanged: eventMocks.onPluginsChanged,
+  onUserLibsChanged: eventMocks.onUserLibsChanged,
+  onModUpdatesChecked: eventMocks.onModUpdatesChecked,
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
 
@@ -201,6 +237,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.searchNexusMods.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.getNexusModsModFiles.mockReset();
+    apiMocks.getNexusModFileDependencies.mockReset();
     apiMocks.getNexusModsLatestUpdated.mockReset();
     apiMocks.getNexusModsTrending.mockReset();
     apiMocks.getNexusModsLatestAdded.mockReset();
@@ -213,11 +250,23 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.storeModArchive.mockReset();
     apiMocks.refreshThunderstorePackageCache.mockReset();
+    eventMocks.onProgress.mockReset();
+    eventMocks.onComplete.mockReset();
+    eventMocks.onError.mockReset();
+    eventMocks.onUpdateAvailable.mockReset();
+    eventMocks.onUpdateCheckComplete.mockReset();
+    eventMocks.onRuntimeSwitch.mockReset();
+    eventMocks.onModsChanged.mockReset();
+    eventMocks.onModsSnapshotUpdated.mockReset();
+    eventMocks.onPluginsChanged.mockReset();
+    eventMocks.onUserLibsChanged.mockReset();
+    eventMocks.onModUpdatesChecked.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
 
     apiMocks.getS1APIReleases.mockResolvedValue([]);
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
     apiMocks.getEnvironments.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.deleteDownloadedMod.mockResolvedValue({ deleted: true, removedFrom: [] });
@@ -264,6 +313,10 @@ describe("ModLibraryOverlay", () => {
       },
     });
     apiMocks.getNexusModsModFiles.mockResolvedValue([]);
+    apiMocks.getNexusModFileDependencies.mockResolvedValue({
+      sourceVersionId: "",
+      requirements: [],
+    });
     apiMocks.getNexusModsLatestUpdated.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsTrending.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsLatestAdded.mockResolvedValue({ mods: [] });
@@ -304,7 +357,20 @@ describe("ModLibraryOverlay", () => {
         rateLimitedResponses: 0,
       },
     });
-    eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
+    [
+      eventMocks.onProgress,
+      eventMocks.onComplete,
+      eventMocks.onError,
+      eventMocks.onUpdateAvailable,
+      eventMocks.onUpdateCheckComplete,
+      eventMocks.onRuntimeSwitch,
+      eventMocks.onModsChanged,
+      eventMocks.onModsSnapshotUpdated,
+      eventMocks.onPluginsChanged,
+      eventMocks.onUserLibsChanged,
+      eventMocks.onModUpdatesChecked,
+      eventMocks.onModMetadataRefreshStatus,
+    ].forEach((listener) => listener.mockResolvedValue(() => {}));
     settingsStoreMocks.useSettingsStore.mockReturnValue({
       settings: {
         showSecurityScanBadges: true,
@@ -575,6 +641,50 @@ describe("ModLibraryOverlay", () => {
     expect(screen.getByText("Updated Jan 2, 2025")).toBeTruthy();
   });
 
+  it("publishes only the latest overlapping Thunderstore search", async () => {
+    const firstSearch = createDeferred<{
+      packagesByRuntime: Record<"IL2CPP" | "Mono", ReturnType<typeof makeThunderstorePackage>[]>;
+    }>();
+    apiMocks.searchThunderstoreByRuntime.mockImplementation(
+      async (_gameId, query) => {
+        if (query === "old") {
+          return firstSearch.promise;
+        }
+        return {
+          packagesByRuntime: {
+            IL2CPP: [],
+            Mono: [makeThunderstorePackage("NewResult", "1.0.0")],
+          },
+        };
+      },
+    );
+
+    renderLibraryOverlay({ libraryTab: "discover" });
+    fireEvent.click(screen.getByRole("button", { name: "Thunderstore" }));
+
+    const search = screen.getByPlaceholderText("Search or browse Thunderstore mods...");
+    fireEvent.change(search, { target: { value: "old" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.change(search, { target: { value: "new" } });
+    // Enter remains reachable while the button is disabled by the first request.
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    expect(await screen.findByText("NewResult")).toBeTruthy();
+
+    await act(async () => {
+      firstSearch.resolve({
+        packagesByRuntime: {
+          IL2CPP: [],
+          Mono: [makeThunderstorePackage("OldResult", "1.0.0")],
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("OldResult")).toBeNull();
+    expect(screen.getByText("NewResult")).toBeTruthy();
+  });
+
   it("does not re-publish navigation state when only the callback identity changes", async () => {
     apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
 
@@ -595,23 +705,31 @@ describe("ModLibraryOverlay", () => {
     });
 
     rerender(
-      <ModLibraryOverlay
-        isOpen={true}
-        onClose={() => {}}
-        navigationState={baseNavigationState}
-        onNavigationStateChange={secondHandler}
-      />,
+      <EnvironmentStoreProvider>
+        <ModLibraryStoreProvider>
+          <ModLibraryOverlay
+            isOpen={true}
+            onClose={() => {}}
+            navigationState={baseNavigationState}
+            onNavigationStateChange={secondHandler}
+          />
+        </ModLibraryStoreProvider>
+      </EnvironmentStoreProvider>,
     );
 
     expect(secondHandler).not.toHaveBeenCalled();
 
     rerender(
-      <ModLibraryOverlay
-        isOpen={true}
-        onClose={() => {}}
-        navigationState={baseNavigationState}
-        onNavigationStateChange={thirdHandler}
-      />,
+      <EnvironmentStoreProvider>
+        <ModLibraryStoreProvider>
+          <ModLibraryOverlay
+            isOpen={true}
+            onClose={() => {}}
+            navigationState={baseNavigationState}
+            onNavigationStateChange={thirdHandler}
+          />
+        </ModLibraryStoreProvider>
+      </EnvironmentStoreProvider>,
     );
 
     expect(firstHandler).toHaveBeenCalledTimes(1);
@@ -700,6 +818,80 @@ describe("ModLibraryOverlay", () => {
         "Nexus Mods • ActualUploader • Original creator: ExampleAuthor",
       ),
     ).toBeTruthy();
+  });
+
+  it("loads published Nexus dependencies for the selected library update", async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: "pack-rat-library",
+          displayName: "Pack Rat",
+          source: "nexusmods",
+          sourceId: "1629",
+          tags: ["nexus-file-id:301"],
+          installedVersion: "1.0.0",
+          updateAvailable: true,
+          remoteVersion: "1.1.0",
+        }),
+      ],
+    });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 301,
+        name: "Pack Rat Mono 1.0.0",
+        file_name: "PackRat-mono-1.0.0.zip",
+        version: "1.0.0",
+        mod_version: "1.0.0",
+        category_name: "MAIN",
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+    ]);
+    apiMocks.getNexusModFileDependencies.mockResolvedValue({
+      sourceVersionId: "301",
+      requirements: [
+        {
+          id: "dependency-777",
+          candidates: [
+            {
+              modId: "777",
+              modName: "Library Helper",
+              modFileId: "44",
+              modFileName: "LibraryHelper.zip",
+              versionId: "44",
+              versionGameScopedId: "44",
+              version: "1.2.3",
+            },
+          ],
+        },
+      ],
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "updates",
+        activeModView: {
+          kind: "downloaded",
+          id: "nexusmods::1629::file::301",
+          name: "Pack Rat",
+          source: "nexusmods",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledWith(
+        "schedule1",
+        1629,
+      );
+      expect(apiMocks.getNexusModFileDependencies).toHaveBeenCalledWith(
+        "schedule1",
+        1629,
+        301,
+      );
+    });
+    expect(screen.getByText(/Library Helper/)).toBeTruthy();
+    expect(screen.getByText("Missing")).toBeTruthy();
   });
 
   it("ignores stale Nexus file responses after search results are pruned", async () => {
@@ -1222,6 +1414,7 @@ describe("ModLibraryOverlay", () => {
     expect(
       screen.getByText("Choose where to install this downloaded mod."),
     ).toBeTruthy();
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
     expect(apiMocks.installDownloadedMod).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("checkbox", { name: /Alternate/i }));
@@ -2753,7 +2946,7 @@ describe("ModLibraryOverlay", () => {
     expect(screen.getByText("Mono • alternate")).toBeTruthy();
   });
 
-  it("treats alternate beta environments as Mono install targets in the library dialog", async () => {
+  it("uses the backend Mono runtime for custom-branch library install targets", async () => {
     const refreshController: {
       resolve?: (value: { downloaded: ModLibraryEntry[] }) => void;
     } = {};
@@ -2769,7 +2962,7 @@ describe("ModLibraryOverlay", () => {
         name: "Alternate Beta",
         path: "C:/envs/alternate-beta",
         branch: "alternate-beta",
-        runtime: "IL2CPP",
+        runtime: "MONO",
         modCount: 0,
       },
     ]);

@@ -224,6 +224,34 @@ describe('EnvironmentCreationWizard', () => {
     expect(apiMocks.installSecurityScanner).not.toHaveBeenCalled();
   });
 
+  it('automatically installs missing DepotDownloader on Linux', async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        defaultDownloadDir: '/home/tester/SIMM',
+        steamUsername: 'tester',
+        platform: 'linux',
+        experienceMode: 'powerUser',
+        showAdvancedGameTools: true,
+        setupGuideCompleted: true,
+      },
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+    });
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({
+      installed: false,
+      canAutoInstall: true,
+      installHint: 'SIMM can install the latest Linux DepotDownloader release into ~/.local/bin.',
+      installHelpUrl: 'https://github.com/SteamRE/DepotDownloader#installation',
+    });
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download separate branch/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('refreshes the auto-derived name when switching branches but preserves user edits', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 

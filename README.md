@@ -2,7 +2,7 @@
 
 ![SIMM logo](src-tauri/icons/128x128@2x.png)
 
-A native Windows desktop application for managing Schedule I installations, mod libraries, and development environments. Built with Rust (Tauri 2) and React (TypeScript).
+A native desktop application for managing Schedule I installations, mod libraries, and development environments on Windows and Linux. Built with Rust (Tauri 2) and React (TypeScript).
 
 ## Overview
 
@@ -21,7 +21,7 @@ SIMM (Schedule I Mod Manager) is a unified tool for creating and maintaining gam
 ### Library-First Mod Workflow
 
 - 📦 **Shared Library Model**: Download mods into a centralized library, then install into environments
-- 🔗 **Symlink-Based Installs**: Keep environment installs lightweight via library symlinks
+- 📁 **Managed Copy Installs**: Keep source archives in the shared library and materialize real files into each environment
 - 🧹 **Consistent Cleanup**: Deleting a library item removes it from all linked environments
 
 ### Mod Sources & Updates
@@ -73,13 +73,20 @@ React component -> `ApiService` -> `invoke()` -> Rust command -> service -> resu
 - **Windows data directory**: `%USERPROFILE%\SIMM\` (legacy `%APPDATA%\simmrust\data.db` is auto-migrated)
 - **Persistence**: Environments and settings in SQLite
 - **Credentials**: Encrypted and stored separately
-- **Mod files**: Shared library with symlinked environment installs
+- **Mod files**: Shared archive/library storage with managed copied files in each environment
 
-## Prerequisites (Windows)
+## Prerequisites
 
 - **Rust (stable)**: https://rustup.rs/
 - **Node.js v22.12+**: https://nodejs.org/
 - **Bun 1.3.x**: https://bun.sh/
+
+Linux Schedule I support runs the Windows game through Steam Proton. MelonLoader installs require Protontricks so SIMM can apply the game prefix prerequisites:
+
+- `protontricks 3164500 dotnet6`
+- `protontricks 3164500 vcrun2015`
+
+SIMM can install the Linux DepotDownloader release into `~/.local/bin` when DepotDownloader is missing. The MLVScan security scanner installs as a managed dotnet tool on Linux; if a system .NET SDK 8+ is unavailable, SIMM bootstraps a private SDK under its tool cache before installing the scanner.
 
 ## Node.js Version
 
@@ -97,7 +104,152 @@ Windows releases now ship as an `NSIS` installer with a prerequisite step. Befor
 - DepotDownloader
 
 If `winget` cannot install DepotDownloader automatically, the installer blocks and asks the user to install it manually before continuing.
-The installed Windows app is also marked `requireAdministrator`, so every launch path prompts for elevation and symlink operations do not rely on Developer Mode.
+Managed mod installs use copied files instead of symlinks, so normal launch paths do not need administrator elevation for link creation.
+
+## Linux Packages
+
+Linux releases build AppImage and Debian package artifacts. Steam-managed Schedule I installs launch through Steam so Proton can load MelonLoader with the required `WINEDLLOVERRIDES="version=n,b" %command%` launch option.
+
+Flatpak bundles are also available for Linux testing. The Flatpak sandbox is configured with home-directory access because SIMM must detect and manage host Steam/Proton installs and user-selected game environments. Build a test bundle with Docker:
+
+```powershell
+.\scripts\build-flatpak-container.cmd
+```
+
+The bundle is written to `target/flatpak/dev.lockwirelabs.simm-<version>.flatpak`.
+
+On Linux, Settings includes a readiness section for Steam, Protontricks, DepotDownloader, MLVScan/.NET SDK, and `simm://`/`nxm://` desktop handlers. Use **Repair Desktop Links** after moving an AppImage or changing default protocol handlers.
+
+### Install On Linux
+
+The Linux installer downloads the latest GitHub release, verifies `SHA256SUMS`, installs the Debian package on Debian-family distros, and falls back to a user-local AppImage elsewhere:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SirTidez/simm/master/install.sh -o install.sh
+bash install.sh
+```
+
+Install a beta or a specific release:
+
+```bash
+bash install.sh --channel beta
+bash install.sh --version v0.8.6
+```
+
+Force the AppImage path, preview the selected install without changing the system, or remove a user-local AppImage install:
+
+```bash
+bash install.sh --appimage
+bash install.sh --dry-run
+bash install.sh --appimage --yes
+bash install.sh --appimage --skip-dependencies
+bash install.sh --uninstall
+```
+
+Preview the full installer TUI, animations, dependency states, and safety flow without
+network access, filesystem writes, sudo, or Steam process changes:
+
+```bash
+bash install.sh --preview
+bash install.sh --preview --preview-scenario update
+bash install.sh --preview --preview-scenario dependency-failure
+bash install.sh --preview --preview-distro steamos --preview-speed 4
+bash install.sh --preview --preview-auto-accept
+```
+
+Preview scenarios are `fresh`, `update`, `ready`, and `dependency-failure`. Distro
+profiles are `ubuntu`, `debian`, `fedora`, `arch`, `opensuse`, `steamos`, and
+`bazzite`. Use `--plain`, `--no-color`, or `--no-animation` for logs and terminal
+accessibility. The interactive preview pauses after distro detection, then requires
+an explicit acknowledgement of each needed dependency or update together with its
+approved source, privilege scope, and destination. Enter alone does not approve
+changes. Use `--preview-auto-accept` only for scripted demonstrations; plain or
+noninteractive output records a simulated acknowledgement and never blocks. Without
+`--preview-distro`, the system card uses the current Linux host identity while all
+install actions remain simulated.
+
+From this repository in Ubuntu WSL:
+
+```powershell
+wsl.exe -d Ubuntu -- bash -lc "cd /mnt/e/CLionProjects/simmrust && bash install.sh --preview"
+```
+
+The real installer detects Steam and the Linux tools SIMM needs, then shows every
+missing dependency together with its source, privilege scope, destination, and
+purpose. After explicit acknowledgement it installs Protontricks from Flathub or
+an enabled distro repository, DepotDownloader from SteamRE's official GitHub
+release, a private .NET SDK 8 from Microsoft's `dotnet-install.sh`, and MLVScan
+from NuGet. Each tool is verified before SIMM installation continues. Steam must
+already be installed and signed in. Use `--yes` for an approved noninteractive
+run or `--skip-dependencies` to intentionally install only SIMM.
+
+### Steam Deck
+
+On Steam Deck, the AppImage installer detects SteamOS and adds **Schedule I Mod Manager** to Steam as a Non-Steam game. It shuts down Steam before safely updating `shortcuts.vdf`; return to Gaming Mode after the installer finishes and launch SIMM from the Non-Steam library. Use `--skip-steam-shortcut` to opt out.
+
+For an offline transfer package, build the AppImage and package it with its installer and checksum:
+
+```powershell
+.\scripts\build-linux-container.cmd
+.\scripts\package-steam-deck.ps1 -AppImage .\artifacts\linux\SIMM_0.8.6_x86_64.AppImage
+```
+
+The Steam Deck packager accepts only the versioned Linux release artifact together with its release-generated `SHA256SUMS`; it deliberately rejects raw or stale Tauri bundle output. The generated zip under `target/steam-deck/` contains the AppImage, `SHA256SUMS`, `install.sh`, and Deck-specific instructions. On the Deck, extract it and run `bash install.sh --appimage-file ./SIMM_<version>_x86_64.AppImage`.
+
+### Linux Build Dependencies
+
+Install the normal Tauri Linux build prerequisites before running the full desktop app or producing Linux packages. On Debian/Ubuntu-based systems:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  curl \
+  file \
+  libayatana-appindicator3-dev \
+  libfuse2 \
+  libglib2.0-dev \
+  libgtk-3-dev \
+  libssl-dev \
+  libwebkit2gtk-4.1-dev \
+  patchelf \
+  pkg-config \
+  librsvg2-dev
+```
+
+### Live Linux Provider Smoke Tests
+
+Provider download smoke tests are ignored by default because they call third-party services and may require account state:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml services::thunderstore::tests::live_search_fetch_and_download_package_archive -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml services::nexus_mods::tests::live_schedule_i_metadata_query_returns_files -- --ignored --nocapture
+SIMM_NEXUS_LIVE_ACCESS_TOKEN=... SIMM_NEXUS_LIVE_MOD_ID=... SIMM_NEXUS_LIVE_FILE_ID=... cargo test --manifest-path src-tauri/Cargo.toml services::nexus_mods::tests::live_oauth_downloads_configured_schedule_i_file -- --ignored --nocapture
+```
+
+The Nexus download smoke requires a valid OAuth access token and a Schedule I mod/file id that the account is allowed to download.
+
+Steam and MelonLoader Linux readiness checks are also ignored by default because they inspect the host Steam install:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml services::steam::tests::live_detects_schedule_i_installation_branch_and_launch_options_status -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml services::melon_loader::tests::live_linux_requirements_status_reads_steam_and_protontricks -- --ignored --nocapture
+```
+
+The launch smoke is additionally gated because it starts the real game through Steam/Proton. It requires MelonLoader to already be installed and confirms that `MelonLoader/Latest.log` is refreshed after launch:
+
+```bash
+SIMM_LIVE_LAUNCH_GAME=1 cargo test --manifest-path src-tauri/Cargo.toml services::melon_loader::tests::live_linux_launches_schedule_i_and_confirms_melonloader_log -- --ignored --nocapture
+SIMM_LIVE_LAUNCH_GAME=1 SIMM_LIVE_LAUNCH_ENV_DIR="/path/to/Schedule I" cargo test --manifest-path src-tauri/Cargo.toml services::melon_loader::tests::live_linux_launches_schedule_i_and_confirms_melonloader_log -- --ignored --nocapture
+```
+
+The MLVScan host smoke installs or updates the Linux dotnet tool, bootstrapping SIMM's private .NET SDK if the host SDK is missing, then scans a real .NET assembly through the same `scan_artifact` path used by downloads. By default the scan body skips unless explicitly enabled:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml services::security_scanner::tests::live_linux_install_latest_uses_dotnet_tool_or_private_sdk -- --ignored --nocapture
+SIMM_MLVSCAN_LIVE_SCAN=1 cargo test --manifest-path src-tauri/Cargo.toml services::security_scanner::tests::live_linux_scan_executes_against_real_dotnet_assembly -- --ignored --nocapture
+SIMM_MLVSCAN_LIVE_SCAN=1 SIMM_MLVSCAN_LIVE_SCAN_DLL="/path/to/Example.dll" cargo test --manifest-path src-tauri/Cargo.toml services::security_scanner::tests::live_linux_scan_executes_against_real_dotnet_assembly -- --ignored --nocapture
+```
 
 ## Development
 
@@ -107,6 +259,28 @@ The installed Windows app is also marked `requireAdministrator`, so every launch
 bun install
 bun run tauri dev
 ```
+
+### Run Full App On Linux
+
+Use the Linux-specific dev script when running under Wayland, especially on NVIDIA or distros where WebKitGTK fails with messages like `Error 71 (Protocol error) dispatching to Wayland display`, `Cannot create EGL context`, or a blank webview:
+
+```bash
+bun install
+bun run tauri:dev:linux
+```
+
+This script runs `tauri dev` with native Wayland enabled and the WebKitGTK renderer workarounds:
+
+- `WEBKIT_DISABLE_DMABUF_RENDERER=1` to avoid WebKitGTK DMA-BUF renderer failures.
+- `WEBKIT_DISABLE_COMPOSITING_MODE=1` to avoid WebKitGTK accelerated compositing failures.
+
+If native Wayland still fails, use the explicit X11/XWayland fallback:
+
+```bash
+bun run tauri:dev:linux:x11
+```
+
+The X11 fallback forces `GDK_BACKEND=x11` and `WINIT_X11_SCALE_FACTOR=1`. Use it only when the default Linux dev script cannot create a usable WebKitGTK window, because XWayland scaling can report a smaller logical viewport than the physical window size on some Wayland sessions.
 
 ### Run Frontend Only
 
@@ -123,6 +297,91 @@ bun run lint
 bun run test
 bun run build
 bun run tauri build
+```
+
+### Build Linux Packages
+
+Linux packages must be built from a Linux host with the Linux build dependencies installed:
+
+```bash
+bun install
+bunx tsc --noEmit
+bun run lint
+bun run test
+bun run build
+bun run tauri:build:linux
+```
+
+Build only one Linux bundle type when iterating:
+
+```bash
+bun run tauri:build:linux:deb
+bun run tauri:build:linux:appimage
+```
+
+The Linux bundle outputs are written under `target/release/bundle/`:
+
+- `deb/*.deb`
+- `appimage/*.AppImage`
+
+After building, validate that the packaged desktop entry declares the `simm://` and `nxm://` handlers:
+
+```bash
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/appimage/*.AppImage
+```
+
+### Build Linux Packages With Docker
+
+The repo includes an Ubuntu-based builder image for creating Linux `.deb` and `.AppImage` artifacts from Windows or any Docker host. It uses Ubuntu 22.04 as the build baseline so Tauri's WebKitGTK 4.1 dependency is available while keeping the generated binaries compatible with older glibc versions than a newer Ubuntu image would require.
+
+From Windows, use the `.cmd` wrapper so PowerShell execution policy does not block the build script:
+
+```powershell
+.\scripts\build-linux-container.cmd
+```
+
+If the build is launched from a transient Command Prompt window and fails, the wrapper pauses so the error remains visible. Running the same command from an existing terminal is still recommended because it preserves the full Docker log.
+
+From PowerShell directly:
+
+```powershell
+.\scripts\build-linux-container.ps1
+```
+
+The wrapper builds the `simm-linux-builder:ubuntu22.04` image, bind-mounts the repository at `/workspace`, reuses named Docker volumes for Bun and Cargo caches, and runs:
+
+```bash
+bun install
+bunx tsc --noEmit
+bun run lint
+bun run test
+bun run build
+bun run tauri:build:linux
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/appimage/*.AppImage
+```
+
+Useful variants:
+
+```powershell
+.\scripts\build-linux-container.cmd -Command check
+.\scripts\build-linux-container.cmd -Command shell
+.\scripts\build-linux-container.cmd -BunVersion 1.3.3
+.\scripts\build-linux-container.cmd -SkipImageBuild
+```
+
+Raw Docker:
+
+```bash
+docker build -f docker/linux/Dockerfile -t simm-linux-builder:ubuntu22.04 .
+docker run --rm -it \
+  --mount type=bind,source="$PWD",target=/workspace \
+  --mount type=volume,source=simm-linux-cargo-registry,target=/usr/local/cargo/registry \
+  --mount type=volume,source=simm-linux-cargo-git,target=/usr/local/cargo/git \
+  --mount type=volume,source=simm-linux-bun-cache,target=/root/.bun/install/cache \
+  --workdir /workspace \
+  simm-linux-builder:ubuntu22.04 build
 ```
 
 ### Type Check

@@ -79,7 +79,7 @@ pub async fn apply_config_edits(
         .map_err(|e| format!("Failed to load config document: {}", e))?;
 
     config_service
-        .apply_config_edits(&document.summary.path, operations)
+        .apply_config_edits(&environment.output_dir, &document.summary.path, operations)
         .await
         .map_err(|e| format!("Failed to apply config edits: {}", e))
 }
@@ -104,7 +104,7 @@ pub async fn save_raw_config(
         .map_err(|e| format!("Failed to load config document: {}", e))?;
 
     config_service
-        .save_raw_config(&document.summary.path, &content)
+        .save_raw_config(&environment.output_dir, &document.summary.path, &content)
         .await
         .map_err(|e| format!("Failed to save raw config: {}", e))
 }

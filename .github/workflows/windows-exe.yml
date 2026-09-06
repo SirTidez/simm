@@ -26,8 +26,25 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Configure Windows Authenticode signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          .\scripts\prepare-windows-signing.ps1 `
+            -ConfigPath 'src-tauri/tauri.conf.json' `
+            -CertificateBase64 $env:WINDOWS_CERTIFICATE `
+            -CertificatePassword $env:WINDOWS_CERTIFICATE_PASSWORD `
+            -CertificatePath (Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx')
+
       - name: Build Windows setup wizard
         run: bun run tauri build --bundles nsis
+
+      - name: Restore tauri config
+        if: always()
+        shell: pwsh
+        run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
 
       - name: Resolve build version
         id: version
@@ -77,6 +94,10 @@ jobs:
 
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
 
+          .\scripts\verify-windows-signatures.ps1 `
+            -Path @('target/release/simmrust.exe', $setupTarget) `
+            -ExpectedThumbprint $env:SIMM_WINDOWS_SIGNING_THUMBPRINT
+
           "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload setup wizard artifact
@@ -86,3 +107,18 @@ jobs:
           path: ${{ steps.renamed.outputs.setup_file }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove Windows signing material
+        if: always()
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx'
+          if (Test-Path -LiteralPath $certificatePath) {
+            Remove-Item -LiteralPath $certificatePath -Force
+          }
+          if ($env:SIMM_WINDOWS_SIGNING_THUMBPRINT) {
+            $storePath = "Cert:\CurrentUser\My\$env:SIMM_WINDOWS_SIGNING_THUMBPRINT"
+            if (Test-Path -LiteralPath $storePath) {
+              Remove-Item -LiteralPath $storePath -Force
+            }
+          }

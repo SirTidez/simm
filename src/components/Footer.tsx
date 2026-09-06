@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { logger } from '../services/logger';
-import { ApiService } from '../services/api';
 import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/events';
-import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
+import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from '../services/updateCheckCoordinator';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
-import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
+import { useModLibraryStore } from '../stores/modLibraryStore';
 import { Icon } from './Icon';
 import { SimmButton } from './primitives';
 
@@ -26,12 +25,14 @@ interface FooterProps {
 
 export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenAppUpdate }: FooterProps) {
   const { environments, checkAllUpdates } = useEnvironmentStore();
+  const { library, ensureLibrary } = useModLibraryStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [modUpdatesByEnv, setModUpdatesByEnv] = useState<Map<string, ModUpdatesEntry>>(new Map());
   const [metadataRefreshCount, setMetadataRefreshCount] = useState(0);
   const [metadataRefreshRunning, setMetadataRefreshRunning] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const modUpdatesSummaryRequestRef = React.useRef<{ key: string; promise: Promise<void> } | null>(null);
 
   const totalModsNeedingUpdate = new Set(
     Array.from(modUpdatesByEnv.values())
@@ -49,16 +50,22 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
 
   // Load mod updates summary for completed environments
   const loadModUpdatesSummary = React.useCallback(async () => {
-    try {
-      const library = await normalizeLibraryFeaturedDownloads(
-        await ApiService.getModLibrary(),
-      );
+    const completedEnvironments = environments.filter((env) => env.status === 'completed');
+    if (completedEnvironments.length === 0) {
+      setModUpdatesByEnv(new Map());
+      return;
+    }
+
+    const requestKey = completedEnvironments.map((env) => env.id).join('|');
+    if (modUpdatesSummaryRequestRef.current?.key === requestKey) {
+      return modUpdatesSummaryRequestRef.current.promise;
+    }
+
+    const request = (async () => {
+      const librarySnapshot = library ?? await ensureLibrary();
       const map = new Map<string, ModUpdatesEntry>();
-      for (const env of environments) {
-        if (env.status !== 'completed') {
-          continue;
-        }
-        const snapshot = buildEnvironmentModSnapshot(library, env.id);
+      for (const env of completedEnvironments) {
+        const snapshot = buildEnvironmentModSnapshot(librarySnapshot, env.id);
         map.set(env.id, {
           count: snapshot.updateCount,
           updates: snapshot.updates.map((update) => ({
@@ -71,10 +78,19 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
         });
       }
       setModUpdatesByEnv(map);
-    } catch (err) {
+    })();
+
+    const operation = request.catch((err) => {
       console.warn('Failed to load mod updates summary:', err);
-    }
-  }, [environments]);
+    }).finally(() => {
+      if (modUpdatesSummaryRequestRef.current?.promise === operation) {
+        modUpdatesSummaryRequestRef.current = null;
+      }
+    });
+
+    modUpdatesSummaryRequestRef.current = { key: requestKey, promise: operation };
+    return operation;
+  }, [environments, ensureLibrary, library]);
 
   useEffect(() => {
     const completedCount = environments.filter(env => env.status === 'completed').length;
