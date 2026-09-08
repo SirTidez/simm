@@ -7117,10 +7117,7 @@ exit 1
     }
 
     pub async fn disable_mod(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
-        let mods_directory = self.get_mods_directory(game_dir);
-        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
-        let mod_path = mods_directory.join(&relative_mod_path);
-        let disabled_path = PathBuf::from(format!("{}.disabled", mod_path.to_string_lossy()));
+        safe_mod_relative_dll_path(mod_file_name)?;
 
         if let Some(storage_id) = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
@@ -7135,43 +7132,12 @@ exit 1
             }
         }
 
-        if !mod_path.exists() {
-            return Err(anyhow::anyhow!("Mod file not found"));
-        }
-
-        if disabled_path.exists() {
-            return Err(anyhow::anyhow!("Mod is already disabled"));
-        }
-
-        if !self
-            .managed_mutation_path_is_inside_environment(&mod_path, game_dir)
+        self.set_mod_file_enabled(game_dir, mod_file_name, false)
             .await
-            || !self
-                .managed_mutation_path_is_inside_environment(&disabled_path, game_dir)
-                .await
-        {
-            anyhow::bail!("Refusing to modify a mod path outside the environment");
-        }
-
-        // Verify it's actually a file
-        let metadata = fs::metadata(&mod_path).await?;
-        if !metadata.is_file() {
-            return Err(anyhow::anyhow!("Path is not a file"));
-        }
-
-        // Rename the file
-        fs::rename(&mod_path, &disabled_path)
-            .await
-            .context("Failed to disable mod")?;
-
-        Ok(())
     }
 
     pub async fn enable_mod(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
-        let mods_directory = self.get_mods_directory(game_dir);
-        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
-        let mod_path = mods_directory.join(&relative_mod_path);
-        let disabled_path = PathBuf::from(format!("{}.disabled", mod_path.to_string_lossy()));
+        safe_mod_relative_dll_path(mod_file_name)?;
 
         if let Some(storage_id) = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
@@ -7186,12 +7152,39 @@ exit 1
             }
         }
 
-        if !disabled_path.exists() {
-            return Err(anyhow::anyhow!("Disabled mod file not found"));
-        }
+        self.set_mod_file_enabled(game_dir, mod_file_name, true)
+            .await
+    }
 
-        if mod_path.exists() {
-            return Err(anyhow::anyhow!("Mod file already exists (not disabled)"));
+    /// Toggle one mod file without cascading to its package companions.
+    /// Profiles reconcile each captured file's enabled state independently.
+    pub(crate) async fn set_mod_file_enabled(
+        &self,
+        game_dir: &str,
+        mod_file_name: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
+        let mod_path = self.get_mods_directory(game_dir).join(relative_mod_path);
+        let disabled_path = PathBuf::from(format!("{}.disabled", mod_path.to_string_lossy()));
+        let (source, destination) = if enabled {
+            (&disabled_path, &mod_path)
+        } else {
+            (&mod_path, &disabled_path)
+        };
+        if !source.exists() {
+            return Err(anyhow::anyhow!(if enabled {
+                "Disabled mod file not found"
+            } else {
+                "Mod file not found"
+            }));
+        }
+        if destination.exists() {
+            return Err(anyhow::anyhow!(if enabled {
+                "Mod file already exists (not disabled)"
+            } else {
+                "Mod is already disabled"
+            }));
         }
 
         if !self
@@ -7205,15 +7198,17 @@ exit 1
         }
 
         // Verify it's actually a file
-        let metadata = fs::metadata(&disabled_path).await?;
+        let metadata = fs::metadata(source).await?;
         if !metadata.is_file() {
             return Err(anyhow::anyhow!("Path is not a file"));
         }
 
-        // Rename the file back
-        fs::rename(&disabled_path, &mod_path)
-            .await
-            .context("Failed to enable mod")?;
+        fs::rename(source, destination).await.with_context(|| {
+            format!(
+                "Failed to {} mod",
+                if enabled { "enable" } else { "disable" }
+            )
+        })?;
 
         Ok(())
     }

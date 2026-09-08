@@ -7,6 +7,7 @@ import { useEnvironmentStore } from '../stores/environmentStore';
 import { getErrorMessage } from '../utils/errors';
 import type {
   Environment,
+  ModProfileApplyResult,
   ModProfileImportPlan,
   ModProfileImportPlanItem,
   ModProfileManifest,
@@ -36,6 +37,15 @@ const statusLabels: Record<string, string> = {
 
 function runtimeKey(runtime: Runtime | string | null | undefined): RuntimeKey {
   return String(runtime ?? '').toLowerCase().includes('mono') ? 'MONO' : 'IL2CPP';
+}
+
+function requireCompleteProfileApply(result: ModProfileApplyResult, profileName: string): void {
+  if (result.unresolved > 0) {
+    const details = result.messages.length > 0
+      ? result.messages.join(' ')
+      : 'Review the profile preview and resolve the remaining items before retrying.';
+    throw new Error(`Could not fully apply ${profileName}: ${result.unresolved} unresolved. ${details}`);
+  }
 }
 
 function runtimeForSave(runtime: RuntimeKey): Runtime {
@@ -276,6 +286,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
     setPlan(result.plan);
     await refreshEnvironments();
     await loadProfiles();
+    requireCompleteProfileApply(result, profile.name);
     return `Applied ${profile.name}. Installed ${result.installed}, skipped ${result.skipped}, unresolved ${result.unresolved}.`;
   }, [loadProfiles, refreshEnvironments, requireSelection, targetEnvironmentId]);
 
@@ -293,6 +304,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
     if (targetGeneration !== targetSelectionGenerationRef.current) {
       return null;
     }
+    requireCompleteProfileApply(result, profile.name);
     const launch = await ApiService.launchGame(targetId, 'steam');
     return launch.success
       ? `Applied ${profile.name} and launched the game.`

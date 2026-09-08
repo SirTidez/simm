@@ -183,6 +183,43 @@ describe('ProfilesWorkspace', () => {
     cleanup();
   });
 
+  it.each(['needsDownload', 'readyToInstall', 'alreadyInstalled'])(
+    'prevents launch and surfaces apply errors when the refreshed status is %s', async (status) => {
+      apiMocks.applyModProfile.mockResolvedValue({
+        plan: { ...plan, items: [{ ...plan.items[0], status }] },
+        installed: 0,
+        skipped: 0,
+        unresolved: 1,
+        messages: ['Required mod is not downloaded.'],
+      });
+      render(<ProfilesWorkspace />);
+      await screen.findByRole('button', { name: /Default IL2CPP/i });
+      await waitFor(() => expect(screen.getByRole('button', { name: /Apply & Launch/i })).not.toBeDisabled());
+      fireEvent.click(screen.getByRole('button', { name: /Apply & Launch/i }));
+      await waitFor(() => expect(apiMocks.applyModProfile).toHaveBeenCalled());
+      await waitFor(() => expect(screen.getByRole('button', { name: /Apply & Launch/i })).not.toBeDisabled());
+      expect(apiMocks.launchGame).not.toHaveBeenCalled();
+      expect(screen.getByText(/Could not fully apply Default IL2CPP: 1 unresolved.*Required mod is not downloaded/)).toBeTruthy();
+      expect(screen.queryByText(/and launched the game/)).toBeNull();
+    },
+  );
+
+  it('reports an incomplete apply with actionable fallback text when no details are returned', async () => {
+    apiMocks.applyModProfile.mockResolvedValue({
+      plan,
+      installed: 0,
+      skipped: 0,
+      unresolved: 1,
+      messages: [],
+    });
+    render(<ProfilesWorkspace />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Apply$/i })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /^Apply$/i }));
+    expect(await screen.findByText(/Could not fully apply.*Review the profile preview/)).toBeTruthy();
+    expect(screen.queryByText(/^Applied Default IL2CPP/)).toBeNull();
+    expect(apiMocks.launchGame).not.toHaveBeenCalled();
+  });
+
   it('renders both runtime profile groups and disables incompatible targets', async () => {
     render(<ProfilesWorkspace />);
 
