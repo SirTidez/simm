@@ -21,7 +21,6 @@ if (-not $installer.Contains("SignerCertificate.Subject.Split('','').Trim() -con
 }
 
 $signingScripts = @(
-  'scripts\prepare-windows-signing.ps1',
   'scripts\verify-windows-signatures.ps1'
 )
 foreach ($relativePath in $signingScripts) {
@@ -34,8 +33,11 @@ foreach ($relativePath in $signingScripts) {
   }
 }
 
-$workflowPath = Join-Path $repoRoot '.github\workflows\windows-exe.yml'
-$workflow = Get-Content -LiteralPath $workflowPath -Raw
+$workflowPaths = @(
+  '.github\workflows\windows-exe.yml',
+  '.github\workflows\publish-release.yml',
+  '.github\workflows\publish-beta-release.yml'
+)
 $workflowRequirements = [ordered]@{
   'id-token: write' = 'grant the Windows signing job OIDC token permission'
   'azure/login@v3' = 'authenticate to Azure with OIDC'
@@ -50,20 +52,54 @@ $workflowRequirements = [ordered]@{
   'TAURI_SIGNING_PRIVATE_KEY' = 'retain mandatory Tauri updater signing'
   '-ExpectedSubject' = 'verify the Artifact Signing publisher identity'
 }
-foreach ($entry in $workflowRequirements.GetEnumerator()) {
-  if (-not $workflow.Contains($entry.Key, [StringComparison]::Ordinal)) {
-    throw "Windows signing-test workflow does not $($entry.Value)."
+
+foreach ($relativeWorkflowPath in $workflowPaths) {
+  $workflowPath = Join-Path $repoRoot $relativeWorkflowPath
+  $workflow = Get-Content -LiteralPath $workflowPath -Raw
+  foreach ($entry in $workflowRequirements.GetEnumerator()) {
+    if (-not $workflow.Contains($entry.Key, [StringComparison]::Ordinal)) {
+      throw "Workflow '$relativeWorkflowPath' does not $($entry.Value)."
+    }
+  }
+
+  foreach ($forbidden in @('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD', 'prepare-windows-signing.ps1', 'SIMM_WINDOWS_SIGNING_THUMBPRINT')) {
+    if ($workflow.Contains($forbidden, [StringComparison]::Ordinal)) {
+      throw "Workflow '$relativeWorkflowPath' still references legacy PFX signing value '$forbidden'."
+    }
+  }
+
+  $buildIndex = $workflow.IndexOf('Build Windows application', [StringComparison]::Ordinal)
+  $signAppIndex = $workflow.IndexOf('Sign Windows application with Azure Artifact Signing', [StringComparison]::Ordinal)
+  $bundleIndex = $workflow.IndexOf('Bundle signed Windows application', [StringComparison]::Ordinal)
+  $signInstallerIndex = $workflow.IndexOf('Sign Windows installer with Azure Artifact Signing', [StringComparison]::Ordinal)
+  $resignUpdaterIndex = $workflow.IndexOf('Regenerate Tauri updater signature', [StringComparison]::Ordinal)
+  $prepareName = if ($relativeWorkflowPath.EndsWith('windows-exe.yml')) { 'Prepare Windows build assets' } else { 'Prepare Windows release assets' }
+  $prepareIndex = $workflow.IndexOf($prepareName, [StringComparison]::Ordinal)
+  if (-not ($buildIndex -ge 0 -and $buildIndex -lt $signAppIndex -and $signAppIndex -lt $bundleIndex -and $bundleIndex -lt $signInstallerIndex -and $signInstallerIndex -lt $resignUpdaterIndex -and $resignUpdaterIndex -lt $prepareIndex)) {
+    throw "Workflow '$relativeWorkflowPath' must sign the app before bundling, then sign the installer before regenerating its Tauri updater signature."
   }
 }
 
-$buildIndex = $workflow.IndexOf('Build Windows application', [StringComparison]::Ordinal)
-$signAppIndex = $workflow.IndexOf('Sign Windows application with Azure Artifact Signing', [StringComparison]::Ordinal)
-$bundleIndex = $workflow.IndexOf('Bundle signed Windows application', [StringComparison]::Ordinal)
-$signInstallerIndex = $workflow.IndexOf('Sign Windows installer with Azure Artifact Signing', [StringComparison]::Ordinal)
-$resignUpdaterIndex = $workflow.IndexOf('Regenerate Tauri updater signature', [StringComparison]::Ordinal)
-$prepareIndex = $workflow.IndexOf('Prepare setup wizard artifact', [StringComparison]::Ordinal)
-if (-not ($buildIndex -lt $signAppIndex -and $signAppIndex -lt $bundleIndex -and $bundleIndex -lt $signInstallerIndex -and $signInstallerIndex -lt $resignUpdaterIndex -and $resignUpdaterIndex -lt $prepareIndex)) {
-  throw 'Windows signing-test workflow must sign the app before bundling, then sign the installer before regenerating its Tauri updater signature.'
+$manualWorkflowPath = Join-Path $repoRoot '.github\workflows\windows-exe.yml'
+$manualWorkflow = Get-Content -LiteralPath $manualWorkflowPath -Raw
+$manualRequirements = [ordered]@{
+  'name: Build Release Artifacts' = 'describe both target builds'
+  '  build-windows:' = 'define a Windows artifact build'
+  '  build-linux:' = 'define a Linux artifact build'
+  '  validate-artifacts:' = 'define a combined artifact validation job'
+  'bun run tauri:build:linux' = 'build Linux deb and AppImage packages'
+  'validate-linux-desktop-mime.sh' = 'validate Linux desktop handlers'
+  '--artifacts-only' = 'validate the complete updater artifact set'
+  'SHA256SUMS' = 'generate cross-platform checksums'
+  'SIMM_${{ needs.build-windows.outputs.version }}_Release_Artifacts' = 'upload one complete Windows and Linux artifact set'
+}
+foreach ($entry in $manualRequirements.GetEnumerator()) {
+  if (-not $manualWorkflow.Contains($entry.Key, [StringComparison]::Ordinal)) {
+    throw "Manual release workflow does not $($entry.Value)."
+  }
+}
+if (-not $manualWorkflow.Contains("      - build-windows`n      - build-linux", [StringComparison]::Ordinal)) {
+  throw 'Manual release workflow must wait for both platform builds before combined artifact validation.'
 }
 
 Write-Output 'Windows release security contract checks passed.'

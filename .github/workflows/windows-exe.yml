@@ -1,15 +1,19 @@
-name: Build Setup Wizard
+name: Build Release Artifacts
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
-  build-setup-wizard:
+  build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +34,7 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Verify signing test configuration
+      - name: Verify manual build signing configuration
         shell: pwsh
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -58,7 +62,7 @@ jobs:
             [string]::IsNullOrWhiteSpace([string]$_.Value)
           } | ForEach-Object { $_.Key })
           if ($missing.Count -gt 0) {
-            throw "Windows signing test is not configured. Missing GitHub settings: $($missing -join ', ')."
+            throw "Manual release build signing is not configured. Missing GitHub settings: $($missing -join ', ')."
           }
 
       - name: Resolve build version
@@ -83,7 +87,7 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Resolved version: $version"
 
-      - name: Enable updater artifacts for signing test
+      - name: Enable updater artifacts for manual build
         shell: pwsh
         run: |
           $configPath = 'src-tauri/tauri.conf.json'
@@ -203,19 +207,18 @@ jobs:
 
           Write-Host 'Regenerated the Tauri updater signature for the final Authenticode-signed installer.'
 
-      - name: Prepare setup wizard artifact
-        id: renamed
+      - name: Prepare Windows build assets
         shell: pwsh
         env:
           WINDOWS_SIGNING_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
         run: |
           $version = '${{ steps.version.outputs.version }}'
-          New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
+          New-Item -ItemType Directory -Path 'artifacts/windows' -Force | Out-Null
 
           $setupSource = Get-Item -LiteralPath '${{ steps.nsis.outputs.path }}'
           $signatureSource = Get-Item -LiteralPath "$($setupSource.FullName).sig"
 
-          $setupTarget = "artifacts/SIMM_${version}_Setup.exe"
+          $setupTarget = "artifacts/windows/SIMM_${version}_Setup.exe"
           $signatureTarget = "$setupTarget.sig"
 
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
@@ -236,15 +239,13 @@ jobs:
               notAfter = $signature.SignerCertificate.NotAfter.ToUniversalTime().ToString('o')
             }
           }
-          $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "artifacts/SIMM_${version}_Authenticode.json" -Encoding utf8NoBOM
+          $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "artifacts/windows/SIMM_${version}_Authenticode.json" -Encoding utf8NoBOM
 
-          "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Upload setup wizard artifact
+      - name: Upload Windows build assets
         uses: actions/upload-artifact@v4
         with:
-          name: SIMM_${{ steps.version.outputs.version }}_Azure_Signing_Test
-          path: artifacts/*
+          name: SIMM_${{ steps.version.outputs.version }}_Windows
+          path: artifacts/windows/*
           if-no-files-found: error
           retention-days: 14
 
@@ -252,3 +253,190 @@ jobs:
         if: always()
         shell: pwsh
         run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
+
+  build-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify updater signing configuration
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
+        run: |
+          $required = [ordered]@{
+            TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY
+            SIMM_UPDATER_PUBKEY = $env:SIMM_UPDATER_PUBKEY
+          }
+          $missing = @($required.GetEnumerator() | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_.Value)
+          } | ForEach-Object { $_.Key })
+          if ($missing.Count -gt 0) {
+            throw "Manual Linux updater build is not configured. Missing GitHub settings: $($missing -join ', ')."
+          }
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.5"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config \
+            librsvg2-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve build version
+        id: version
+        shell: pwsh
+        run: |
+          $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = $config.version
+          if (-not $version) {
+            throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Enable updater artifacts for manual build
+        shell: pwsh
+        run: |
+          $configPath = 'src-tauri/tauri.conf.json'
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+          if (-not $config.ContainsKey('bundle') -or $null -eq $config.bundle) {
+            $config.bundle = @{}
+          }
+          $config.bundle.createUpdaterArtifacts = $true
+          $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+
+      - name: Build Linux packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
+        run: bun run tauri:build:linux
+
+      - name: Restore tauri config
+        if: always()
+        shell: pwsh
+        run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
+
+      - name: Prepare Linux build assets
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path 'artifacts/linux' -Force | Out-Null
+
+          $bundleRoots = @('target/release/bundle', 'src-tauri/target/release/bundle') | Where-Object { Test-Path -LiteralPath $_ }
+          if ($bundleRoots.Count -eq 0) {
+            throw 'No Tauri bundle output directory was found.'
+          }
+
+          $appImageSources = @($bundleRoots | ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_ 'appimage') -File -Filter '*.AppImage' -ErrorAction SilentlyContinue
+          })
+          if ($appImageSources.Count -ne 1) {
+            throw "Expected exactly one AppImage, found $($appImageSources.Count)."
+          }
+
+          $appImageSource = $appImageSources[0]
+          $appImageSignaturePath = "$($appImageSource.FullName).sig"
+          if (-not (Test-Path -LiteralPath $appImageSignaturePath -PathType Leaf)) {
+            throw "Updater signature '$appImageSignaturePath' was not generated for AppImage '$($appImageSource.Name)'."
+          }
+
+          $debSources = @($bundleRoots | ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_ 'deb') -File -Filter '*.deb' -ErrorAction SilentlyContinue
+          })
+          if ($debSources.Count -ne 1) {
+            throw "Expected exactly one deb package, found $($debSources.Count)."
+          }
+
+          $appImageTarget = "artifacts/linux/SIMM_${version}_x86_64.AppImage"
+          $appImageSignatureTarget = "$appImageTarget.sig"
+          $debTarget = "artifacts/linux/SIMM_${version}_amd64.deb"
+          Copy-Item -LiteralPath $appImageSource.FullName -Destination $appImageTarget -Force
+          Copy-Item -LiteralPath $appImageSignaturePath -Destination $appImageSignatureTarget -Force
+          Copy-Item -LiteralPath $debSources[0].FullName -Destination $debTarget -Force
+          Copy-Item -LiteralPath 'install.sh' -Destination 'artifacts/linux/install.sh' -Force
+
+      - name: Validate Linux desktop scheme handlers
+        shell: bash
+        run: |
+          bash -n install.sh
+          bash scripts/validate-linux-desktop-mime.sh "artifacts/linux/SIMM_${{ steps.version.outputs.version }}_amd64.deb"
+          bash scripts/validate-linux-desktop-mime.sh "artifacts/linux/SIMM_${{ steps.version.outputs.version }}_x86_64.AppImage"
+
+      - name: Upload Linux build assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMM_${{ steps.version.outputs.version }}_Linux
+          path: artifacts/linux/*
+          if-no-files-found: error
+          retention-days: 14
+
+  validate-artifacts:
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows and Linux build assets
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build checksums and validate updater artifact set
+        shell: pwsh
+        run: |
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $checksumPath = Join-Path 'artifacts' 'SHA256SUMS'
+          $checksumLines = @(Get-ChildItem -Path 'artifacts' -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          })
+          Set-Content -LiteralPath $checksumPath -Encoding ascii -Value $checksumLines
+
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --artifacts-only `
+            --artifact-dir artifacts `
+            --package-version $version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Manual Windows/Linux updater artifact validation failed.'
+          }
+
+      - name: Upload complete release artifact set
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMM_${{ needs.build-windows.outputs.version }}_Release_Artifacts
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14

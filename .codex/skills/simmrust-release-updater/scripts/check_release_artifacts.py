@@ -17,6 +17,7 @@ WORKFLOWS = [
     Path(".github/workflows/publish-release.yml"),
     Path(".github/workflows/publish-beta-release.yml"),
 ]
+MANUAL_BUILD_WORKFLOW = Path(".github/workflows/windows-exe.yml")
 MANIFESTS = {
     "stable": Path("updater/stable/latest.json"),
     "beta": Path("updater/beta/latest-beta.json"),
@@ -117,8 +118,16 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
         ("windows-x86_64", "validates the Windows updater platform"),
         ("linux-x86_64", "validates the Linux updater platform"),
         ("SHA256SUMS", "builds or validates release checksums"),
-        ("prepare-windows-signing.ps1", "configures fail-closed Windows Authenticode signing"),
+        ("id-token: write", "grants Azure OIDC token permission"),
+        ("azure/login@v3", "authenticates to Azure with OIDC"),
+        ("azure/artifact-signing-action@v2", "uses Azure Artifact Signing"),
+        ("WINDOWS_SIGNING_SUBJECT", "pins the expected Windows publisher identity"),
+        ("Sign Windows application with Azure Artifact Signing", "signs the application before bundling"),
+        ("Sign Windows installer with Azure Artifact Signing", "signs the completed installer"),
+        ("Regenerate Tauri updater signature", "signs the final Authenticode installer for Tauri updates"),
+        ("TAURI_SIGNING_PRIVATE_KEY", "requires Tauri updater signing"),
         ("verify-windows-signatures.ps1", "verifies Windows release signatures"),
+        ("Verify release signing configuration", "checks all Azure and updater signing settings before building"),
         ("--draft", "creates the GitHub release as a draft"),
         ("--draft=false", "publishes the GitHub release only after validation"),
         ("concurrency:", "serializes publication for a channel and tag"),
@@ -134,6 +143,17 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
             issues.append(f"{workflow} does not show that it {description}.")
     if "nsis.zip" in text or "*.nsis.zip" in text:
         issues.append(f"{workflow} still references legacy nsis zip updater artifacts.")
+    for legacy_signing_value in (
+        "WINDOWS_CERTIFICATE",
+        "WINDOWS_CERTIFICATE_PASSWORD",
+        "prepare-windows-signing.ps1",
+        "SIMM_WINDOWS_SIGNING_THUMBPRINT",
+    ):
+        if legacy_signing_value in text:
+            issues.append(
+                f"{workflow} still references legacy PFX signing value "
+                f"'{legacy_signing_value}'."
+            )
     if workflow.name == "publish-beta-release.yml":
         for needle, description in [
             ("-Channel Beta", "generates an explicitly Beta manifest"),
@@ -156,8 +176,6 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
                 "\n  group: publish-stable-${{ github.repository }}\n",
                 "serializes complete Stable release runs",
             ),
-            ("Verify release signing configuration", "checks release signing secrets before building"),
-            ("WINDOWS_CERTIFICATE_PASSWORD", "requires the Windows signing certificate password"),
             ("Create or verify release tag", "creates or verifies the version-derived release tag"),
             ("git tag --annotate", "creates an explicit annotated release tag"),
             ("git rev-list -n 1 $tag", "verifies an existing tag against the release commit"),
@@ -173,6 +191,25 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
             issues.append(
                 f"{workflow} does not serialize Stable publication for the resolved release tag."
             )
+    build_index = text.find("Build Windows application")
+    sign_app_index = text.find("Sign Windows application with Azure Artifact Signing")
+    bundle_index = text.find("Bundle signed Windows application")
+    sign_installer_index = text.find("Sign Windows installer with Azure Artifact Signing")
+    resign_updater_index = text.find("Regenerate Tauri updater signature")
+    prepare_assets_index = text.find("Prepare Windows release assets")
+    windows_order = [
+        build_index,
+        sign_app_index,
+        bundle_index,
+        sign_installer_index,
+        resign_updater_index,
+        prepare_assets_index,
+    ]
+    if min(windows_order) < 0 or windows_order != sorted(windows_order):
+        issues.append(
+            f"{workflow} does not sign the Windows application before bundling and "
+            "re-sign the final Authenticode installer for Tauri updates."
+        )
     draft_index = text.find("Create or update draft")
     tag_index = text.find("Create or verify release tag")
     manifest_index = text.find("Generate stable updater manifest")
@@ -207,6 +244,72 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
     ):
         issues.append(
             f"{workflow} does not validate and publish the release before exposing its updater feed."
+        )
+    return issues
+
+
+def check_manual_build_workflow(repo: Path) -> list[str]:
+    workflow = MANUAL_BUILD_WORKFLOW
+    path = repo / workflow
+    if not path.exists():
+        return [f"Missing workflow: {workflow}"]
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    issues: list[str] = []
+    required = [
+        ("name: Build Release Artifacts", "is named for both platform artifact sets"),
+        ("id-token: write", "grants Azure OIDC token permission"),
+        ("  build-windows:", "defines a Windows build"),
+        ("  build-linux:", "defines a Linux build"),
+        ("  validate-artifacts:", "defines a combined updater artifact gate"),
+        (
+            "      - build-windows\n      - build-linux",
+            "waits for both builds before combined validation",
+        ),
+        ("createUpdaterArtifacts", "enables Tauri updater artifacts on both targets"),
+        ("azure/login@v3", "authenticates to Azure with OIDC"),
+        ("azure/artifact-signing-action@v2", "uses Azure Artifact Signing"),
+        ("WINDOWS_SIGNING_SUBJECT", "verifies the Windows publisher identity"),
+        ("Build Windows application", "builds the Windows application before bundling"),
+        ("Sign Windows application with Azure Artifact Signing", "signs the Windows application"),
+        ("Bundle signed Windows application", "bundles the signed Windows application"),
+        ("Sign Windows installer with Azure Artifact Signing", "signs the NSIS installer"),
+        ("Regenerate Tauri updater signature", "signs the final installer for Tauri updates"),
+        ("bun run tauri:build:linux", "builds the Linux deb and AppImage packages"),
+        ("$appImageSignatureTarget", "collects the Linux updater signature"),
+        ("SIMM_${version}_amd64.deb", "collects the Linux deb package"),
+        ("validate-linux-desktop-mime.sh", "validates Linux package handlers"),
+        ("--artifacts-only", "validates the combined updater artifact set"),
+        ("SHA256SUMS", "generates complete cross-platform checksums"),
+        ("SIMM_${{ needs.build-windows.outputs.version }}_Release_Artifacts", "uploads one complete artifact set"),
+    ]
+    for needle, description in required:
+        if needle not in text:
+            issues.append(f"{workflow} does not show that it {description}.")
+
+    for legacy_signing_value in (
+        "WINDOWS_CERTIFICATE",
+        "WINDOWS_CERTIFICATE_PASSWORD",
+        "prepare-windows-signing.ps1",
+        "SIMM_WINDOWS_SIGNING_THUMBPRINT",
+    ):
+        if legacy_signing_value in text:
+            issues.append(
+                f"{workflow} still references legacy PFX signing value "
+                f"'{legacy_signing_value}'."
+            )
+
+    ordered_steps = [
+        text.find("Build Windows application"),
+        text.find("Sign Windows application with Azure Artifact Signing"),
+        text.find("Bundle signed Windows application"),
+        text.find("Sign Windows installer with Azure Artifact Signing"),
+        text.find("Regenerate Tauri updater signature"),
+        text.find("Prepare Windows build assets"),
+    ]
+    if min(ordered_steps) < 0 or ordered_steps != sorted(ordered_steps):
+        issues.append(
+            f"{workflow} does not preserve the required Windows signing and updater order."
         )
     return issues
 
@@ -463,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for workflow in WORKFLOWS:
             issues.extend(check_workflow(repo, workflow))
+        issues.extend(check_manual_build_workflow(repo))
         stable_path = repo / MANIFESTS["stable"]
         stable_version: str | None = None
         if stable_path.is_file():

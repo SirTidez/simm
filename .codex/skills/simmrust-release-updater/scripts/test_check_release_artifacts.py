@@ -61,6 +61,7 @@ class ReleaseArtifactChecks(unittest.TestCase):
         issues = []
         for workflow in release_check.WORKFLOWS:
             issues.extend(release_check.check_workflow(repo, workflow))
+        issues.extend(release_check.check_manual_build_workflow(repo))
         self.assertEqual(issues, [])
 
     def test_beta_requires_full_identity_newer_than_stable(self) -> None:

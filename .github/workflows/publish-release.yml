@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-stable-${{ github.repository }}
@@ -32,15 +32,25 @@ jobs:
 
       - name: Verify release signing configuration
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          WINDOWS_SIGNING_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
         shell: pwsh
         run: |
           $required = [ordered]@{
-            WINDOWS_CERTIFICATE = $env:WINDOWS_CERTIFICATE
-            WINDOWS_CERTIFICATE_PASSWORD = $env:WINDOWS_CERTIFICATE_PASSWORD
+            AZURE_CLIENT_ID = $env:AZURE_CLIENT_ID
+            AZURE_TENANT_ID = $env:AZURE_TENANT_ID
+            AZURE_SUBSCRIPTION_ID = $env:AZURE_SUBSCRIPTION_ID
+            AZURE_ARTIFACT_SIGNING_ENDPOINT = $env:AZURE_ARTIFACT_SIGNING_ENDPOINT
+            AZURE_ARTIFACT_SIGNING_ACCOUNT = $env:AZURE_ARTIFACT_SIGNING_ACCOUNT
+            AZURE_ARTIFACT_SIGNING_PROFILE = $env:AZURE_ARTIFACT_SIGNING_PROFILE
+            WINDOWS_SIGNING_SUBJECT = $env:WINDOWS_SIGNING_SUBJECT
             TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY
             SIMM_UPDATER_PUBKEY = $env:SIMM_UPDATER_PUBKEY
           }
@@ -113,6 +123,9 @@ jobs:
   build-windows:
     needs: validate
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -135,18 +148,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
-
-      - name: Configure Windows Authenticode signing
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          .\scripts\prepare-windows-signing.ps1 `
-            -ConfigPath 'src-tauri/tauri.conf.json' `
-            -CertificateBase64 $env:WINDOWS_CERTIFICATE `
-            -CertificatePassword $env:WINDOWS_CERTIFICATE_PASSWORD `
-            -CertificatePath (Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx')
 
       - name: Resolve app version and release tag
         id: version
@@ -175,12 +176,109 @@ jobs:
       - name: Validate Windows app launch manifest
         run: bash scripts/validate-windows-app-manifest.sh
 
-      - name: Build Windows installer
+      - name: Build Windows application
+        run: bun run tauri build --no-bundle
+
+      - name: Azure login for Artifact Signing
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows application with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\target\release\simmrust.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Schedule I Mod Manager
+          description-url: https://github.com/SirTidez/simm
+
+      - name: Verify signed Windows application
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
+        run: |
+          .\scripts\verify-windows-signatures.ps1 `
+            -Path 'target/release/simmrust.exe' `
+            -ExpectedSubject $env:WINDOWS_SIGNING_SUBJECT
+
+      - name: Bundle signed Windows application
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
-        run: bun run tauri build --bundles nsis
+        run: bun run tauri bundle --bundles nsis
+
+      - name: Resolve NSIS installer
+        id: nsis
+        shell: pwsh
+        run: |
+          $setupSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe')
+          if ($setupSources.Count -ne 1) {
+            throw "Expected exactly one NSIS setup executable, found $($setupSources.Count)."
+          }
+
+          $setupPath = $setupSources[0].FullName
+          $signaturePath = "$setupPath.sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "Tauri did not generate the initial updater signature '$signaturePath'."
+          }
+
+          $initialSignatureHash = (Get-FileHash -LiteralPath $signaturePath -Algorithm SHA256).Hash
+          "path=$setupPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "initial_signature_hash=$initialSignatureHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Sign Windows installer with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ steps.nsis.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Schedule I Mod Manager Setup
+          description-url: https://github.com/SirTidez/simm
+
+      - name: Regenerate Tauri updater signature
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $setupPath = '${{ steps.nsis.outputs.path }}'
+          $signaturePath = "$setupPath.sig"
+          Remove-Item -LiteralPath $signaturePath -Force
+
+          bunx tauri signer sign $setupPath
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Tauri updater signing failed for the Authenticode-signed installer.'
+          }
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "Tauri updater signature was not regenerated: $signaturePath"
+          }
+
+          $regeneratedHash = (Get-FileHash -LiteralPath $signaturePath -Algorithm SHA256).Hash
+          if ($regeneratedHash -ceq '${{ steps.nsis.outputs.initial_signature_hash }}') {
+            throw 'The updater signature did not change after Authenticode modified the installer.'
+          }
+
+          $encodedSignature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          try {
+            $signaturePayload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedSignature))
+          } catch {
+            throw 'The regenerated Tauri updater signature is not valid base64.'
+          }
+          if (-not $signaturePayload.Contains('untrusted comment:') -or -not $signaturePayload.Contains('trusted comment:')) {
+            throw 'The regenerated Tauri updater signature is not a minisign payload.'
+          }
 
       - name: Restore tauri config
         if: always()
@@ -190,20 +288,14 @@ jobs:
       - name: Prepare Windows release assets
         id: windows_asset
         shell: pwsh
+        env:
+          WINDOWS_SIGNING_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
         run: |
           $version = '${{ steps.version.outputs.version }}'
           New-Item -ItemType Directory -Path 'artifacts/windows' -Force | Out-Null
 
-          $setupSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe')
-          if ($setupSources.Count -ne 1) {
-            throw "Expected exactly one NSIS setup executable, found $($setupSources.Count)."
-          }
-
-          $setupSource = $setupSources[0]
-          $signaturePath = Join-Path $setupSource.DirectoryName "$($setupSource.Name).sig"
-          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
-            throw "Updater signature '$signaturePath' was not generated for installer '$($setupSource.Name)'."
-          }
+          $setupSource = Get-Item -LiteralPath '${{ steps.nsis.outputs.path }}'
+          $signaturePath = "$($setupSource.FullName).sig"
 
           $setupTarget = "artifacts/windows/SIMM_${version}_Setup.exe"
           $signatureTarget = "$setupTarget.sig"
@@ -212,7 +304,7 @@ jobs:
 
           .\scripts\verify-windows-signatures.ps1 `
             -Path @('target/release/simmrust.exe', $setupTarget) `
-            -ExpectedThumbprint $env:SIMM_WINDOWS_SIGNING_THUMBPRINT
+            -ExpectedSubject $env:WINDOWS_SIGNING_SUBJECT
 
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
@@ -221,21 +313,6 @@ jobs:
           path: artifacts/windows/*
           if-no-files-found: error
           retention-days: 14
-
-      - name: Remove Windows signing material
-        if: always()
-        shell: pwsh
-        run: |
-          $certificatePath = Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx'
-          if (Test-Path -LiteralPath $certificatePath) {
-            Remove-Item -LiteralPath $certificatePath -Force
-          }
-          if ($env:SIMM_WINDOWS_SIGNING_THUMBPRINT) {
-            $storePath = "Cert:\CurrentUser\My\$env:SIMM_WINDOWS_SIGNING_THUMBPRINT"
-            if (Test-Path -LiteralPath $storePath) {
-              Remove-Item -LiteralPath $storePath -Force
-            }
-          }
 
   build-linux:
     needs: validate
@@ -369,6 +446,8 @@ jobs:
 
   publish-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs:
       - build-windows
       - build-linux

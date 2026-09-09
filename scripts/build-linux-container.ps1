@@ -47,6 +47,9 @@ if (-not $SkipImageBuild) {
         -f $dockerfile `
         -t $Image `
         $repoRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker failed to build the Linux builder image (exit code $LASTEXITCODE)."
+    }
 }
 
 $interactiveArgs = @()
@@ -64,3 +67,6 @@ docker run `
     --workdir /workspace `
     $Image `
     $Command
+if ($LASTEXITCODE -ne 0) {
+    throw "The Linux container command '$Command' failed (exit code $LASTEXITCODE)."
+}
