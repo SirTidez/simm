@@ -6,7 +6,6 @@ on:
       - master
     paths-ignore:
       - "updater/**"
-  workflow_dispatch:
 
 permissions:
   contents: read
