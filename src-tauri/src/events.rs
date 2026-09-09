@@ -1,4 +1,4 @@
-use crate::types::{DownloadProgress, TrackedDownload, UpdateCheckResult};
+use crate::types::{DownloadProgress, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult};
 use tauri::{AppHandle, Emitter, Runtime};
 
 pub fn emit_progress<R: Runtime>(
@@ -17,12 +17,14 @@ pub fn emit_progress<R: Runtime>(
 pub fn emit_complete<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    operation_id: String,
     manifest_id: Option<String>,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "download_complete",
         serde_json::json!({
             "downloadId": download_id,
+            "operationId": operation_id,
             "manifestId": manifest_id
         }),
     )
@@ -31,11 +33,12 @@ pub fn emit_complete<R: Runtime>(
 pub fn emit_error<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    operation_id: String,
     error: String,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "download_error",
-        serde_json::json!({ "downloadId": download_id, "error": error }),
+        serde_json::json!({ "downloadId": download_id, "operationId": operation_id, "error": error }),
     )
 }
 
@@ -69,6 +72,13 @@ pub fn emit_auth_error<R: Runtime>(
         "auth_error",
         serde_json::json!({ "downloadId": download_id, "error": error }),
     )
+}
+
+pub fn emit_steam_auth_qr_line<R: Runtime>(
+    app: &AppHandle<R>,
+    line: String,
+) -> Result<(), tauri::Error> {
+    app.emit("steam_auth_qr_line", serde_json::json!({ "line": line }))
 }
 
 pub fn emit_melonloader_installing<R: Runtime>(
@@ -147,6 +157,13 @@ pub fn emit_update_check_complete<R: Runtime>(
             "updateResult": update_result
         }),
     )
+}
+
+pub fn emit_runtime_switch<R: Runtime>(
+    app: &AppHandle<R>,
+    result: RuntimeSwitchResult,
+) -> Result<(), tauri::Error> {
+    app.emit("steam_runtime_switched", result)
 }
 
 pub fn emit_mods_changed<R: Runtime>(

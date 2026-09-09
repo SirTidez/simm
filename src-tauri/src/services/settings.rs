@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde_json;
 use sqlx::SqlitePool;
 use tokio::fs;
+use tokio::sync::{watch, Mutex, RwLock};
 
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
@@ -14,13 +15,102 @@ use aes_gcm::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::types::{AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings};
+use crate::types::{
+    AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings, WindowCloseBehavior,
+};
 
 pub struct SettingsService {
     pool: Arc<SqlitePool>,
 }
 
+/// The process-local settings snapshot used by long-lived backend services.
+///
+/// SQLite remains the durable source across launches. Keeping this snapshot in
+/// process prevents background jobs from deserializing the same singleton row
+/// on every wake-up, while `save_lock` makes read/merge/write updates atomic
+/// within SIMM's single-instance process.
+#[derive(Clone)]
+pub struct RuntimeSettingsState {
+    settings: Arc<RwLock<Settings>>,
+    save_lock: Arc<Mutex<()>>,
+    changes: watch::Sender<u64>,
+}
+
+impl RuntimeSettingsState {
+    pub fn new(settings: Settings) -> Self {
+        Self {
+            settings: Arc::new(RwLock::new(settings)),
+            save_lock: Arc::new(Mutex::new(())),
+            changes: watch::channel(0).0,
+        }
+    }
+
+    pub async fn snapshot(&self) -> Settings {
+        self.settings.read().await.clone()
+    }
+
+    /// Replaces the runtime snapshot after startup migration/loading.
+    pub async fn replace(&self, settings: Settings) {
+        *self.settings.write().await = settings;
+        self.bump_change_version();
+    }
+
+    /// Subscribe before calculating a wait deadline. Unlike `Notify`, the
+    /// watch version retains a change that happens just before `changed()` is
+    /// awaited, so schedulers cannot lose a reschedule request.
+    pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    pub fn notify_changed(&self) {
+        self.bump_change_version();
+    }
+
+    fn bump_change_version(&self) {
+        self.changes
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    pub async fn save_settings(
+        &self,
+        pool: &SqlitePool,
+        updates: serde_json::Value,
+    ) -> Result<Settings> {
+        let _save_guard = self.save_lock.lock().await;
+        SettingsService::ensure_persisted_settings_are_writable(pool).await?;
+        let current = self.snapshot().await;
+        let current_json = serde_json::to_value(&current)?;
+        let merged = SettingsService::sanitize_legacy_settings_value(SettingsService::merge_json(
+            &current_json,
+            &updates,
+        ));
+        let mut updated: Settings = serde_json::from_value(merged)?;
+        updated.theme = SettingsService::normalize_theme_selection(&updated.theme);
+
+        let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
+        sqlx::query(
+            "INSERT INTO settings (id, data) VALUES (?, ?) \
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        )
+        .bind(SETTINGS_ID)
+        .bind(content)
+        .execute(pool)
+        .await
+        .context("Failed to save settings")?;
+
+        *self.settings.write().await = updated.clone();
+        self.bump_change_version();
+        Ok(updated)
+    }
+}
+
 const SETTINGS_ID: i64 = 1;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyTelemetryPreferences {
+    close_behavior: Option<WindowCloseBehavior>,
+}
 const STEAM_CREDENTIALS_KEY: &str = "steam_credentials";
 const NEXUS_MODS_API_KEY: &str = "nexus_mods_api_key";
 const NEXUS_OAUTH_SESSION_KEY: &str = "nexus_oauth_session";
@@ -29,6 +119,20 @@ const NEXUS_OAUTH_LAST_CALLBACK_KEY: &str = "nexus_oauth_last_callback";
 const NEXUS_NXM_PENDING_DOWNLOAD_KEY: &str = "nexus_nxm_pending_download";
 const NEXUS_NXM_PROTOCOL_BACKUP_KEY: &str = "nexus_nxm_protocol_backup";
 const THEMES_DIR_NAME: &str = "themes";
+const INSTALLATION_KEY_FILE_NAME: &str = "credentials.key";
+const INSTALLATION_KEY_ENVELOPE_PREFIX: &str = "SIMM_INSTALLATION_KEY_V1:";
+const WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX: &str = "SIMM_INSTALLATION_KEY_V2:DPAPI:";
+const CREDENTIALS_ENVELOPE_PREFIX: &str = "v2";
+const AES_GCM_NONCE_BYTES: usize = 12;
+const AES_GCM_TAG_BYTES: usize = 16;
+// Stored API keys and auth sessions are intentionally small. Bound the value
+// before hex decoding so a damaged database cannot trigger an unbounded
+// allocation while trying to recover credentials.
+const MAX_ENCRYPTED_SECRET_BYTES: usize = 1024 * 1024;
+// This was the historic implicit production key. It is intentionally retained
+// only to read existing ciphertext so it can be immediately re-encrypted with
+// the per-installation key below.
+const LEGACY_FALLBACK_ENCRYPTION_KEY: &str = "default-key-change-in-production";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -46,15 +150,396 @@ impl SettingsService {
         Ok(Self { pool })
     }
 
-    fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
-        let key_str = std::env::var("ENCRYPTION_KEY")
-            .unwrap_or_else(|_| "default-key-change-in-production".to_string());
+    pub fn default_settings() -> Settings {
+        let platform = if cfg!(target_os = "windows") {
+            crate::types::Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            crate::types::Platform::Macos
+        } else {
+            crate::types::Platform::Linux
+        };
 
+        Settings {
+            default_download_dir: dirs::home_dir()
+                .map(|p| {
+                    let mut path = p.to_path_buf();
+                    path.push("SIMM");
+                    path.to_string_lossy().to_string()
+                })
+                .unwrap_or_else(|| ".".to_string()),
+            depot_downloader_path: None,
+            steam_username: None,
+            depot_downloader_remembered_session: Some(false),
+            max_concurrent_downloads: 2,
+            platform,
+            language: "english".to_string(),
+            theme: "modern-blue".to_string(),
+            melon_loader_version: None,
+            auto_install_melon_loader: Some(true),
+            enable_security_scanner: Some(true),
+            auto_install_security_scanner: Some(true),
+            block_critical_scans: Some(true),
+            prompt_on_high_scans: Some(true),
+            show_security_scan_badges: Some(true),
+            update_check_interval: Some(60),
+            auto_check_updates: Some(true),
+            log_level: Some(crate::types::LogLevel::Warn),
+            nexus_mods_api_key: None,
+            nexus_mods_rate_limits: None,
+            nexus_mods_game_id: Some("schedule1".to_string()),
+            nexus_mods_app_slug: None,
+            thunderstore_game_id: Some("schedule-i".to_string()),
+            auto_update_mods: None,
+            mod_update_check_interval: None,
+            mod_icon_cache_limit_mb: Some(500),
+            database_backup_count: Some(10),
+            log_retention_days: Some(7),
+            app_update: Some(AppUpdateSettings {
+                last_checked_at: None,
+                last_seen_version_raw: None,
+                last_seen_version_normalized: None,
+                last_resolved_url: None,
+                snoozed_until: None,
+                skipped_version_normalized: None,
+                channel: Some(AppUpdateChannel::Stable),
+                by_channel: None,
+            }),
+            experience_mode: Some(crate::types::ExperienceMode::Player),
+            show_advanced_game_tools: Some(false),
+            window_close_behavior: Some(WindowCloseBehavior::Ask),
+            setup_guide_completed: Some(false),
+        }
+    }
+
+    fn decode_persisted_settings(data: &str) -> Option<Settings> {
+        if let Ok(settings) = serde_json::from_str::<Settings>(data) {
+            return Some(settings);
+        }
+
+        let raw_value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+        serde_json::from_value::<Settings>(Self::sanitize_legacy_settings_value(raw_value)).ok()
+    }
+
+    async fn ensure_persisted_settings_are_writable(pool: &SqlitePool) -> Result<()> {
+        let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to validate persisted settings before saving")?;
+
+        if stored
+            .as_deref()
+            .is_some_and(|data| Self::decode_persisted_settings(data).is_none())
+        {
+            anyhow::bail!(
+                "Stored settings are corrupt. Run Database Repair to preserve the damaged row and restore safe defaults before saving settings."
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn repair_corrupt_settings(pool: &SqlitePool) -> Result<bool> {
+        let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to inspect settings during database repair")?;
+        let Some(data) = stored else {
+            return Ok(false);
+        };
+        if Self::decode_persisted_settings(&data).is_some() {
+            return Ok(false);
+        }
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("Failed to begin corrupt settings repair")?;
+        sqlx::query("INSERT INTO settings_quarantine (settings_id, data, reason) VALUES (?, ?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(&data)
+            .bind("settings JSON failed schema validation")
+            .execute(&mut *transaction)
+            .await
+            .context("Failed to quarantine corrupt settings")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&Self::default_settings())?)
+            .bind(SETTINGS_ID)
+            .execute(&mut *transaction)
+            .await
+            .context("Failed to restore default settings during repair")?;
+        transaction
+            .commit()
+            .await
+            .context("Failed to commit corrupt settings repair")?;
+        log::warn!("Quarantined corrupt persisted settings and restored safe defaults");
+        Ok(true)
+    }
+
+    fn key_from_material(key_str: &str) -> Key<Aes256Gcm> {
         let mut hasher = Sha256::new();
         hasher.update(key_str.as_bytes());
         let key_bytes = hasher.finalize();
 
-        Ok(*Key::<Aes256Gcm>::from_slice(&key_bytes))
+        *Key::<Aes256Gcm>::from_slice(&key_bytes)
+    }
+
+    fn configured_encryption_key() -> Option<Key<Aes256Gcm>> {
+        std::env::var("ENCRYPTION_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| Self::key_from_material(&value))
+    }
+
+    fn installation_key_path() -> Result<PathBuf> {
+        Ok(crate::db::get_data_dir()?.join(INSTALLATION_KEY_FILE_NAME))
+    }
+
+    fn parse_raw_installation_key(contents: &str) -> Result<Key<Aes256Gcm>> {
+        let encoded = contents
+            .trim()
+            .strip_prefix(INSTALLATION_KEY_ENVELOPE_PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported SIMM installation key format"))?;
+        let bytes = hex::decode(encoded).context("Failed to decode SIMM installation key")?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "SIMM installation key has an invalid length"
+            ));
+        }
+
+        Ok(*Key::<Aes256Gcm>::from_slice(&bytes))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
+        use winapi::um::dpapi::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN};
+        use winapi::um::winbase::LocalFree;
+        use winapi::um::wincrypt::DATA_BLOB;
+
+        let mut input = DATA_BLOB {
+            cbData: u32::try_from(data.len()).context("SIMM installation key is too large")?,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = DATA_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let succeeded = unsafe {
+            CryptProtectData(
+                &mut input,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows DPAPI failed to protect the SIMM installation key");
+        }
+
+        let protected =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+        let free_result = unsafe { LocalFree(output.pbData as _) };
+        if !free_result.is_null() {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows DPAPI output buffer could not be released");
+        }
+        Ok(protected)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
+        use winapi::um::dpapi::{CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN};
+        use winapi::um::winbase::LocalFree;
+        use winapi::um::wincrypt::DATA_BLOB;
+
+        let mut input = DATA_BLOB {
+            cbData: u32::try_from(data.len())
+                .context("SIMM protected installation key is too large")?,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = DATA_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let succeeded = unsafe {
+            CryptUnprotectData(
+                &mut input,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows DPAPI could not unprotect the SIMM installation key");
+        }
+
+        let plaintext =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+        unsafe { LocalFree(output.pbData as _) };
+        Ok(plaintext)
+    }
+
+    fn parse_installation_key(contents: &str) -> Result<(Key<Aes256Gcm>, bool)> {
+        #[cfg(target_os = "windows")]
+        if let Some(protected) = contents
+            .trim()
+            .strip_prefix(WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX)
+        {
+            let decoded = hex::decode(protected).context("Failed to decode protected SIMM key")?;
+            let raw = Self::dpapi_unprotect(&decoded)?;
+            if raw.len() != 32 {
+                return Err(anyhow::anyhow!(
+                    "Windows DPAPI returned an invalid SIMM key length"
+                ));
+            }
+            return Ok((*Key::<Aes256Gcm>::from_slice(&raw), false));
+        }
+
+        // V1 stores raw key material. It remains readable only long enough to
+        // re-wrap it on Windows; new writes never use this format there.
+        Ok((
+            Self::parse_raw_installation_key(contents)?,
+            cfg!(target_os = "windows"),
+        ))
+    }
+
+    fn serialized_installation_key(key: &Key<Aes256Gcm>) -> Result<String> {
+        #[cfg(target_os = "windows")]
+        {
+            return Ok(format!(
+                "{}{}\n",
+                WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX,
+                hex::encode(Self::dpapi_protect(key.as_slice())?)
+            ));
+        }
+        #[cfg(not(target_os = "windows"))]
+        Ok(format!(
+            "{}{}\n",
+            INSTALLATION_KEY_ENVELOPE_PREFIX,
+            hex::encode(key.as_slice())
+        ))
+    }
+
+    fn write_installation_key(path: &Path, key: &Key<Aes256Gcm>) -> Result<()> {
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("SIMM installation key has no parent directory"))?;
+        std::fs::create_dir_all(parent).context("Failed to create SIMM data directory")?;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options
+            .open(path)
+            .context("Failed to create SIMM installation key")?;
+        file.write_all(Self::serialized_installation_key(key)?.as_bytes())
+            .context("Failed to write SIMM installation key")?;
+        file.sync_all()
+            .context("Failed to flush SIMM installation key")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .context("Failed to restrict SIMM installation key permissions")?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn rewrap_legacy_installation_key(path: &Path, key: &Key<Aes256Gcm>) -> Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+
+        let suffix = uuid::Uuid::new_v4();
+        let staged = path.with_file_name(format!("credentials.key.{suffix}.staged"));
+        Self::write_installation_key(&staged, key)?;
+
+        let to_wide = |value: &Path| {
+            value
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        let path_wide = to_wide(path);
+        let staged_wide = to_wide(&staged);
+        let replaced = unsafe {
+            MoveFileExW(
+                staged_wide.as_ptr(),
+                path_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            return Err(std::io::Error::last_os_error()).context(
+                "Failed to atomically re-wrap the legacy SIMM installation key with DPAPI",
+            );
+        }
+        Ok(())
+    }
+
+    fn installation_encryption_key() -> Result<Key<Aes256Gcm>> {
+        let path = Self::installation_key_path()?;
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let (key, _needs_dpapi_rewrap) = Self::parse_installation_key(&contents)?;
+                #[cfg(target_os = "windows")]
+                if _needs_dpapi_rewrap {
+                    Self::rewrap_legacy_installation_key(&path, &key)?;
+                }
+                Ok(key)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let key = Aes256Gcm::generate_key(&mut OsRng);
+                match Self::write_installation_key(&path, &key) {
+                    Ok(()) => Ok(key),
+                    Err(error)
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|io_error| {
+                                io_error.kind() == std::io::ErrorKind::AlreadyExists
+                            }) =>
+                    {
+                        let contents = std::fs::read_to_string(&path)
+                            .context("Failed to read concurrently-created SIMM installation key")?;
+                        Self::parse_installation_key(&contents).map(|(key, _)| key)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error).context("Failed to read SIMM installation key"),
+        }
+    }
+
+    fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
+        if let Some(key) = Self::configured_encryption_key() {
+            return Ok(key);
+        }
+
+        Self::installation_encryption_key()
+    }
+
+    fn get_legacy_encryption_key() -> Key<Aes256Gcm> {
+        Self::configured_encryption_key()
+            .unwrap_or_else(|| Self::key_from_material(LEGACY_FALLBACK_ENCRYPTION_KEY))
     }
 
     async fn encrypt_credentials(data: &str) -> Result<String> {
@@ -67,14 +552,19 @@ impl SettingsService {
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         Ok(format!(
-            "{}:{}",
+            "{}:{}:{}",
+            CREDENTIALS_ENVELOPE_PREFIX,
             hex::encode(nonce),
             hex::encode(ciphertext)
         ))
     }
 
-    async fn decrypt_credentials(encrypted: &str) -> Result<String> {
-        let key = Self::get_encryption_key()?;
+    async fn decrypt_credentials(encrypted: &str) -> Result<(String, bool)> {
+        let (key, encrypted, legacy) =
+            match encrypted.strip_prefix(&format!("{}:", CREDENTIALS_ENVELOPE_PREFIX)) {
+                Some(versioned) => (Self::get_encryption_key()?, versioned, false),
+                None => (Self::get_legacy_encryption_key(), encrypted, true),
+            };
         let cipher = Aes256Gcm::new(&key);
 
         let parts: Vec<&str> = encrypted.split(':').collect();
@@ -83,14 +573,30 @@ impl SettingsService {
         }
 
         let nonce_bytes = hex::decode(parts[0]).context("Failed to decode nonce")?;
+        if nonce_bytes.len() != AES_GCM_NONCE_BYTES {
+            return Err(anyhow::anyhow!(
+                "Invalid credential nonce length: expected {AES_GCM_NONCE_BYTES} bytes"
+            ));
+        }
+        if parts[1].len() > MAX_ENCRYPTED_SECRET_BYTES * 2 {
+            return Err(anyhow::anyhow!("Encrypted credential value is too large"));
+        }
         let ciphertext = hex::decode(parts[1]).context("Failed to decode ciphertext")?;
+        if ciphertext.len() < AES_GCM_TAG_BYTES {
+            return Err(anyhow::anyhow!(
+                "Invalid credential ciphertext length: expected at least {AES_GCM_TAG_BYTES} bytes"
+            ));
+        }
 
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext = cipher
             .decrypt(nonce, ciphertext.as_ref())
             .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
 
-        String::from_utf8(plaintext).context("Invalid UTF-8 in decrypted data")
+        Ok((
+            String::from_utf8(plaintext).context("Invalid UTF-8 in decrypted data")?,
+            legacy,
+        ))
     }
 
     fn sanitize_legacy_settings_value(mut value: serde_json::Value) -> serde_json::Value {
@@ -404,82 +910,79 @@ impl SettingsService {
             .context("Failed to load settings")?;
 
         if let Some(data) = stored {
-            if let Ok(mut settings) = serde_json::from_str::<Settings>(&data) {
+            if let Some(mut settings) = Self::decode_persisted_settings(&data) {
                 settings.theme = Self::normalize_theme_selection(&settings.theme);
+                self.migrate_window_close_behavior(&mut settings).await?;
+                self.migrate_depot_downloader_remembered_session(&mut settings)
+                    .await?;
                 return Ok(settings);
             }
-
-            if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&data) {
-                let sanitized = Self::sanitize_legacy_settings_value(raw_value);
-                if let Ok(mut settings) = serde_json::from_value::<Settings>(sanitized) {
-                    settings.theme = Self::normalize_theme_selection(&settings.theme);
-                    log::warn!("Recovered persisted settings through legacy sanitization");
-                    return Ok(settings);
-                }
-            }
-
-            log::warn!("Stored settings could not be parsed; falling back to defaults");
+            anyhow::bail!(
+                "Stored settings are corrupt and were left untouched. Run Database Repair to quarantine the damaged row and restore safe defaults."
+            );
         }
 
-        let platform = if cfg!(target_os = "windows") {
-            crate::types::Platform::Windows
-        } else if cfg!(target_os = "macos") {
-            crate::types::Platform::Macos
-        } else {
-            crate::types::Platform::Linux
-        };
-
-        let default_settings = Settings {
-            default_download_dir: dirs::home_dir()
-                .map(|p| {
-                    let mut path = p.to_path_buf();
-                    path.push("SIMM");
-                    path.to_string_lossy().to_string()
-                })
-                .unwrap_or_else(|| ".".to_string()),
-            depot_downloader_path: None,
-            steam_username: None,
-            max_concurrent_downloads: 2,
-            platform,
-            language: "english".to_string(),
-            theme: "modern-blue".to_string(),
-            melon_loader_version: None,
-            auto_install_melon_loader: Some(true),
-            enable_security_scanner: Some(true),
-            auto_install_security_scanner: Some(true),
-            block_critical_scans: Some(true),
-            prompt_on_high_scans: Some(true),
-            show_security_scan_badges: Some(true),
-            update_check_interval: Some(60),
-            auto_check_updates: Some(true),
-            log_level: Some(crate::types::LogLevel::Warn),
-            nexus_mods_api_key: None,
-            nexus_mods_rate_limits: None,
-            nexus_mods_game_id: Some("schedule1".to_string()),
-            nexus_mods_app_slug: None,
-            thunderstore_game_id: Some("schedule-i".to_string()),
-            auto_update_mods: None,
-            mod_update_check_interval: None,
-            mod_icon_cache_limit_mb: Some(500),
-            database_backup_count: Some(10),
-            log_retention_days: Some(7),
-            app_update: Some(AppUpdateSettings {
-                last_checked_at: None,
-                last_seen_version_raw: None,
-                last_seen_version_normalized: None,
-                last_resolved_url: None,
-                snoozed_until: None,
-                skipped_version_normalized: None,
-                channel: Some(AppUpdateChannel::Beta),
-            }),
-            experience_mode: Some(crate::types::ExperienceMode::Player),
-            show_advanced_game_tools: Some(false),
-            setup_guide_completed: Some(false),
-        };
-
-        Ok(default_settings)
+        Ok(Self::default_settings())
     }
 
+    async fn migrate_window_close_behavior(&self, settings: &mut Settings) -> Result<()> {
+        if settings.window_close_behavior.is_some() {
+            return Ok(());
+        }
+
+        let legacy =
+            sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_preferences WHERE id = ?")
+                .bind(1_i64)
+                .fetch_optional(&*self.pool)
+                .await
+                .context("Failed to load legacy telemetry close behavior")?
+                .and_then(|data| serde_json::from_str::<LegacyTelemetryPreferences>(&data).ok())
+                .and_then(|preferences| preferences.close_behavior)
+                .unwrap_or_default();
+
+        settings.window_close_behavior = Some(legacy);
+        let content = serde_json::to_string(settings)
+            .context("Failed to serialize migrated application settings")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(content)
+            .bind(SETTINGS_ID)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to migrate window close behavior into application settings")?;
+
+        Ok(())
+    }
+
+    async fn migrate_depot_downloader_remembered_session(
+        &self,
+        settings: &mut Settings,
+    ) -> Result<()> {
+        if settings.depot_downloader_remembered_session.is_some() {
+            return Ok(());
+        }
+
+        // Older SIMM versions only persisted steamUsername after the user
+        // selected the save-session option. Preserve those existing QR-login
+        // sessions while making future decisions use an explicit marker.
+        settings.depot_downloader_remembered_session = Some(
+            settings
+                .steam_username
+                .as_deref()
+                .is_some_and(|username| !username.trim().is_empty()),
+        );
+        let content = serde_json::to_string(settings)
+            .context("Failed to serialize migrated DepotDownloader session setting")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(content)
+            .bind(SETTINGS_ID)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to migrate DepotDownloader remembered-session setting")?;
+
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub async fn save_settings(&mut self, updates: serde_json::Value) -> Result<()> {
         let current = self.load_settings().await?;
 
@@ -554,6 +1057,19 @@ impl SettingsService {
         Ok(())
     }
 
+    /// Reads a secret encrypted by either the current per-installation key or
+    /// the historic format. A successfully decoded legacy value is upgraded
+    /// before it is returned, so the public legacy fallback is never used for
+    /// a subsequent write.
+    async fn decrypt_secret(&self, key: &str, encrypted: &str) -> Result<String> {
+        let (decrypted, legacy) = Self::decrypt_credentials(encrypted).await?;
+        if legacy {
+            let migrated = Self::encrypt_credentials(&decrypted).await?;
+            self.set_secret(key, &migrated).await?;
+        }
+        Ok(decrypted)
+    }
+
     pub async fn get_credentials(&self) -> Result<Option<(String, String)>> {
         let encrypted = match self.get_secret(STEAM_CREDENTIALS_KEY).await? {
             Some(value) => value,
@@ -564,7 +1080,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(STEAM_CREDENTIALS_KEY, &encrypted)
+            .await?;
         let creds: serde_json::Value =
             serde_json::from_str(&decrypted).context("Failed to parse credentials")?;
 
@@ -607,7 +1125,7 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self.decrypt_secret(NEXUS_MODS_API_KEY, &encrypted).await?;
         Ok(Some(decrypted))
     }
 
@@ -629,7 +1147,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_OAUTH_SESSION_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus oauth session json")?;
         Ok(Some(parsed))
@@ -654,7 +1174,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_OAUTH_PENDING_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus oauth pending json")?;
         Ok(Some(parsed))
@@ -685,7 +1207,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY, &encrypted)
+            .await?;
         Ok(Some(decrypted))
     }
 
@@ -703,22 +1227,87 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus nxm pending download json")?;
         Ok(Some(parsed))
     }
 
-    pub async fn save_nexus_nxm_pending_download(&self, pending: &serde_json::Value) -> Result<()> {
+    /// Atomically reserves the single pending Nexus manual-download slot.
+    ///
+    /// Nexus invokes SIMM's protocol callback without the originating session
+    /// id, so more than one pending session cannot be correlated safely. An
+    /// insert-on-conflict preserves the first session instead of allowing a
+    /// concurrent start to overwrite it.
+    pub async fn save_nexus_nxm_pending_download_if_absent(
+        &self,
+        pending: &serde_json::Value,
+    ) -> Result<bool> {
         let encrypted = Self::encrypt_credentials(&pending.to_string()).await?;
-        self.set_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted)
-            .await
+        let result = sqlx::query(
+            "INSERT INTO secrets (key, encrypted) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(NEXUS_NXM_PENDING_DOWNLOAD_KEY)
+        .bind(encrypted)
+        .execute(&*self.pool)
+        .await
+        .context("Failed to reserve nexus nxm pending download")?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn clear_nexus_nxm_pending_download(&self) -> Result<()> {
         self.clear_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await
     }
 
+    /// Clear a pending manual-download row only if it is still the exact
+    /// session observed by the caller. The encrypted value is included in the
+    /// DELETE predicate as a compare-and-swap version, preventing a newly
+    /// saved session from being removed between the identity check and delete.
+    pub async fn clear_nexus_nxm_pending_download_if_identity(
+        &self,
+        expected_session_id: &str,
+        expected_created_at: i64,
+    ) -> Result<bool> {
+        let Some(encrypted) = self.get_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await? else {
+            return Ok(false);
+        };
+        if encrypted.is_empty() {
+            return Ok(false);
+        }
+
+        let (decrypted, _) = Self::decrypt_credentials(&encrypted).await?;
+        let pending: serde_json::Value = serde_json::from_str(&decrypted)
+            .context("Failed to parse nexus nxm pending download json")?;
+        let current_session_id = pending
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let current_created_at = pending
+            .get("createdAt")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let identity_matches = if expected_session_id.is_empty() {
+            current_session_id.is_empty() && current_created_at == expected_created_at
+        } else {
+            current_session_id == expected_session_id
+        };
+        if !identity_matches {
+            return Ok(false);
+        }
+
+        let result = sqlx::query("DELETE FROM secrets WHERE key = ? AND encrypted = ?")
+            .bind(NEXUS_NXM_PENDING_DOWNLOAD_KEY)
+            .bind(&encrypted)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to conditionally clear nexus nxm pending download")?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn get_nexus_nxm_protocol_backup(&self) -> Result<Option<serde_json::Value>> {
         let encrypted = match self.get_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY).await? {
             Some(value) => value,
@@ -729,18 +1318,22 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus nxm protocol backup json")?;
         Ok(Some(parsed))
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn save_nexus_nxm_protocol_backup(&self, backup: &serde_json::Value) -> Result<()> {
         let encrypted = Self::encrypt_credentials(&backup.to_string()).await?;
         self.set_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted)
             .await
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn clear_nexus_nxm_protocol_backup(&self) -> Result<()> {
         self.clear_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY).await
     }
@@ -773,6 +1366,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, original }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -783,6 +1382,20 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    async fn encrypt_legacy_credentials_for_test(data: &str) -> Result<String> {
+        let key = SettingsService::get_legacy_encryption_key();
+        let cipher = Aes256Gcm::new(&key);
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, data.as_bytes())
+            .map_err(|error| anyhow::anyhow!("legacy encryption failed: {error}"))?;
+        Ok(format!(
+            "{}:{}",
+            hex::encode(nonce),
+            hex::encode(ciphertext)
+        ))
     }
 
     #[tokio::test]
@@ -813,6 +1426,220 @@ mod tests {
         assert_eq!(loaded.database_backup_count, Some(12));
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn corrupt_settings_require_explicit_repair_and_are_quarantined() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let corrupt = r#"{"theme":"dark","maxConcurrentDownloads":"not-a-number"}"#;
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(corrupt)
+            .execute(&*pool)
+            .await?;
+
+        let mut service = SettingsService::new(pool.clone())?;
+        let load_error = service.load_settings().await.unwrap_err().to_string();
+        assert!(load_error.contains("left untouched"));
+
+        let runtime = RuntimeSettingsState::new(SettingsService::default_settings());
+        let save_error = runtime
+            .save_settings(&pool, serde_json::json!({"theme": "light"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(save_error.contains("Run Database Repair"));
+        let unchanged: String = sqlx::query_scalar("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(unchanged, corrupt);
+
+        crate::db::repair_database(&pool).await?;
+        let quarantined: String = sqlx::query_scalar(
+            "SELECT data FROM settings_quarantine WHERE settings_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(SETTINGS_ID)
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(quarantined, corrupt);
+        assert_eq!(service.load_settings().await?.theme, "modern-blue");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn legacy_saved_steam_username_migrates_to_remembered_session_marker() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let mut legacy = serde_json::to_value(SettingsService::default_settings())?;
+        legacy["steamUsername"] = serde_json::json!("saved-user");
+        legacy
+            .as_object_mut()
+            .expect("settings serialize as an object")
+            .remove("depotDownloaderRememberedSession");
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&legacy)?)
+            .execute(&*pool)
+            .await?;
+
+        let mut service = SettingsService::new(pool.clone())?;
+        let loaded = service.load_settings().await?;
+        assert_eq!(loaded.depot_downloader_remembered_session, Some(true));
+
+        let persisted: String = sqlx::query_scalar("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&persisted)?
+                ["depotDownloaderRememberedSession"],
+            serde_json::json!(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn runtime_settings_serializes_concurrent_partial_updates() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool.clone())?;
+        let state = RuntimeSettingsState::new(service.load_settings().await?);
+
+        let first = state.save_settings(
+            &pool,
+            serde_json::json!({
+                "maxConcurrentDownloads": 7
+            }),
+        );
+        let second = state.save_settings(
+            &pool,
+            serde_json::json!({
+                "autoCheckUpdates": false
+            }),
+        );
+        let (first, second) = tokio::join!(first, second);
+        first?;
+        second?;
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.max_concurrent_downloads, 7);
+        assert_eq!(snapshot.auto_check_updates, Some(false));
+
+        let persisted = service.load_settings().await?;
+        assert_eq!(persisted.max_concurrent_downloads, 7);
+        assert_eq!(persisted.auto_check_updates, Some(false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn runtime_settings_snapshot_is_not_changed_by_direct_database_mutation() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let state = RuntimeSettingsState::new(SettingsService::default_settings());
+        let mut externally_written = SettingsService::default_settings();
+        externally_written.max_concurrent_downloads = 99;
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&externally_written)?)
+            .execute(&*pool)
+            .await?;
+
+        assert_eq!(state.snapshot().await.max_concurrent_downloads, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_runtime_settings_write_does_not_publish_snapshot() -> Result<()> {
+        let pool = SqlitePool::connect("sqlite::memory:").await?;
+        let state = RuntimeSettingsState::new(SettingsService::default_settings());
+
+        assert!(state
+            .save_settings(&pool, serde_json::json!({"maxConcurrentDownloads": 9}))
+            .await
+            .is_err());
+        assert_eq!(state.snapshot().await.max_concurrent_downloads, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_change_version_is_retained_for_late_waiter() {
+        let state = RuntimeSettingsState::new(SettingsService::default_settings());
+        let mut changes = state.subscribe_changes();
+        state.notify_changed();
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), changes.changed())
+            .await
+            .expect("retained change should wake a late waiter")
+            .expect("sender remains alive");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn migrates_legacy_telemetry_close_behavior_into_application_settings() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool.clone())?;
+        let mut legacy_settings = service.load_settings().await?;
+        legacy_settings.window_close_behavior = None;
+
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&legacy_settings)?)
+            .execute(&*pool)
+            .await?;
+        sqlx::query("INSERT INTO telemetry_preferences (id, data, updated_at) VALUES (?, ?, ?)")
+            .bind(1_i64)
+            .bind(r#"{"closeBehavior":"tray"}"#)
+            .bind("2026-07-24T00:00:00Z")
+            .execute(&*pool)
+            .await?;
+
+        let migrated = service.load_settings().await?;
+        assert_eq!(
+            migrated.window_close_behavior,
+            Some(WindowCloseBehavior::Tray)
+        );
+
+        let persisted = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<Settings>(&persisted)?.window_close_behavior,
+            Some(WindowCloseBehavior::Tray)
+        );
 
         Ok(())
     }
@@ -1080,6 +1907,158 @@ mod tests {
             .expect("nexus_mods_api_key stored");
         assert!(nexus.contains(':'));
         assert_ne!(nexus, "nexus");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn new_secrets_use_a_per_installation_key_envelope() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        service
+            .save_credentials("user".to_string(), "pass".to_string())
+            .await?;
+
+        let stored: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+            .bind(STEAM_CREDENTIALS_KEY)
+            .fetch_one(&*pool)
+            .await?;
+        assert!(stored.starts_with("v2:"));
+
+        let key_file = data_dir.join(INSTALLATION_KEY_FILE_NAME);
+        let key_contents = std::fs::read_to_string(key_file)?;
+        #[cfg(target_os = "windows")]
+        assert!(key_contents.starts_with(WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX));
+        #[cfg(not(target_os = "windows"))]
+        assert!(key_contents.starts_with(INSTALLATION_KEY_ENVELOPE_PREFIX));
+        assert_eq!(
+            service.get_credentials().await?,
+            Some(("user".to_string(), "pass".to_string()))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    fn windows_rewraps_the_legacy_raw_installation_key_with_dpapi() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        std::fs::create_dir_all(&data_dir)?;
+        let raw_key = Aes256Gcm::generate_key(&mut OsRng);
+        let key_path = data_dir.join(INSTALLATION_KEY_FILE_NAME);
+        std::fs::write(
+            &key_path,
+            format!(
+                "{}{}\n",
+                INSTALLATION_KEY_ENVELOPE_PREFIX,
+                hex::encode(raw_key.as_slice())
+            ),
+        )?;
+
+        let loaded = SettingsService::installation_encryption_key()?;
+
+        assert_eq!(loaded.as_slice(), raw_key.as_slice());
+        let rewrapped = std::fs::read_to_string(key_path)?;
+        assert!(rewrapped.starts_with(WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reading_legacy_secret_reencrypts_it_with_the_installation_key() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+        let legacy = encrypt_legacy_credentials_for_test(
+            r#"{"username":"legacy-user","password":"legacy-pass"}"#,
+        )
+        .await?;
+        service.set_secret(STEAM_CREDENTIALS_KEY, &legacy).await?;
+
+        assert_eq!(
+            service.get_credentials().await?,
+            Some(("legacy-user".to_string(), "legacy-pass".to_string()))
+        );
+
+        let migrated: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+            .bind(STEAM_CREDENTIALS_KEY)
+            .fetch_one(&*pool)
+            .await?;
+        assert!(migrated.starts_with("v2:"));
+        assert_ne!(migrated, legacy);
+        assert!(data_dir.join(INSTALLATION_KEY_FILE_NAME).is_file());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn malformed_current_credentials_do_not_overwrite_stored_values() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        for malformed in [
+            "v2:00:00112233445566778899aabbccddeeff",
+            "v2:000000000000000000000000:00",
+        ] {
+            service.set_secret(STEAM_CREDENTIALS_KEY, malformed).await?;
+
+            assert!(service.get_credentials().await.is_err());
+            let stored: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+                .bind(STEAM_CREDENTIALS_KEY)
+                .fetch_one(&*pool)
+                .await?;
+            assert_eq!(stored, malformed);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn malformed_legacy_credentials_do_not_overwrite_stored_values() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        for malformed in [
+            "00:00112233445566778899aabbccddeeff",
+            "000000000000000000000000:00",
+        ] {
+            service.set_secret(STEAM_CREDENTIALS_KEY, malformed).await?;
+
+            assert!(service.get_credentials().await.is_err());
+            let stored: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+                .bind(STEAM_CREDENTIALS_KEY)
+                .fetch_one(&*pool)
+                .await?;
+            assert_eq!(stored, malformed);
+        }
 
         Ok(())
     }

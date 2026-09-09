@@ -1,10 +1,13 @@
 use crate::services::github_releases::GitHubReleasesService;
+use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::State;
 
-fn github_service(_db: State<'_, Arc<SqlitePool>>) -> GitHubReleasesService {
-    GitHubReleasesService::new()
+static GITHUB_SERVICE: Lazy<GitHubReleasesService> = Lazy::new(GitHubReleasesService::new);
+
+fn github_service(_db: State<'_, Arc<SqlitePool>>) -> &'static GitHubReleasesService {
+    &GITHUB_SERVICE
 }
 
 async fn get_latest_release_logged(
@@ -81,7 +84,7 @@ pub async fn get_latest_melon_loader_release(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Option<serde_json::Value>, String> {
     let service = github_service(db);
-    get_latest_release_logged(&service, "LavaGang", "MelonLoader").await
+    get_latest_release_logged(service, "LavaGang", "MelonLoader").await
 }
 
 #[tauri::command]
@@ -89,7 +92,7 @@ pub async fn get_all_melon_loader_releases(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db);
-    get_all_releases_logged(&service, "LavaGang", "MelonLoader").await
+    get_all_releases_logged(service, "LavaGang", "MelonLoader").await
 }
 
 #[tauri::command]
@@ -97,7 +100,7 @@ pub async fn get_latest_s1api_release(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Option<serde_json::Value>, String> {
     let service = github_service(db);
-    get_latest_release_logged(&service, "ifBars", "S1API").await
+    get_latest_release_logged(service, "ifBars", "S1API").await
 }
 
 #[tauri::command]
@@ -105,7 +108,7 @@ pub async fn get_all_s1api_releases(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db);
-    get_all_releases_logged(&service, "ifBars", "S1API").await
+    get_all_releases_logged(service, "ifBars", "S1API").await
 }
 
 #[tauri::command]
@@ -113,7 +116,7 @@ pub async fn get_latest_mlvscan_release(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Option<serde_json::Value>, String> {
     let service = github_service(db);
-    get_latest_release_logged(&service, "ifBars", "MLVScan").await
+    get_latest_release_logged(service, "ifBars", "MLVScan").await
 }
 
 #[tauri::command]
@@ -121,7 +124,7 @@ pub async fn get_all_mlvscan_releases(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db);
-    get_all_releases_logged(&service, "ifBars", "MLVScan").await
+    get_all_releases_logged(service, "ifBars", "MLVScan").await
 }
 
 #[tauri::command]

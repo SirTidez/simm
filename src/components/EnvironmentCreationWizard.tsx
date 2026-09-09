@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { ApiService } from '../services/api';
@@ -96,7 +96,7 @@ function getParentPath(currentPath: string): string | null {
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
-  const { createEnvironment, startDownload, refreshEnvironments, environments } = useEnvironmentStore();
+  const { createEnvironment, startDownload, refreshEnvironments, environments, activeGameDownloadId } = useEnvironmentStore();
   const { settings, refreshDepotDownloader } = useSettingsStore();
 
   const [wizardMode, setWizardMode] = useState<WizardMode>('landing');
@@ -108,6 +108,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeGameDownloadName = activeGameDownloadId
+    ? environments.find((environment) => environment.id === activeGameDownloadId)?.name ?? 'another environment'
+    : null;
+  const gameOperationInProgress = Boolean(activeGameDownloadId);
 
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [directoryPurpose, setDirectoryPurpose] = useState<DirectoryPurpose>('download');
@@ -126,6 +130,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [importingLocal, setImportingLocal] = useState(false);
 
   const [depotDownloaderInstalled, setDepotDownloaderInstalled] = useState<boolean | null>(null);
+  const [depotDownloaderCanAutoInstall, setDepotDownloaderCanAutoInstall] = useState<boolean | null>(null);
+  const [depotDownloaderInstallHint, setDepotDownloaderInstallHint] = useState<string | null>(null);
+  const [depotDownloaderInstallHelpUrl, setDepotDownloaderInstallHelpUrl] = useState('https://github.com/SteamRE/DepotDownloader#installation');
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
   const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
@@ -140,6 +147,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const experienceMode = resolveExperienceMode(settings);
   const showAdvancedGameTools = resolveShowAdvancedGameTools(settings);
   const canDownloadBranches = experienceMode === 'powerUser' && showAdvancedGameTools;
+  const platform = settings?.platform ?? 'windows';
+  const canAutoInstallDepotDownloader = depotDownloaderCanAutoInstall ?? (platform === 'windows' || platform === 'linux');
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -295,7 +304,14 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     onClose();
   };
 
-  const handleAutoInstallDepotDownloader = async () => {
+  const handleAutoInstallDepotDownloader = useCallback(async () => {
+    if (!canAutoInstallDepotDownloader) {
+      setDepotDownloaderPromptError(
+        depotDownloaderInstallHint || 'Install DepotDownloader manually, then retry detection.'
+      );
+      return;
+    }
+
     setInstallingDepotDownloader(true);
     setDepotDownloaderPromptError(null);
     try {
@@ -312,6 +328,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       await refreshDepotDownloader();
       const depotInfo = await ApiService.detectDepotDownloader();
       setDepotDownloaderInstalled(!!depotInfo.installed);
+      setDepotDownloaderCanAutoInstall(depotInfo.canAutoInstall ?? null);
+      setDepotDownloaderInstallHint(depotInfo.installHint ?? null);
+      setDepotDownloaderInstallHelpUrl(depotInfo.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
       setDepotDownloaderDetectionError(null);
     } catch (err) {
       setDepotDownloaderPromptError(
@@ -322,25 +341,28 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     }
 
     setInstallingDepotDownloader(false);
-  };
+  }, [canAutoInstallDepotDownloader, depotDownloaderInstallHint, refreshDepotDownloader]);
 
   const handleOpenDepotDownloaderInstructions = () => {
-    window.open('https://github.com/SteamRE/DepotDownloader#installation', '_blank', 'noopener,noreferrer');
+    window.open(depotDownloaderInstallHelpUrl, '_blank', 'noopener,noreferrer');
   };
 
-  const refreshDepotDownloaderStatus = async () => {
+  const refreshDepotDownloaderStatus = useCallback(async () => {
     setDepotDownloaderInstalled(null);
     setDepotDownloaderDetectionError(null);
     try {
       const depotInfo = await ApiService.detectDepotDownloader();
       setDepotDownloaderInstalled(!!depotInfo.installed);
+      setDepotDownloaderCanAutoInstall(depotInfo.canAutoInstall ?? null);
+      setDepotDownloaderInstallHint(depotInfo.installHint ?? null);
+      setDepotDownloaderInstallHelpUrl(depotInfo.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
     } catch (err) {
       setDepotDownloaderInstalled(null);
       setDepotDownloaderDetectionError(
         err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
       );
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (wizardMode !== 'download-select') {
@@ -356,6 +378,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       depotDownloaderInstalled === false &&
       !depotDownloaderDetectionError &&
       !depotDownloaderPromptError &&
+      canAutoInstallDepotDownloader &&
       !installingDepotDownloader &&
       !autoDepotInstallAttemptedRef.current
     ) {
@@ -368,7 +391,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     depotDownloaderInstalled,
     depotDownloaderDetectionError,
     depotDownloaderPromptError,
+    canAutoInstallDepotDownloader,
     installingDepotDownloader,
+    refreshDepotDownloaderStatus,
+    handleAutoInstallDepotDownloader,
   ]);
 
   const handleBranchSelect = (branch: BranchConfig) => {
@@ -389,6 +415,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   };
 
   const handleCreate = async () => {
+    if (gameOperationInProgress) {
+      setError(`${activeGameDownloadName} is already downloading or updating. Wait for it to finish before creating another game environment.`);
+      return;
+    }
     if (!appConfig || !selectedBranch || !outputDir) {
       setError('Please fill in all required fields');
       return;
@@ -694,7 +724,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   <p>
                     {depotDownloaderDetectionError
                       ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before adding a branch.'
-                      : 'SIMM uses DepotDownloader to add and update separate Steam branch installs. You can install it automatically or open the official manual instructions.'}
+                      : canAutoInstallDepotDownloader
+                        ? 'SIMM uses DepotDownloader to add and update separate Steam branch installs. You can install it automatically or open the official manual instructions.'
+                        : depotDownloaderInstallHint || 'SIMM uses DepotDownloader to add and update separate Steam branch installs. Install it manually, then retry detection.'}
                   </p>
                   {depotDownloaderDetectionError && <div className="settings-error-banner">{depotDownloaderDetectionError}</div>}
                   {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
@@ -709,6 +741,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                         void ApiService.detectDepotDownloader()
                           .then((info) => {
                             setDepotDownloaderInstalled(!!info.installed);
+                            setDepotDownloaderCanAutoInstall(info.canAutoInstall ?? null);
+                            setDepotDownloaderInstallHint(info.installHint ?? null);
+                            setDepotDownloaderInstallHelpUrl(info.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
                             setDepotDownloaderDetectionError(null);
                           })
                           .catch((err) => {
@@ -719,18 +754,24 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           });
                         return;
                       }
+                      if (!canAutoInstallDepotDownloader) {
+                        void refreshDepotDownloaderStatus();
+                        return;
+                      }
                       void handleAutoInstallDepotDownloader();
                     }}
                     disabled={installingDepotDownloader || (!depotDownloaderDetectionError && depotDownloaderInstalled === null)}
                   >
-                    <Icon name={installingDepotDownloader ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
+                    <Icon name={installingDepotDownloader ? 'fas fa-spinner fa-spin' : canAutoInstallDepotDownloader ? 'fas fa-download' : 'fas fa-rotate'} />
                     {depotDownloaderDetectionError
                       ? 'Retry Detection'
                       : depotDownloaderInstalled === null
                       ? 'Checking…'
                       : installingDepotDownloader
                         ? 'Installing…'
-                        : 'Install Automatically'}
+                        : canAutoInstallDepotDownloader
+                          ? 'Install Automatically'
+                          : 'Refresh Detection'}
                   </SimmButton>
                   <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenDepotDownloaderInstructions}>
                     <Icon name="fas fa-external-link-alt" />
@@ -745,7 +786,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 {appConfig.branches.map((branch) => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
                   const depotRequired = depotDownloaderInstalled !== true || !!depotDownloaderDetectionError;
-                  const disabled = authRequired || depotRequired;
+                  const disabled = authRequired || depotRequired || gameOperationInProgress;
 
                   return (
                     <div key={branch.name} role="listitem">
@@ -782,7 +823,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           </div>
                         </div>
                         <div className="wizard-branch-card__footer">
-                          <span>{authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
+                          <span>{gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating. Wait for it to finish first.` : authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
                         </div>
                       </SimmButton>
                     </div>
@@ -886,9 +927,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => setWizardMode('download-select')}>
                 Back
               </SimmButton>
-              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir}>
-                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
-                {loading ? 'Creating…' : 'Create Environment'}
+              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir || gameOperationInProgress} title={gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating.` : undefined}>
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : gameOperationInProgress ? 'lock' : 'fas fa-plus'} />
+                {loading ? 'Creating…' : gameOperationInProgress ? 'Game operation active' : 'Create Environment'}
               </SimmButton>
             </div>
           </section>

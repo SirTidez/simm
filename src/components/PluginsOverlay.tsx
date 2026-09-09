@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
@@ -88,8 +88,43 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
     };
   } | null>(null);
   const [togglingPluginKey, setTogglingPluginKey] = useState<string | null>(null);
+  const environmentGenerationRef = useRef(0);
+
+  const loadEnvironment = useCallback(async (generation = environmentGenerationRef.current) => {
+    const requestedEnvironmentId = environmentId;
+    try {
+      const env = await ApiService.getEnvironment(requestedEnvironmentId);
+      if (generation !== environmentGenerationRef.current) return;
+      setEnvironment(env);
+    } catch (err) {
+      console.error('Failed to load environment:', err);
+    }
+  }, [environmentId]);
+
+  const loadPlugins = useCallback(async (generation = environmentGenerationRef.current) => {
+    const requestedEnvironmentId = environmentId;
+    setLoading(true);
+    setError(null);
+
+    try {
+      const result = await ApiService.getPlugins(requestedEnvironmentId);
+      if (generation !== environmentGenerationRef.current) return;
+      setPlugins(result.plugins.map((plugin) => ({
+        ...plugin,
+        source: plugin.source as PluginInfo['source'],
+      })));
+      setPluginsDirectory(result.pluginsDirectory);
+    } catch (err) {
+      if (generation !== environmentGenerationRef.current) return;
+      setPlugins([]);
+      setError(err instanceof Error ? err.message : 'Failed to load plugins');
+    } finally {
+      if (generation === environmentGenerationRef.current) setLoading(false);
+    }
+  }, [environmentId]);
 
   useEffect(() => {
+    const generation = ++environmentGenerationRef.current;
     if (!isOpen || !environmentId) {
       setPlugins([]);
       setPluginsDirectory('');
@@ -99,40 +134,14 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
       setSelectedPluginKey(null);
       setContextMenu(null);
       setPendingDelete(null);
+      setPendingUpload(null);
+      setUploading(false);
       return;
     }
 
-    void loadEnvironment();
-    void loadPlugins();
-  }, [environmentId, isOpen]);
-
-  const loadEnvironment = async () => {
-    try {
-      const env = await ApiService.getEnvironment(environmentId);
-      setEnvironment(env);
-    } catch (err) {
-      console.error('Failed to load environment:', err);
-    }
-  };
-
-  const loadPlugins = async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const result = await ApiService.getPlugins(environmentId);
-      setPlugins(result.plugins.map((plugin) => ({
-        ...plugin,
-        source: plugin.source as PluginInfo['source'],
-      })));
-      setPluginsDirectory(result.pluginsDirectory);
-    } catch (err) {
-      setPlugins([]);
-      setError(err instanceof Error ? err.message : 'Failed to load plugins');
-    } finally {
-      setLoading(false);
-    }
-  };
+    void loadEnvironment(generation);
+    void loadPlugins(generation);
+  }, [environmentId, isOpen, loadEnvironment, loadPlugins]);
 
   const filteredPlugins = useMemo(() => {
     const normalizedQuery = searchTerm.trim().toLowerCase();
@@ -170,52 +179,67 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
   const disabledCount = plugins.filter((plugin) => plugin.disabled).length;
 
   const handleOpenFolder = async () => {
+    const generation = environmentGenerationRef.current;
+    const requestedEnvironmentId = environmentId;
     try {
-      await ApiService.openPluginsFolder(environmentId);
+      await ApiService.openPluginsFolder(requestedEnvironmentId);
     } catch (err) {
+      if (generation !== environmentGenerationRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to open plugins folder');
     }
   };
 
   const handleTogglePlugin = async (plugin: PluginInfo) => {
+    const generation = environmentGenerationRef.current;
+    const requestedEnvironmentId = environmentId;
     const pluginKey = getPluginKey(plugin);
     setTogglingPluginKey(pluginKey);
     setError(null);
 
     try {
       if (plugin.disabled) {
-        await ApiService.enablePlugin(environmentId, plugin.fileName);
+        await ApiService.enablePlugin(requestedEnvironmentId, plugin.fileName);
       } else {
-        await ApiService.disablePlugin(environmentId, plugin.fileName);
+        await ApiService.disablePlugin(requestedEnvironmentId, plugin.fileName);
       }
 
-      await loadPlugins();
-      onPluginsChanged?.();
+      if (generation !== environmentGenerationRef.current) return;
+      await loadPlugins(generation);
+      if (generation === environmentGenerationRef.current) onPluginsChanged?.();
     } catch (err) {
+      if (generation !== environmentGenerationRef.current) return;
       setError(err instanceof Error ? err.message : `Failed to ${plugin.disabled ? 'enable' : 'disable'} plugin`);
     } finally {
-      setTogglingPluginKey(null);
+      if (generation === environmentGenerationRef.current) setTogglingPluginKey(null);
     }
   };
 
   const handleDeletePlugin = async (plugin: PluginInfo) => {
+    const generation = environmentGenerationRef.current;
+    const requestedEnvironmentId = environmentId;
     const pluginKey = getPluginKey(plugin);
     setDeletingPluginKey(pluginKey);
     setError(null);
 
     try {
-      await ApiService.deletePlugin(environmentId, plugin.fileName);
-      await loadPlugins();
-      onPluginsChanged?.();
+      await ApiService.deletePlugin(requestedEnvironmentId, plugin.fileName);
+      if (generation !== environmentGenerationRef.current) return;
+      await loadPlugins(generation);
+      if (generation === environmentGenerationRef.current) onPluginsChanged?.();
     } catch (err) {
+      if (generation !== environmentGenerationRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to delete plugin');
     } finally {
-      setDeletingPluginKey(null);
+      if (generation === environmentGenerationRef.current) setDeletingPluginKey(null);
     }
   };
 
   const handleUploadClick = async () => {
-    if (!environment) {
+    const generation = environmentGenerationRef.current;
+    const requestedEnvironmentId = environmentId;
+    const requestedEnvironment = environment;
+
+    if (!requestedEnvironment) {
       setError('Environment not loaded');
       return;
     }
@@ -234,9 +258,10 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
       }) as string | { path: string; name?: string } | null;
 
       if (!selected) {
-        setUploading(false);
         return;
       }
+
+      if (generation !== environmentGenerationRef.current) return;
 
       const filePath = typeof selected === 'string' ? selected : selected.path;
       const fileName = typeof selected === 'string'
@@ -244,15 +269,16 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
         : selected.name || selected.path.split(/[/\\]/).pop() || 'unknown';
 
       const result = await ApiService.uploadPlugin(
-        environmentId,
+        requestedEnvironmentId,
         filePath,
         fileName,
-        environment.runtime
+        requestedEnvironment.runtime
       );
+
+      if (generation !== environmentGenerationRef.current) return;
 
       if (!result.success) {
         setError(result.error || 'Failed to upload plugin');
-        setUploading(false);
         return;
       }
 
@@ -263,12 +289,13 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
         return;
       }
 
-      await loadPlugins();
-      onPluginsChanged?.();
+      await loadPlugins(generation);
+      if (generation === environmentGenerationRef.current) onPluginsChanged?.();
     } catch (err) {
+      if (generation !== environmentGenerationRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to upload plugin');
     } finally {
-      setUploading(false);
+      if (generation === environmentGenerationRef.current) setUploading(false);
     }
   };
 

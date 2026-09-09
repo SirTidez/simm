@@ -51,10 +51,15 @@ pub async fn get_melon_loader_status(
     } else {
         None
     };
+    let linux_requirements = melon_loader_service
+        .get_linux_requirements_status(&env)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
         "installed": installed,
-        "version": version
+        "version": version,
+        "linuxRequirements": linux_requirements
     }))
 }
 
@@ -108,6 +113,17 @@ pub async fn install_melon_loader(
     if env.output_dir.is_empty() {
         return error_json("Output directory not set".to_string());
     }
+
+    let melon_loader_service = match get_melon_loader_service().await {
+        Ok(service) => service,
+        Err(e) => return error_json(format!("Failed to get MelonLoader service: {}", e)),
+    };
+
+    let linux_prerequisite_message =
+        match melon_loader_service.ensure_linux_prerequisites(&env).await {
+            Ok(message) => message,
+            Err(e) => return error_json(e.to_string()),
+        };
 
     // Get all MelonLoader releases to find the one matching the version tag
     eprintln!("[install_melon_loader] Initializing release service...");
@@ -227,14 +243,6 @@ pub async fn install_melon_loader(
     );
 
     // Install from the temp file
-    let melon_loader_service = match get_melon_loader_service().await {
-        Ok(service) => service,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&temp_zip_path).await;
-            return error_json(format!("Failed to get MelonLoader service: {}", e));
-        }
-    };
-
     let result = melon_loader_service
         .install_melon_loader(&env.output_dir, &temp_zip_path.to_string_lossy())
         .await;
@@ -249,19 +257,66 @@ pub async fn install_melon_loader(
             // Check if installation was successful
             if let Some(success) = json_result.get("success").and_then(|s| s.as_bool()) {
                 if success {
-                    // Extract version from result if available
-                    let version = json_result
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                    let version = match melon_loader_service
+                        .write_installed_version(&env.output_dir, &version_tag)
+                        .await
+                    {
+                        Ok(version) => version,
+                        Err(error) => {
+                            return error_json(format!(
+                                "MelonLoader installed, but SIMM could not record the installed version: {}",
+                                error
+                            ));
+                        }
+                    };
+
+                    if let Err(error) = env_service
+                        .update_environment(
+                            &environment_id,
+                            [(
+                                "melonLoaderVersion".to_string(),
+                                serde_json::Value::String(version.clone()),
+                            )],
+                        )
+                        .await
+                    {
+                        return error_json(format!(
+                            "MelonLoader installed, but SIMM could not update the environment metadata: {}",
+                            error
+                        ));
+                    }
 
                     let _ = events::emit_melonloader_installed(
                         &app,
                         download_id.clone(),
                         environment_id.clone(),
                         format!("MelonLoader {} installed successfully", version_tag),
-                        version,
+                        Some(version.clone()),
                     );
+
+                    let mut enriched = json_result.clone();
+                    if let Some(object) = enriched.as_object_mut() {
+                        object.insert(
+                            "version".to_string(),
+                            serde_json::Value::String(version.clone()),
+                        );
+                    }
+                    if let Some(message) = linux_prerequisite_message {
+                        if let Some(object) = enriched.as_object_mut() {
+                            object.insert(
+                                "linuxPrerequisiteMessage".to_string(),
+                                serde_json::Value::String(message),
+                            );
+                            object.insert(
+                                "linuxLaunchOptions".to_string(),
+                                serde_json::Value::String(
+                                    MelonLoaderService::linux_melonloader_launch_options()
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                    return Ok(enriched);
                 } else {
                     // Installation failed
                     let error_msg = json_result
@@ -291,6 +346,112 @@ pub async fn install_melon_loader(
             error_json(error_msg)
         }
     }
+}
+
+#[tauri::command]
+pub async fn repair_melonloader_launch_options(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    if !cfg!(target_os = "linux") {
+        return Ok(serde_json::json!({
+            "success": true,
+            "message": "No Linux Proton launch option repair is required on this platform"
+        }));
+    }
+
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    let is_steam_env = env.environment_type == Some(crate::types::EnvironmentType::Steam)
+        || env.id.starts_with("steam-");
+
+    let shortcut = if is_steam_env {
+        None
+    } else {
+        Some(
+            crate::services::filesystem::FileSystemService::new()
+                .ensure_schedule_i_steam_shortcut(&env.output_dir)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    };
+
+    let steam_launch_options = if is_steam_env {
+        Some(
+            crate::services::steam::SteamService::new()
+                .ensure_schedule_i_launch_options()
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
+    let melon_loader_service = get_melon_loader_service().await?;
+    let mut linux_requirements = melon_loader_service
+        .get_linux_requirements_status(&env)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut linux_prerequisite_message = None;
+
+    let can_install_prerequisites = linux_requirements
+        .as_ref()
+        .and_then(|requirements| requirements.get("canInstallPrerequisites"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let prerequisites_missing = linux_requirements
+        .as_ref()
+        .and_then(|requirements| requirements.get("prerequisitesInstalled"))
+        .and_then(|value| value.as_bool())
+        == Some(false);
+
+    if can_install_prerequisites && prerequisites_missing {
+        linux_prerequisite_message = melon_loader_service
+            .ensure_linux_prerequisites(&env)
+            .await
+            .map_err(|e| e.to_string())?;
+        linux_requirements = melon_loader_service
+            .get_linux_requirements_status(&env)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "steamLaunchOptions": steam_launch_options,
+        "shortcut": shortcut,
+        "linuxPrerequisiteMessage": linux_prerequisite_message,
+        "linuxRequirements": linux_requirements
+    }))
+}
+
+#[tauri::command]
+pub async fn verify_melonloader_launch(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    launch_started_at: u64,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let melon_loader_service = get_melon_loader_service().await?;
+    melon_loader_service
+        .verify_launch_after(&env.output_dir, launch_started_at, timeout_ms)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

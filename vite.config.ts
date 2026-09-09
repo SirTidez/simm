@@ -52,8 +52,9 @@ export default defineConfig(({ mode }) => {
       host: 'localhost',
       // Tauri requires watch to be set
       watch: {
-        // Tell vite to ignore watching `src-tauri`
-        ignored: ['**/src-tauri/**'],
+        // Keep Vite out of Rust build outputs. On Windows, Cargo can lock
+        // target/debug/deps/*.exe while Tauri is building or running it.
+        ignored: ['**/src-tauri/**', '**/target/**', '**/src-tauri/target/**'],
       },
     },
     // to make use of `TAURI_DEBUG` and other env variables

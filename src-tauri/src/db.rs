@@ -1,8 +1,11 @@
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -16,9 +19,20 @@ const SQLITE_SIDE_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 const DEFAULT_DATABASE_BACKUP_COUNT: usize = 10;
 
 fn normalize_path(path: &str) -> String {
-    path.replace('/', "\\")
-        .trim_end_matches(['\\', '/'])
-        .to_ascii_lowercase()
+    normalize_path_for_platform(path, cfg!(windows))
+}
+
+fn normalize_path_for_platform(path: &str, windows: bool) -> String {
+    if windows {
+        path.trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    } else {
+        // POSIX file systems are ordinarily case-sensitive.  Do not collapse
+        // `/tmp/Game` and `/tmp/game` merely because a Windows build needs
+        // case-insensitive identity.
+        path.trim_end_matches('/').to_string()
+    }
 }
 
 #[cfg(test)]
@@ -50,12 +64,13 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
 
     let migrator = sqlx::migrate!();
     maybe_create_startup_backup(&pool, &migrator, database_preexisted).await?;
+    reconcile_historical_migration_checksums(&pool, &migrator).await?;
     if let Err(err) = migrator.run(&pool).await {
         match err {
             MigrateError::VersionMismatch(version) => {
-                if has_expected_schema(&pool).await? {
+                if migration_schema_invariant(&pool, version).await? {
                     log::warn!(
-                        "Database migration version mismatch detected for version {}; proceeding with existing schema",
+                        "Database migration version mismatch detected for version {}; proceeding because that migration's schema invariant is satisfied",
                         version
                     );
                 } else {
@@ -67,6 +82,8 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
         }
     }
 
+    ensure_additive_schema(&pool).await?;
+    reconcile_environment_path_identities(&pool).await?;
     migrate_from_files(&pool).await?;
     set_app_meta_value(&pool, APP_VERSION_KEY, current_app_version()).await?;
 
@@ -89,7 +106,7 @@ pub fn get_data_dir() -> Result<PathBuf> {
     Ok(simm_dir)
 }
 
-fn get_backups_dir() -> Result<PathBuf> {
+pub fn get_backups_dir() -> Result<PathBuf> {
     let backups_dir = get_data_dir()?.join("backups");
     std::fs::create_dir_all(&backups_dir).context("Failed to create backups directory")?;
     Ok(backups_dir)
@@ -122,6 +139,82 @@ fn sqlite_bundle_path(base: &Path, suffix: &str) -> PathBuf {
     }
 
     PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
+}
+
+fn legacy_migration_marker_path(target_db_path: &Path) -> PathBuf {
+    PathBuf::from(format!(
+        "{}.legacy-migration",
+        target_db_path.to_string_lossy()
+    ))
+}
+
+fn file_sha256(path: &Path) -> Result<[u8; 32]> {
+    let mut file = std::fs::File::open(path).with_context(|| {
+        format!(
+            "Failed to open database member {} for verification",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).with_context(|| {
+            format!(
+                "Failed to read database member {} for verification",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn database_members_match(source: &Path, destination: &Path) -> Result<bool> {
+    let source_metadata = std::fs::metadata(source).with_context(|| {
+        format!(
+            "Failed to inspect source database member {}",
+            source.display()
+        )
+    })?;
+    let destination_metadata = match std::fs::metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect destination database member {}",
+                    destination.display()
+                )
+            })
+        }
+    };
+    if source_metadata.len() != destination_metadata.len() {
+        return Ok(false);
+    }
+    Ok(file_sha256(source)? == file_sha256(destination)?)
+}
+
+fn write_legacy_migration_marker(marker_path: &Path, source_db_path: &Path) -> Result<()> {
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_path)
+        .with_context(|| {
+            format!(
+                "Failed to create legacy database migration marker {}",
+                marker_path.display()
+            )
+        })?;
+    marker
+        .write_all(source_db_path.to_string_lossy().as_bytes())
+        .context("Failed to write legacy database migration source identity")?;
+    marker
+        .sync_all()
+        .context("Failed to durably flush legacy database migration marker")?;
+    Ok(())
 }
 
 fn current_app_version() -> &'static str {
@@ -355,6 +448,114 @@ async fn database_requires_migration_backup(
     Ok(applied_migrations != expected_migrations)
 }
 
+/// Normalizes checksums for migrations that are already applied to a database with
+/// SIMM's foundational schema. That allows SQLx to apply later migrations instead
+/// of treating a historical migration-file revision as a permanent startup error.
+async fn reconcile_historical_migration_checksums(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    if !table_exists(pool, "_sqlx_migrations").await? {
+        return Ok(());
+    }
+
+    let applied: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations")
+            .fetch_all(pool)
+            .await
+            .context("Failed to inspect applied migration checksums")?;
+
+    for (version, checksum) in applied {
+        let Some(expected) = migrator
+            .iter()
+            .find(|migration| migration.version == version)
+        else {
+            continue;
+        };
+        if checksum == expected.checksum.as_ref() {
+            continue;
+        }
+
+        if !migration_schema_invariant(pool, version).await? {
+            log::warn!(
+                "Refusing to rewrite checksum for migration {} because its schema invariant is not satisfied",
+                version
+            );
+            continue;
+        }
+
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(expected.checksum.as_ref())
+            .bind(version)
+            .execute(pool)
+            .await
+            .with_context(|| format!("Failed to reconcile checksum for migration {version}"))?;
+        log::info!(
+            "Reconciled historical checksum for applied database migration {}",
+            version
+        );
+    }
+
+    Ok(())
+}
+
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1")
+            .bind(table)
+            .bind(column)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("Failed to inspect columns for table {table}"))?;
+    Ok(exists.is_some())
+}
+
+async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1")
+            .bind(index)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("Failed to inspect database index {index}"))?;
+    Ok(exists.is_some())
+}
+
+/// A checksum is reconciled only when the concrete objects introduced by that
+/// exact historical migration are present. Merely having the foundational
+/// table names is not sufficient evidence that an altered migration ran.
+async fn migration_schema_invariant(pool: &SqlitePool, version: i64) -> Result<bool> {
+    match version {
+        1 => Ok(table_exists(pool, "app_meta").await?
+            && column_exists(pool, "app_meta", "value").await?
+            && table_exists(pool, "settings").await?
+            && column_exists(pool, "settings", "data").await?
+            && table_exists(pool, "environments").await?
+            && column_exists(pool, "environments", "output_dir").await?
+            && column_exists(pool, "environments", "data").await?
+            && table_exists(pool, "secrets").await?
+            && table_exists(pool, "mod_metadata").await?),
+        2 => Ok(
+            column_exists(pool, "environments", "normalized_output_dir").await?
+                && index_exists(pool, "idx_environments_normalized_output_dir_unique").await?,
+        ),
+        3 => Ok(table_exists(pool, "profiles").await?
+            && table_exists(pool, "environment_profiles").await?
+            && index_exists(pool, "idx_profiles_default_runtime").await?),
+        4 => Ok(table_exists(pool, "telemetry_preferences").await?
+            && table_exists(pool, "telemetry_snapshots").await?),
+        5 => Ok(table_exists(pool, "telemetry_sessions").await?
+            && table_exists(pool, "telemetry_events").await?),
+        6 => Ok(table_exists(pool, "telemetry_upload_queue").await?
+            && index_exists(pool, "idx_telemetry_upload_queue_state_created").await?),
+        7 => Ok(table_exists(pool, "telemetry_mod_rules").await?),
+        8 => Ok(table_exists(pool, "environment_deletion_journal").await?
+            && index_exists(pool, "idx_environment_deletion_journal_state").await?),
+        9 => Ok(table_exists(pool, "telemetry_upload_sessions").await?
+            && index_exists(pool, "idx_telemetry_upload_sessions_queue").await?),
+        _ => Ok(false),
+    }
+}
+
 async fn maybe_create_startup_backup(
     pool: &SqlitePool,
     migrator: &sqlx::migrate::Migrator,
@@ -432,20 +633,86 @@ pub async fn create_database_backup(pool: &SqlitePool, reason: &str) -> Result<P
     Ok(backup_path)
 }
 
-fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
-    if target_db_path.exists() {
-        return Ok(());
+pub async fn repair_database(pool: &SqlitePool) -> Result<PathBuf> {
+    if !has_expected_schema(pool).await? {
+        anyhow::bail!("The foundational SIMM database tables are missing. Restore a database backup before retrying repair.");
     }
 
+    let backup_path = create_database_backup(pool, "pre-repair").await?;
+    ensure_additive_schema(pool).await?;
+    crate::services::settings::SettingsService::repair_corrupt_settings(pool).await?;
+    let migrator = sqlx::migrate!();
+    reconcile_historical_migration_checksums(pool, &migrator).await?;
+    migrator
+        .run(pool)
+        .await
+        .context("Failed to complete database migrations during repair")?;
+    reconcile_environment_path_identities(pool).await?;
+    sqlx::query("PRAGMA optimize")
+        .execute(pool)
+        .await
+        .context("Failed to optimize repaired database")?;
+
+    log::info!(
+        "Database repair completed using backup {}",
+        backup_path.display()
+    );
+    Ok(backup_path)
+}
+
+fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
     let target_normalized = normalize_path(&target_db_path.to_string_lossy());
-    let source = legacy_database_paths().into_iter().find(|candidate| {
+    let marker_path = legacy_migration_marker_path(target_db_path);
+    let candidates = legacy_database_paths();
+    let candidate_has_bundle = |candidate: &Path| {
         let candidate_normalized = normalize_path(&candidate.to_string_lossy());
-        candidate_normalized != target_normalized && candidate.exists()
-    });
+        candidate_normalized != target_normalized
+            && std::iter::once("")
+                .chain(SQLITE_SIDE_SUFFIXES.iter().copied())
+                .any(|suffix| sqlite_bundle_path(candidate, suffix).exists())
+    };
+
+    let source = if marker_path.exists() {
+        let recorded_source = std::fs::read_to_string(&marker_path).with_context(|| {
+            format!(
+                "Failed to read legacy database migration marker {}",
+                marker_path.display()
+            )
+        })?;
+        let recorded_source = recorded_source.trim();
+        if recorded_source.is_empty() {
+            anyhow::bail!("Legacy database migration marker has no source identity");
+        }
+        let recorded_normalized = normalize_path(recorded_source);
+        let matched = candidates.into_iter().find(|candidate| {
+            normalize_path(&candidate.to_string_lossy()) == recorded_normalized
+                && candidate_has_bundle(candidate)
+        });
+        if matched.is_none() {
+            anyhow::bail!(
+                "Legacy database migration marker source {} is invalid or no longer available",
+                recorded_source
+            );
+        }
+        matched
+    } else {
+        candidates
+            .into_iter()
+            .find(|candidate| candidate_has_bundle(candidate))
+    };
 
     let Some(source_db_path) = source else {
         return Ok(());
     };
+
+    let source_main_exists = source_db_path.exists();
+    // An already-created target with a complete old source is normally an
+    // established current database plus stale historical files.  Resume only
+    // when our marker exists (new migration) or when the old implementation
+    // left sidecars after moving the source main file.
+    if target_db_path.exists() && source_main_exists && !marker_path.exists() {
+        return Ok(());
+    }
 
     if let Some(parent) = target_db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -458,38 +725,108 @@ fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
         target_db_path.display()
     );
 
-    let mut migrated_any = false;
-
-    for suffix in std::iter::once("").chain(SQLITE_SIDE_SUFFIXES.iter().copied()) {
-        let src = sqlite_bundle_path(&source_db_path, suffix);
-        if !src.exists() {
-            continue;
-        }
-
-        let dst = sqlite_bundle_path(target_db_path, suffix);
-        if dst.exists() {
-            std::fs::remove_file(&dst)
-                .with_context(|| format!("Failed to clear existing file {}", dst.display()))?;
-        }
-
-        std::fs::copy(&src, &dst).with_context(|| {
-            format!(
-                "Failed to copy database file from {} to {}",
-                src.display(),
-                dst.display()
-            )
-        })?;
-
-        std::fs::remove_file(&src)
-            .with_context(|| format!("Failed to remove legacy file {}", src.display()))?;
-
-        migrated_any = true;
+    if !marker_path.exists() {
+        write_legacy_migration_marker(&marker_path, &source_db_path)?;
     }
 
-    if !migrated_any {
+    // A SQLite database and its WAL/SHM/journal are one logical unit.  Never
+    // remove a source member while another member is still being copied.  A
+    // process death after the main database is copied therefore resumes from
+    // the intact legacy bundle rather than permanently suppressing its WAL.
+    let mut source_members = Vec::new();
+    for suffix in std::iter::once("").chain(SQLITE_SIDE_SUFFIXES.iter().copied()) {
+        let src = sqlite_bundle_path(&source_db_path, suffix);
+        if src.exists() {
+            source_members.push((suffix, src));
+        }
+    }
+
+    if source_members.is_empty() {
         return Err(anyhow::anyhow!(
-            "Legacy database migration candidate found but no files were copied"
+            "Legacy database migration candidate found but no files were available"
         ));
+    }
+
+    for (suffix, src) in &source_members {
+        let dst = sqlite_bundle_path(target_db_path, suffix);
+        let target_matches = database_members_match(src, &dst)?;
+        if !target_matches {
+            let staged = dst.with_extension(format!(
+                "{}.migrating",
+                dst.extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("sqlite")
+            ));
+            if staged.exists() {
+                std::fs::remove_file(&staged).with_context(|| {
+                    format!(
+                        "Failed to clear incomplete staged database file {}",
+                        staged.display()
+                    )
+                })?;
+            }
+            std::fs::copy(src, &staged).with_context(|| {
+                format!(
+                    "Failed to stage database file from {} to {}",
+                    src.display(),
+                    staged.display()
+                )
+            })?;
+            if !database_members_match(src, &staged)? {
+                anyhow::bail!(
+                    "Staged database file digest did not match {}",
+                    src.display()
+                );
+            }
+            // The legacy source remains untouched until every member has been
+            // promoted, so replacing a stale partial target is recoverable on
+            // Windows too (where rename does not replace an existing file).
+            if dst.exists() {
+                std::fs::remove_file(&dst).with_context(|| {
+                    format!(
+                        "Failed to replace incomplete database member {}",
+                        dst.display()
+                    )
+                })?;
+            }
+            std::fs::rename(&staged, &dst).with_context(|| {
+                format!("Failed to promote staged database file {}", dst.display())
+            })?;
+            if !database_members_match(src, &dst)? {
+                anyhow::bail!(
+                    "Promoted database file digest did not match {}",
+                    src.display()
+                );
+            }
+        }
+    }
+
+    // Only now is every destination member present and verified.  Source
+    // cleanup is best effort: retaining an old bundle is safe, losing its WAL
+    // before promotion is not.
+    for (suffix, src) in source_members {
+        let dst = sqlite_bundle_path(target_db_path, suffix);
+        if !database_members_match(&src, &dst)? {
+            anyhow::bail!(
+                "Refusing to remove unmatched legacy database member {}",
+                src.display()
+            );
+        }
+        if let Err(error) = std::fs::remove_file(&src) {
+            log::warn!(
+                "Legacy database member {} was copied but could not be removed: {}",
+                src.display(),
+                error
+            );
+        }
+    }
+
+    if let Err(error) = std::fs::remove_file(&marker_path) {
+        log::warn!(
+            "Legacy database migration completed but marker {} could not be removed: {}",
+            marker_path.display(),
+            error
+        );
     }
 
     Ok(())
@@ -572,21 +909,82 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
         }
     }
 
+    // Legacy JSON can contain duplicate path spellings.  Persist the first
+    // deterministic record and record the skipped IDs before completing the
+    // migration, so one conflicting row cannot trap startup in a retry loop.
+    let mut imported_paths = std::collections::HashSet::new();
+    let mut imported_ids = std::collections::HashSet::new();
+    let mut conflicts = Vec::new();
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("Failed to start legacy environment migration")?;
     for env in &environments {
         let normalized_output_dir = normalize_path(&env.output_dir);
+        if !imported_ids.insert(env.id.clone())
+            || !imported_paths.insert(normalized_output_dir.clone())
+        {
+            conflicts.push(serde_json::json!({
+                "id": env.id,
+                "outputDir": env.output_dir,
+                "reason": "duplicate legacy environment identity or normalized path"
+            }));
+            continue;
+        }
+
         let serialized = serde_json::to_string(env)?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
+             ON CONFLICT(id) DO NOTHING",
         )
         .bind(&env.id)
         .bind(&env.output_dir)
-        .bind(normalized_output_dir)
-        .bind(serialized)
-        .execute(pool)
-        .await
-        .context("Failed to migrate environments")?;
+        .bind(&normalized_output_dir)
+        .bind(&serialized)
+        .execute(&mut *transaction)
+        .await;
+
+        match inserted {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => conflicts.push(serde_json::json!({
+                "id": env.id,
+                "outputDir": env.output_dir,
+                "reason": "environment id already existed"
+            })),
+            Err(error)
+                if error
+                    .to_string()
+                    .to_lowercase()
+                    .contains("unique constraint") =>
+            {
+                conflicts.push(serde_json::json!({
+                    "id": env.id,
+                    "outputDir": env.output_dir,
+                    "reason": "normalized output path already existed"
+                }));
+            }
+            Err(error) => return Err(error).context("Failed to migrate environments"),
+        }
     }
+    if !conflicts.is_empty() {
+        sqlx::query(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind("storage.migrated.environment_conflicts")
+        .bind(serde_json::to_string(&conflicts)?)
+        .execute(&mut *transaction)
+        .await
+        .context("Failed to record legacy environment migration conflicts")?;
+        log::warn!(
+            "Skipped {} conflicting legacy environment record(s)",
+            conflicts.len()
+        );
+    }
+    transaction
+        .commit()
+        .await
+        .context("Failed to commit legacy environment migration")?;
 
     let mut secrets_written = false;
     for dir in &legacy_dirs {
@@ -637,6 +1035,413 @@ async fn has_expected_schema(pool: &SqlitePool) -> Result<bool> {
         .iter()
         .all(|table| tables.contains(&table.to_string())))
 }
+
+/// Restores additive tables for legacy databases whose historical migration checksum no longer
+/// matches the checked-in migration. Those databases intentionally bypass sqlx's migration
+/// runner, so later profiles and telemetry migrations would otherwise never be applied.
+async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
+    const ADDITIVE_SCHEMA_STATEMENTS: &[&str] = &[
+        "CREATE TABLE IF NOT EXISTS environment_duplicate_quarantine (\
+            id TEXT PRIMARY KEY, \
+            keeper_environment_id TEXT NOT NULL, \
+            output_dir TEXT NOT NULL, \
+            normalized_output_dir TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            reason TEXT NOT NULL, \
+            quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\
+        )",
+        "CREATE TABLE IF NOT EXISTS environment_duplicate_mod_metadata_quarantine (\
+            environment_id TEXT NOT NULL, \
+            keeper_environment_id TEXT NOT NULL, \
+            kind TEXT NOT NULL, \
+            file_name TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+            PRIMARY KEY (environment_id, kind, file_name)\
+        )",
+        "CREATE TABLE IF NOT EXISTS settings_quarantine (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            settings_id INTEGER NOT NULL, \
+            data TEXT NOT NULL, \
+            reason TEXT NOT NULL, \
+            quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\
+        )",
+        "CREATE TABLE IF NOT EXISTS profiles (\
+            id TEXT PRIMARY KEY, \
+            name TEXT NOT NULL, \
+            runtime TEXT NOT NULL CHECK (runtime IN ('IL2CPP', 'Mono')), \
+            is_default INTEGER NOT NULL DEFAULT 0, \
+            manifest TEXT NOT NULL, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_default_runtime \
+            ON profiles(runtime) WHERE is_default = 1",
+        "CREATE INDEX IF NOT EXISTS idx_profiles_runtime ON profiles(runtime)",
+        "CREATE TABLE IF NOT EXISTS environment_deletion_journal (\
+            environment_id TEXT PRIMARY KEY, \
+            original_path TEXT NOT NULL, \
+            staged_path TEXT NOT NULL UNIQUE, \
+            environment_data TEXT NOT NULL, \
+            state TEXT NOT NULL CHECK (state IN ('planned', 'staged', 'metadata_deleted', 'restore_required')), \
+            last_error TEXT, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_environment_deletion_journal_state \
+            ON environment_deletion_journal(state)",
+        "CREATE TABLE IF NOT EXISTS environment_profiles (\
+            environment_id TEXT PRIMARY KEY, \
+            active_profile_id TEXT NOT NULL, \
+            last_applied_at TEXT, \
+            FOREIGN KEY(active_profile_id) REFERENCES profiles(id) ON DELETE RESTRICT\
+        )",
+        "CREATE TABLE IF NOT EXISTS telemetry_preferences (\
+            id INTEGER PRIMARY KEY CHECK (id = 1), \
+            data TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE TABLE IF NOT EXISTS telemetry_snapshots (\
+            id TEXT PRIMARY KEY, \
+            environment_id TEXT NOT NULL, \
+            created_at TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            FOREIGN KEY(environment_id) REFERENCES environments(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_snapshots_environment_created \
+            ON telemetry_snapshots(environment_id, created_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_sessions (\
+            id TEXT PRIMARY KEY, \
+            environment_id TEXT NOT NULL, \
+            started_at TEXT NOT NULL, \
+            ended_at TEXT, \
+            data TEXT NOT NULL, \
+            FOREIGN KEY(environment_id) REFERENCES environments(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_sessions_environment_started \
+            ON telemetry_sessions(environment_id, started_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_events (\
+            id TEXT PRIMARY KEY, \
+            session_id TEXT NOT NULL, \
+            environment_id TEXT NOT NULL, \
+            occurred_at TEXT NOT NULL, \
+            severity TEXT NOT NULL, \
+            fingerprint TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            FOREIGN KEY(session_id) REFERENCES telemetry_sessions(id) ON DELETE CASCADE, \
+            FOREIGN KEY(environment_id) REFERENCES environments(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_events_environment_occurred \
+            ON telemetry_events(environment_id, occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_events_session_occurred \
+            ON telemetry_events(session_id, occurred_at ASC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_upload_queue (\
+            id TEXT PRIMARY KEY, \
+            upload_id TEXT NOT NULL UNIQUE, \
+            payload TEXT NOT NULL, \
+            state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'accepted', 'failed')), \
+            attempts INTEGER NOT NULL DEFAULT 0, \
+            last_error_code TEXT, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_upload_queue_state_created \
+            ON telemetry_upload_queue(state, created_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_upload_sessions (\
+            session_id TEXT PRIMARY KEY, \
+            queue_id TEXT NOT NULL, \
+            FOREIGN KEY(queue_id) REFERENCES telemetry_upload_queue(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_upload_sessions_queue \
+            ON telemetry_upload_sessions(queue_id)",
+        "CREATE TABLE IF NOT EXISTS telemetry_mod_rules (\
+            id TEXT PRIMARY KEY, \
+            mod_key TEXT NOT NULL, \
+            environment_id TEXT NOT NULL DEFAULT '', \
+            mode TEXT NOT NULL CHECK (mode IN ('share', 'local_only', 'ignore')), \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL, \
+            UNIQUE(mod_key, environment_id)\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_mod_rules_environment \
+            ON telemetry_mod_rules(environment_id, mod_key)",
+    ];
+
+    for statement in ADDITIVE_SCHEMA_STATEMENTS {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .context("Failed to ensure additive database schema")?;
+    }
+
+    // Historical `environment_profiles` rows were not linked to environments.
+    // Remove only dangling mappings during startup repair; valid profile rows
+    // remain intact and future environment deletion clears its mapping in the
+    // same transaction as the environment record.
+    sqlx::query(
+        "DELETE FROM environment_profiles \
+         WHERE environment_id NOT IN (SELECT id FROM environments)",
+    )
+    .execute(pool)
+    .await
+    .context("Failed to remove orphan environment profile mappings")?;
+
+    for table in [
+        "environment_duplicate_quarantine",
+        "environment_duplicate_mod_metadata_quarantine",
+        "settings_quarantine",
+        "profiles",
+        "environment_deletion_journal",
+        "environment_profiles",
+        "telemetry_preferences",
+        "telemetry_snapshots",
+        "telemetry_sessions",
+        "telemetry_events",
+        "telemetry_upload_queue",
+        "telemetry_upload_sessions",
+        "telemetry_mod_rules",
+    ] {
+        if !table_exists(pool, table).await? {
+            anyhow::bail!("Database repair did not restore required table {table}");
+        }
+    }
+
+    let quarantined_duplicates: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environment_duplicate_quarantine")
+            .fetch_one(pool)
+            .await
+            .context("Failed to inspect quarantined duplicate environments")?;
+    if quarantined_duplicates > 0 {
+        log::warn!(
+            "{} duplicate environment record(s) are preserved in the database quarantine after install-path normalization",
+            quarantined_duplicates
+        );
+    }
+
+    Ok(())
+}
+
+/// Rebuilds environment path identities with the semantics of the current OS.
+/// Migration SQL cannot branch on the target platform, so migration 2 stores a
+/// conservative path and this startup pass applies Windows folding or POSIX
+/// case-sensitive identity before services begin reading the table.
+async fn reconcile_environment_path_identities(pool: &SqlitePool) -> Result<()> {
+    reconcile_environment_path_identities_for_platform(pool, cfg!(windows)).await
+}
+
+async fn reconcile_environment_path_identities_for_platform(
+    pool: &SqlitePool,
+    windows: bool,
+) -> Result<()> {
+    let stored_paths: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT output_dir, normalized_output_dir FROM environments")
+            .fetch_all(pool)
+            .await
+            .context("Failed to inspect environment path identities")?;
+    let mut occupied = HashSet::new();
+    let mut reconciliation_needed =
+        !index_exists(pool, "idx_environments_normalized_output_dir_unique").await?;
+    for (output_dir, stored_normalized) in &stored_paths {
+        let expected = normalize_path_for_platform(output_dir, windows);
+        if stored_normalized.as_deref() != Some(expected.as_str())
+            || (!expected.is_empty() && !occupied.insert(expected))
+        {
+            reconciliation_needed = true;
+        }
+    }
+    if !windows && !reconciliation_needed {
+        let quarantined_paths: Vec<String> =
+            sqlx::query_scalar("SELECT output_dir FROM environment_duplicate_quarantine")
+                .fetch_all(pool)
+                .await
+                .context("Failed to inspect quarantined environment path identities")?;
+        reconciliation_needed = quarantined_paths.into_iter().any(|output_dir| {
+            let normalized = normalize_path_for_platform(&output_dir, windows);
+            normalized.is_empty() || !occupied.contains(&normalized)
+        });
+    }
+    if !reconciliation_needed {
+        return Ok(());
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("Failed to begin environment path identity reconciliation")?;
+    sqlx::query("DROP INDEX IF EXISTS idx_environments_normalized_output_dir_unique")
+        .execute(&mut *transaction)
+        .await
+        .context("Failed to prepare environment path identity reconciliation")?;
+
+    // Early 0.8.6 Linux builds may already have applied the former Windows-only
+    // migration semantics. Restore case-distinct rows from its durable
+    // quarantine whenever their POSIX identity is not currently active.
+    if !windows {
+        let active_paths: Vec<String> =
+            sqlx::query_scalar("SELECT output_dir FROM environments ORDER BY id")
+                .fetch_all(&mut *transaction)
+                .await
+                .context("Failed to load active environment paths")?;
+        let mut occupied = active_paths
+            .into_iter()
+            .map(|path| normalize_path_for_platform(&path, windows))
+            .filter(|path| !path.is_empty())
+            .collect::<HashSet<_>>();
+        let quarantined: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, output_dir, data FROM environment_duplicate_quarantine ORDER BY id",
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Failed to inspect quarantined environment paths")?;
+
+        for (id, output_dir, data) in quarantined {
+            let normalized = normalize_path_for_platform(&output_dir, windows);
+            if !normalized.is_empty() && occupied.contains(&normalized) {
+                continue;
+            }
+            let restored = sqlx::query(
+                "INSERT OR IGNORE INTO environments (id, output_dir, normalized_output_dir, data) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&output_dir)
+            .bind(&normalized)
+            .bind(&data)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Failed to restore quarantined environment {id}"))?;
+            if restored.rows_affected() != 1 {
+                continue;
+            }
+
+            sqlx::query(
+                "INSERT OR REPLACE INTO mod_metadata (environment_id, kind, file_name, data) \
+                 SELECT environment_id, kind, file_name, data \
+                 FROM environment_duplicate_mod_metadata_quarantine WHERE environment_id = ?",
+            )
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Failed to restore metadata for environment {id}"))?;
+            sqlx::query(
+                "DELETE FROM environment_duplicate_mod_metadata_quarantine WHERE environment_id = ?",
+            )
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("DELETE FROM environment_duplicate_quarantine WHERE id = ?")
+                .bind(&id)
+                .execute(&mut *transaction)
+                .await?;
+            if !normalized.is_empty() {
+                occupied.insert(normalized);
+            }
+        }
+    }
+
+    let environments: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, output_dir, data FROM environments ORDER BY id")
+            .fetch_all(&mut *transaction)
+            .await
+            .context("Failed to load environment path identities")?;
+    let mut keepers = HashMap::<String, String>::new();
+    let mut duplicates = Vec::<(String, String, String, String, String)>::new();
+
+    for (id, output_dir, data) in &environments {
+        let normalized = normalize_path_for_platform(output_dir, windows);
+        if normalized.is_empty() {
+            continue;
+        }
+        if let Some(keeper_id) = keepers.get(&normalized) {
+            duplicates.push((
+                id.clone(),
+                keeper_id.clone(),
+                output_dir.clone(),
+                normalized,
+                data.clone(),
+            ));
+        } else {
+            keepers.insert(normalized, id.clone());
+        }
+    }
+
+    for (id, keeper_id, output_dir, normalized, data) in duplicates {
+        sqlx::query(
+            "INSERT INTO environment_duplicate_quarantine \
+             (id, keeper_environment_id, output_dir, normalized_output_dir, data, reason) \
+             VALUES (?, ?, ?, ?, ?, 'duplicate normalized install path') \
+             ON CONFLICT(id) DO UPDATE SET \
+               keeper_environment_id = excluded.keeper_environment_id, \
+               output_dir = excluded.output_dir, \
+               normalized_output_dir = excluded.normalized_output_dir, \
+               data = excluded.data, reason = excluded.reason",
+        )
+        .bind(&id)
+        .bind(&keeper_id)
+        .bind(&output_dir)
+        .bind(&normalized)
+        .bind(&data)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("Failed to quarantine duplicate environment {id}"))?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO environment_duplicate_mod_metadata_quarantine \
+             (environment_id, keeper_environment_id, kind, file_name, data) \
+             SELECT environment_id, ?, kind, file_name, data FROM mod_metadata \
+             WHERE environment_id = ?",
+        )
+        .bind(&keeper_id)
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO mod_metadata (environment_id, kind, file_name, data) \
+             SELECT ?, kind, file_name, data FROM mod_metadata WHERE environment_id = ?",
+        )
+        .bind(&keeper_id)
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM environment_profiles WHERE environment_id = ?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM environments WHERE id = ?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+
+    let active_environments: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, output_dir FROM environments")
+            .fetch_all(&mut *transaction)
+            .await?;
+    for (id, output_dir) in active_environments {
+        sqlx::query("UPDATE environments SET normalized_output_dir = ? WHERE id = ?")
+            .bind(normalize_path_for_platform(&output_dir, windows))
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_environments_normalized_output_dir_unique \
+         ON environments(normalized_output_dir) \
+         WHERE normalized_output_dir IS NOT NULL AND normalized_output_dir <> ''",
+    )
+    .execute(&mut *transaction)
+    .await
+    .context("Failed to enforce platform environment path identity")?;
+    transaction
+        .commit()
+        .await
+        .context("Failed to commit environment path identity reconciliation")?;
+    Ok(())
+}
+
 async fn migrate_secret_file(
     pool: &SqlitePool,
     dir: &Path,
@@ -769,6 +1574,7 @@ mod tests {
             default_download_dir: download_dir.to_string_lossy().to_string(),
             depot_downloader_path: Some("C:\\tools\\depotdownloader.exe".to_string()),
             steam_username: Some("tester".to_string()),
+            depot_downloader_remembered_session: Some(true),
             max_concurrent_downloads: 3,
             platform: Platform::Windows,
             language: "en".to_string(),
@@ -796,6 +1602,7 @@ mod tests {
             app_update: None,
             experience_mode: None,
             show_advanced_game_tools: None,
+            window_close_behavior: None,
             setup_guide_completed: None,
         }
     }
@@ -851,7 +1658,7 @@ mod tests {
             detected_runtime: Some(Runtime::Il2cpp),
             runtime_match: Some(true),
             mod_storage_id: Some("storage-1".to_string()),
-            symlink_paths: Some(vec!["C:\\mods\\sample".to_string()]),
+            managed_paths: Some(vec!["C:\\mods\\sample".to_string()]),
             security_scan: None,
         }
     }
@@ -865,6 +1672,19 @@ mod tests {
 
         let data_dir = get_data_dir()?;
         assert_eq!(data_dir, override_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_backups_dir_uses_the_same_data_root_override() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("custom-data-root");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let backups_dir = get_backups_dir()?;
+        assert_eq!(backups_dir, override_dir.join("backups"));
+        assert!(backups_dir.is_dir());
         Ok(())
     }
 
@@ -927,6 +1747,106 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[serial]
+    fn legacy_database_migration_resumes_a_partial_target_with_wal_members() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let target = target_dir.join("data.db");
+        let source = temp.path().join("simmrust").join("data.db");
+        let target_wal = sqlite_bundle_path(&target, "-wal");
+        let source_wal = sqlite_bundle_path(&source, "-wal");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        std::fs::create_dir_all(source.parent().expect("legacy parent"))?;
+        std::fs::create_dir_all(&target_dir)?;
+        // Simulate a crash that left stale main and WAL members with exactly
+        // the same lengths as their legacy counterparts. Length-only resume
+        // checks must not accept either member as already promoted.
+        std::fs::write(&source, b"source-main")?;
+        std::fs::write(&source_wal, b"source-wal")?;
+        std::fs::write(&target, b"target-main")?;
+        std::fs::write(&target_wal, b"target-wal")?;
+        assert_eq!(
+            std::fs::metadata(&source)?.len(),
+            std::fs::metadata(&target)?.len()
+        );
+        assert_eq!(
+            std::fs::metadata(&source_wal)?.len(),
+            std::fs::metadata(&target_wal)?.len()
+        );
+        assert!(!database_members_match(&source, &target)?);
+        assert!(!database_members_match(&source_wal, &target_wal)?);
+        std::fs::write(
+            legacy_migration_marker_path(&target),
+            source.to_string_lossy().as_bytes(),
+        )?;
+
+        migrate_legacy_database_if_needed(&target)?;
+
+        assert_eq!(std::fs::read(&target)?, b"source-main");
+        assert_eq!(std::fs::read(&target_wal)?, b"source-wal");
+        assert!(!source.exists());
+        assert!(!source_wal.exists());
+        assert!(!legacy_migration_marker_path(&target).exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_database_migration_rejects_marker_for_an_unrecognized_source() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let target = target_dir.join("data.db");
+        let source = temp.path().join("simmrust").join("data.db");
+        let unrecognized_source = temp.path().join("unrecognized").join("data.db");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        std::fs::create_dir_all(source.parent().expect("legacy parent"))?;
+        std::fs::create_dir_all(unrecognized_source.parent().expect("unrecognized parent"))?;
+        std::fs::create_dir_all(&target_dir)?;
+        std::fs::write(&source, b"legacy-main")?;
+        std::fs::write(&unrecognized_source, b"untrusted!!")?;
+        std::fs::write(
+            legacy_migration_marker_path(&target),
+            unrecognized_source.to_string_lossy().as_bytes(),
+        )?;
+
+        let error =
+            migrate_legacy_database_if_needed(&target).expect_err("marker must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("is invalid or no longer available"));
+        assert_eq!(std::fs::read(&source)?, b"legacy-main");
+        assert_eq!(std::fs::read(&unrecognized_source)?, b"untrusted!!");
+        assert!(!target.exists());
+        assert!(legacy_migration_marker_path(&target).exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_database_migration_does_not_replace_an_established_target() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let target = target_dir.join("data.db");
+        let source = temp.path().join("simmrust").join("data.db");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        std::fs::create_dir_all(source.parent().expect("legacy parent"))?;
+        std::fs::create_dir_all(&target_dir)?;
+        std::fs::write(&target, b"current")?;
+        std::fs::write(&source, b"legacy")?;
+
+        migrate_legacy_database_if_needed(&target)?;
+
+        assert_eq!(std::fs::read(&target)?, b"current");
+        assert_eq!(std::fs::read(&source)?, b"legacy");
+        assert!(!legacy_migration_marker_path(&target).exists());
+        Ok(())
+    }
+
     #[tokio::test]
     #[serial]
     async fn initialize_pool_creates_tables() -> Result<()> {
@@ -946,9 +1866,90 @@ mod tests {
             "environments",
             "secrets",
             "mod_metadata",
+            "environment_deletion_journal",
+            "telemetry_preferences",
+            "telemetry_snapshots",
+            "telemetry_sessions",
+            "telemetry_events",
+            "telemetry_upload_queue",
+            "telemetry_mod_rules",
         ] {
             assert!(tables.contains(&table.to_string()));
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_repairs_telemetry_schema_after_version_mismatch() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        for table in [
+            "telemetry_events",
+            "telemetry_sessions",
+            "telemetry_snapshots",
+            "telemetry_preferences",
+            "telemetry_upload_queue",
+            "telemetry_mod_rules",
+        ] {
+            sqlx::query(&format!("DROP TABLE {table}"))
+                .execute(&*pool)
+                .await?;
+        }
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(vec![0_u8; 48])
+            .bind(3_i64)
+            .execute(&*pool)
+            .await?;
+        drop(pool);
+
+        let repaired_pool = initialize_pool().await?;
+        for table in [
+            "telemetry_preferences",
+            "telemetry_snapshots",
+            "telemetry_sessions",
+            "telemetry_events",
+            "telemetry_upload_queue",
+            "telemetry_mod_rules",
+        ] {
+            assert!(table_exists(&repaired_pool, table).await?);
+        }
+        let applied: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&*repaired_pool)
+                .await?;
+        let expected: Vec<(i64, Vec<u8>)> = sqlx::migrate!()
+            .iter()
+            .map(|migration| (migration.version, migration.checksum.as_ref().to_vec()))
+            .collect();
+        assert_eq!(applied, expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn repair_database_creates_a_backup_and_restores_additive_tables() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query("DROP TABLE telemetry_events")
+            .execute(&*pool)
+            .await?;
+        sqlx::query("DROP TABLE telemetry_sessions")
+            .execute(&*pool)
+            .await?;
+
+        let backup_path = repair_database(&pool).await?;
+        assert!(backup_path.exists());
+        assert!(table_exists(&pool, "telemetry_sessions").await?);
+        assert!(table_exists(&pool, "telemetry_events").await?);
 
         Ok(())
     }
@@ -1169,6 +2170,195 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn checksum_reconciliation_requires_the_specific_migration_schema() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query("DROP TABLE environment_profiles")
+            .execute(&*pool)
+            .await?;
+        let mismatched = vec![0_u8; 48];
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(&mismatched)
+            .bind(3_i64)
+            .execute(&*pool)
+            .await?;
+
+        let migrator = sqlx::migrate!();
+        reconcile_historical_migration_checksums(&pool, &migrator).await?;
+        let retained: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(3_i64)
+                .fetch_one(&*pool)
+                .await?;
+        assert_eq!(retained, mismatched);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn normalized_path_migration_preserves_case_sensitive_paths() -> Result<()> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind("a-keeper")
+            .bind("/games/Schedule")
+            .bind(r#"{"id":"a-keeper"}"#)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind("b-duplicate")
+            .bind("/games/schedule")
+            .bind(r#"{"id":"b-duplicate"}"#)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind("b-duplicate")
+        .bind("mods")
+        .bind("OnlyOnDuplicate.dll")
+        .bind(r#"{"enabled":true}"#)
+        .execute(&pool)
+        .await?;
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_environments_normalized_output_dir.sql"
+        ))
+        .execute(&pool)
+        .await?;
+
+        let active_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM environments ORDER BY id")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(active_ids, vec!["a-keeper", "b-duplicate"]);
+        let quarantined_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environment_duplicate_quarantine")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(quarantined_count, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_path_reconciliation_folds_windows_path_identity() -> Result<()> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_environments_normalized_output_dir.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        ensure_additive_schema(&pool).await?;
+
+        let paths = [r"C:\Games\Schedule I", "c:/games/schedule i/"];
+        for (index, path) in paths.into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
+            )
+            .bind(format!("env-{index}"))
+            .bind(path)
+            .bind(path)
+            .bind("{}")
+            .execute(&pool)
+            .await?;
+        }
+
+        reconcile_environment_path_identities_for_platform(&pool, true).await?;
+        let active_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM environments")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(active_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn posix_reconciliation_restores_case_distinct_legacy_quarantine() -> Result<()> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_environments_normalized_output_dir.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        ensure_additive_schema(&pool).await?;
+
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind("a-keeper")
+        .bind("/games/Schedule")
+        .bind(r"\games\schedule")
+        .bind(r#"{"id":"a-keeper"}"#)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_duplicate_quarantine \
+             (id, keeper_environment_id, output_dir, normalized_output_dir, data, reason) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("b-restored")
+        .bind("a-keeper")
+        .bind("/games/schedule")
+        .bind(r"\games\schedule")
+        .bind(r#"{"id":"b-restored"}"#)
+        .bind("duplicate normalized install path")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_duplicate_mod_metadata_quarantine \
+             (environment_id, keeper_environment_id, kind, file_name, data) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("b-restored")
+        .bind("a-keeper")
+        .bind("mods")
+        .bind("Restored.dll")
+        .bind("{}")
+        .execute(&pool)
+        .await?;
+
+        reconcile_environment_path_identities_for_platform(&pool, false).await?;
+
+        let active_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM environments ORDER BY id")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(active_ids, vec!["a-keeper", "b-restored"]);
+        let restored_normalized: String =
+            sqlx::query_scalar("SELECT normalized_output_dir FROM environments WHERE id = ?")
+                .bind("b-restored")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(restored_normalized, "/games/schedule");
+        let restored_metadata: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?")
+                .bind("b-restored")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(restored_metadata, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn create_database_backup_prunes_old_snapshots_using_settings_limit() -> Result<()> {
         let temp = tempdir()?;
         let override_dir = temp.path().join("simmrust");
@@ -1318,8 +2508,14 @@ mod tests {
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
 
+        #[cfg(windows)]
         let first_dir = "C:/Games/Schedule I";
+        #[cfg(windows)]
         let second_dir = "C:\\Games\\Schedule I\\";
+        #[cfg(not(windows))]
+        let first_dir = "/opt/simm/Schedule I";
+        #[cfg(not(windows))]
+        let second_dir = "/opt/simm/Schedule I/";
 
         sqlx::query(
             "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",

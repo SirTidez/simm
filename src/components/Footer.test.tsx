@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { Footer } from './Footer';
 import type { Environment } from '../types';
+import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 
 const envStoreMocks = vi.hoisted(() => ({
   useEnvironmentStore: vi.fn(),
@@ -10,6 +11,7 @@ const envStoreMocks = vi.hoisted(() => ({
 const settingsStoreMocks = vi.hoisted(() => ({
   useSettingsStore: vi.fn(),
 }));
+const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
 const apiMocks = vi.hoisted(() => ({
   getAllModUpdatesSummary: vi.fn(),
@@ -39,6 +41,7 @@ vi.mock('../stores/environmentStore', () => ({
 vi.mock('../stores/settingsStore', () => ({
   useSettingsStore: settingsStoreMocks.useSettingsStore,
 }));
+vi.mock('../stores/modLibraryStore', () => ({ useModLibraryStore: modLibraryStoreMocks.useModLibraryStore }));
 
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
@@ -80,6 +83,11 @@ function mockStores(environments: Environment[]) {
     settings: { theme: 'dark' },
     updateSettings: vi.fn().mockResolvedValue(undefined),
   });
+  modLibraryStoreMocks.useModLibraryStore.mockReturnValue({
+    library: null,
+    ensureLibrary: async () =>
+      normalizeLibraryFeaturedDownloads(await apiMocks.getModLibrary()),
+  });
 }
 
 describe('Footer', () => {
@@ -88,6 +96,7 @@ describe('Footer', () => {
 
   beforeEach(() => {
     envStoreMocks.useEnvironmentStore.mockReset();
+    modLibraryStoreMocks.useModLibraryStore.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
     apiMocks.getAllModUpdatesSummary.mockReset();
     apiMocks.getModLibrary.mockReset();
@@ -294,6 +303,33 @@ describe('Footer', () => {
     });
 
     render(<Footer />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Mods up to date/i)).toBeTruthy();
+    });
+  });
+
+  it('coalesces duplicate mod summary refreshes while the library request is pending', async () => {
+    mockStores([completedEnv]);
+    let resolveLibrary: (value: { downloaded: unknown[] }) => void = () => {};
+    apiMocks.getModLibrary.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLibrary = resolve;
+    }));
+
+    render(<Footer />);
+
+    await waitFor(() => {
+      expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(1);
+      expect(modUpdatesCheckedHandler).toBeTruthy();
+    });
+
+    await act(async () => {
+      void modUpdatesCheckedHandler?.();
+    });
+
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(1);
+
+    resolveLibrary({ downloaded: [] });
 
     await waitFor(() => {
       expect(screen.getByText(/Mods up to date/i)).toBeTruthy();

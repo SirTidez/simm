@@ -502,6 +502,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   const [error, setError] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const selectedFilePathRef = useRef<string | null>(null);
+  const draftRevisionRef = useRef<Map<string, number>>(new Map());
   const sectionTabsRef = useRef<HTMLDivElement | null>(null);
   const [sectionTabOverflow, setSectionTabOverflow] = useState(SECTION_TAB_OVERFLOW_NONE);
 
@@ -780,6 +781,10 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   const updateActiveDraft = useCallback((updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
     const currentSelectedFilePath = selectedFilePathRef.current;
     if (!currentSelectedFilePath) return;
+    draftRevisionRef.current.set(
+      currentSelectedFilePath,
+      (draftRevisionRef.current.get(currentSelectedFilePath) ?? 0) + 1,
+    );
     setDrafts((current) => {
       const existingDraft = current[currentSelectedFilePath];
       if (!existingDraft) return current;
@@ -1052,6 +1057,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   const handleSave = async () => {
     if (!selectedFilePath || !activeDocument || !activeDraft) return;
     const requestedFilePath = selectedFilePath;
+    const saveRevision = draftRevisionRef.current.get(requestedFilePath) ?? 0;
 
     setSaving(true);
     setError(null);
@@ -1077,7 +1083,9 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
         sections: editorMode === 'raw' ? activeDocument.sections : toConfigSections(activeDraft.sections),
       };
       setDocumentCache((current) => ({ ...current, [requestedFilePath]: savedDocument }));
-      setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(savedDocument) }));
+      if ((draftRevisionRef.current.get(requestedFilePath) ?? 0) === saveRevision) {
+        setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(savedDocument) }));
+      }
 
       try {
         const [nextCatalog, nextDocument] = await Promise.all([
@@ -1087,7 +1095,9 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
         setCatalog(nextCatalog);
         setDocumentCache((current) => ({ ...current, [requestedFilePath]: nextDocument }));
-        setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(nextDocument) }));
+        if ((draftRevisionRef.current.get(requestedFilePath) ?? 0) === saveRevision) {
+          setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(nextDocument) }));
+        }
         if (selectedFilePathRef.current === requestedFilePath) {
           setEditorMode((currentMode) => (
             currentMode === 'structured' && !nextDocument.summary.supportsStructuredEdit

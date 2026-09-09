@@ -5,7 +5,7 @@
 SIMM uses a library-first model:
 
 - Shared storage holds reusable mod, plugin, and UserLib assets.
-- Environment folders get lightweight installs, usually through symlinks.
+- Environment folders get managed copies materialized from shared storage.
 - Metadata exists at storage and environment projection points.
 - Runtime compatibility is explicit: IL2CPP, Mono, or genuinely runtime-agnostic.
 
@@ -23,7 +23,7 @@ SIMM uses a library-first model:
 - UI badges are fixed but persisted metadata remains stale.
 - Runtime is inferred from filenames when explicit metadata should be available.
 - Unknown runtime silently defaults and creates misleading compatibility state.
-- Deleting shared storage leaves stale environment links or metadata.
+- Deleting shared storage leaves stale environment copies or metadata.
 - A watcher refresh masks a service bug until a cold app start.
 
 ## Tests To Prefer

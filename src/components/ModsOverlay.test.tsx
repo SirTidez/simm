@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ModsOverlay } from './ModsOverlay';
 import type { Environment } from '../types';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 const apiMocks = vi.hoisted(() => ({
   getEnvironment: vi.fn(),
@@ -21,6 +21,8 @@ const apiMocks = vi.hoisted(() => ({
   searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
   uploadMod: vi.fn(),
+  exportEnvironmentProfile: vi.fn(),
+  saveModProfileFile: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -28,6 +30,7 @@ const eventMocks = vi.hoisted(() => ({
   onModsSnapshotUpdated: vi.fn(),
   onModMetadataRefreshStatus: vi.fn(),
 }));
+const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
@@ -38,12 +41,15 @@ vi.mock('../services/events', () => ({
   onModsSnapshotUpdated: eventMocks.onModsSnapshotUpdated,
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
+vi.mock('../stores/modLibraryStore', () => ({ useModLibraryStore: modLibraryStoreMocks.useModLibraryStore }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
+  save: vi.fn(),
 }));
 
 const openMock = vi.mocked(open);
+const saveMock = vi.mocked(save);
 
 const baseEnvironment: Environment = {
   id: 'env-1',
@@ -56,7 +62,28 @@ const baseEnvironment: Environment = {
 };
 
 describe('ModsOverlay', () => {
+  let modsSnapshotHandler: ((data: {
+    environmentId: string;
+    snapshot: {
+      mods: Array<{
+        name: string;
+        fileName: string;
+        path: string;
+        source?: string;
+      }>;
+      modsDirectory: string;
+      count: number;
+    };
+  }) => void) | null = null;
+
   beforeEach(() => {
+    modsSnapshotHandler = null;
+    modLibraryStoreMocks.useModLibraryStore.mockReset();
+    modLibraryStoreMocks.useModLibraryStore.mockReturnValue({
+      library: null,
+      ensureLibrary: apiMocks.getModLibrary,
+      refreshLibrary: apiMocks.getModLibrary,
+    });
     window.localStorage.clear();
     apiMocks.getEnvironment.mockReset();
     apiMocks.getMods.mockReset();
@@ -74,10 +101,13 @@ describe('ModsOverlay', () => {
     apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
     apiMocks.uploadMod.mockReset();
+    apiMocks.exportEnvironmentProfile.mockReset();
+    apiMocks.saveModProfileFile.mockReset();
     eventMocks.onModsChanged.mockReset();
     eventMocks.onModsSnapshotUpdated.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
     openMock.mockReset();
+    saveMock.mockReset();
 
     apiMocks.getEnvironment.mockResolvedValue(baseEnvironment);
     apiMocks.getMods.mockResolvedValue({
@@ -116,8 +146,36 @@ describe('ModsOverlay', () => {
     });
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
     apiMocks.uploadMod.mockResolvedValue({ success: false, error: 'test' });
+    apiMocks.exportEnvironmentProfile.mockResolvedValue({
+      schemaVersion: 1,
+      kind: 'simm.profile',
+      profile: {
+        name: 'Test Env',
+        game: 'schedule-i',
+        runtime: 'IL2CPP',
+        branch: 'main',
+        exportedAt: '2026-05-31T00:00:00Z',
+      },
+      items: [
+        {
+          itemType: 'mod',
+          name: 'CustomTV',
+          fileName: 'CustomTV.dll',
+          required: true,
+          source: 'thunderstore',
+          sourceId: 'CustomTV/CustomTV',
+          sourceVersion: '1.6.4',
+          runtime: 'IL2CPP',
+        },
+      ],
+    });
+    apiMocks.saveModProfileFile.mockResolvedValue(undefined);
+    saveMock.mockResolvedValue('C:\\Profiles\\test-env.json');
     eventMocks.onModsChanged.mockResolvedValue(() => {});
-    eventMocks.onModsSnapshotUpdated.mockResolvedValue(() => {});
+    eventMocks.onModsSnapshotUpdated.mockImplementation(async (handler) => {
+      modsSnapshotHandler = handler;
+      return () => {};
+    });
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
   });
 
@@ -151,6 +209,42 @@ describe('ModsOverlay', () => {
     );
 
     expect((await screen.findAllByText('S1API.Mono.MelonLoader.dll')).length).toBeGreaterThan(0);
+  });
+
+  it('uses one installed-mod snapshot projection for a watcher batch', async () => {
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+      expect(modsSnapshotHandler).not.toBeNull();
+    });
+    expect(eventMocks.onModsChanged).not.toHaveBeenCalled();
+
+    modsSnapshotHandler?.({
+      environmentId: 'env-1',
+      snapshot: {
+        mods: [{
+          name: 'Watched Mod',
+          fileName: 'Watched.Mod.dll',
+          path: 'C:/env/Mods/Watched.Mod.dll',
+          source: 'local',
+        }],
+        modsDirectory: 'C:/env/Mods',
+        count: 1,
+      },
+    });
+
+    expect((await screen.findAllByText('Watched.Mod.dll')).length).toBeGreaterThan(0);
+    expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(apiMocks.getModUpdatesSummary).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('renders MLVScan disposition badges for installed mods', async () => {
@@ -677,6 +771,61 @@ describe('ModsOverlay', () => {
     expect(screen.queryByText('Manual Download Required')).toBeNull();
   });
 
+  it('continues an update with securityOverride only after the security report is confirmed', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [{
+        name: 'Security Update Mod',
+        fileName: 'Security.Update.Mod.dll',
+        path: 'C:/env/Mods/Security.Update.Mod.dll',
+        source: 'thunderstore',
+        managed: true,
+        disabled: false,
+        version: '1.0.0',
+      }],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 1,
+      updates: [{
+        modFileName: 'Security.Update.Mod.dll',
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+      }],
+    });
+    apiMocks.updateMod
+      .mockResolvedValueOnce({
+        success: false,
+        securityScanConfirmationRequired: true,
+        securityScan: {
+          summary: { state: 'review', verified: false, totalFindings: 1, threatFamilyCount: 0 },
+          policy: {
+            enabled: true,
+            requiresConfirmation: true,
+            blocked: false,
+            promptOnHighFindings: false,
+            blockCriticalFindings: false,
+          },
+          files: [],
+        },
+      })
+      .mockResolvedValueOnce({ success: true });
+
+    render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details for Security Update Mod' }));
+    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Update' }));
+
+    expect(await screen.findByText('Security Findings - Security Update Mod')).toBeTruthy();
+    expect(apiMocks.updateMod).toHaveBeenCalledWith('env-1', 'Security.Update.Mod.dll', false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue Install' }));
+    await waitFor(() => {
+      expect(apiMocks.updateMod).toHaveBeenLastCalledWith('env-1', 'Security.Update.Mod.dll', true);
+    });
+  });
+
   it('renders the environment grid layout and no list-mode container', async () => {
     render(
       <ModsOverlay
@@ -796,6 +945,40 @@ describe('ModsOverlay', () => {
     fireEvent.click(within(inspector).getByRole('button', { name: 'Open Source Page' }));
 
     expect(apiMocks.openExternalUrl).toHaveBeenCalledWith('https://www.nexusmods.com/schedule1/mods/123');
+  });
+
+  it('opens the profile export review from the installed mods toolbar', async () => {
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share Profile' }));
+
+    await waitFor(() => {
+      expect(apiMocks.exportEnvironmentProfile).toHaveBeenCalledWith('env-1');
+    });
+    expect(await screen.findByText('Export Profile')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Test Env')).toBeInTheDocument();
+    expect(screen.getByText('CustomTV')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /export json/i }));
+
+    await waitFor(() => {
+      expect(saveMock).toHaveBeenCalledWith({
+        defaultPath: 'test-env.json',
+        filters: [{ name: 'SIMM Profile', extensions: ['json'] }],
+      });
+      expect(apiMocks.saveModProfileFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profile: expect.objectContaining({ name: 'Test Env' }),
+        }),
+        'C:\\Profiles\\test-env.json',
+      );
+    });
   });
 
   it('opens installed mod details via keyboard activation', async () => {

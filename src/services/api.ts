@@ -20,7 +20,45 @@ import type {
   CustomThemeDefinition,
   AppUpdateChannel,
   AppStartupState,
+  LinuxReadinessStatus,
+  MelonLoaderStatus,
+  MelonLoaderLaunchOptionsRepairResult,
+  LaunchGameResult,
+  MelonLoaderLaunchVerification,
+  ModProfileApplyRequest,
+  ModProfileApplyResult,
+  OneTimeDownloadCredentials,
+  ModProfileCaptureRequest,
+  ModProfileExportRequest,
+  ModProfileImportPlan,
+  ModProfileManifest,
+  ModProfileSaveRequest,
+  StoredModProfile,
+  ModTelemetryCaptureRequest,
+  ModTelemetrySnapshot,
+  ModTelemetrySnapshotSummary,
+  LiveTelemetryEvent,
+  LiveTelemetryExport,
+  LiveTelemetryStatus,
+  TelemetryPreferences,
+  TelemetryPreferencesUpdate,
+  TelemetryCapability,
+  TelemetryModPolicyItem,
+  TelemetryModRuleUpdate,
+  TelemetryUploadPreview,
+  TelemetryUploadReceipt,
+  GameSaveBackupExportResult,
+  GameSaveBackupResult,
+  GameSaveBackupStatus,
+  GameSaveRestorePreview,
+  GameSaveRestoreResult,
+  NexusModFileDependencies,
 } from '../types';
+
+export interface LogWatchSession {
+  sourcePath: string;
+  sessionId: number;
+}
 
 type SecurityGateResponse = {
   securityScan?: SecurityScanSummary | SecurityScanReport;
@@ -28,6 +66,8 @@ type SecurityGateResponse = {
   securityScanConfirmationRequired?: boolean;
   error?: string;
 };
+
+let modLibraryRequest: Promise<import('../types').ModLibraryResult> | null = null;
 
 export class ApiService {
   // DepotDownloader
@@ -44,8 +84,24 @@ export class ApiService {
     return invoke('get_home_directory');
   }
 
+  static async getBackupsDirectory(): Promise<string> {
+    return invoke('get_backups_directory');
+  }
+
   static async getStartupState(): Promise<AppStartupState> {
     return invoke('get_app_startup_state');
+  }
+
+  static async prepareApp(): Promise<AppStartupState> {
+    return invoke('prepare_app');
+  }
+
+  static async getLinuxReadinessStatus(): Promise<LinuxReadinessStatus> {
+    return invoke('get_linux_readiness_status');
+  }
+
+  static async repairLinuxDesktopIntegration(): Promise<LinuxReadinessStatus> {
+    return invoke('repair_linux_desktop_integration');
   }
 
   static async checkAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateStatus> {
@@ -71,12 +127,152 @@ export class ApiService {
     return { success: true, path };
   }
 
+  static async getGameSaveBackupStatus(): Promise<GameSaveBackupStatus> {
+    return invoke('get_game_save_backup_status');
+  }
+
+  static async createGameSaveBackup(
+    steamId: string,
+    slotNumber: number,
+    retentionLimit?: number | null,
+  ): Promise<GameSaveBackupResult> {
+    return invoke('create_game_save_backup', { steamId, slotNumber, retentionLimit: retentionLimit ?? null });
+  }
+
+  static async exportGameSaveBackup(steamId: string, slotNumber: number, destinationPath: string): Promise<GameSaveBackupExportResult> {
+    return invoke('export_game_save_backup', { steamId, slotNumber, destinationPath });
+  }
+
+  static async restoreGameSaveBackup(
+    steamId: string,
+    slotNumber: number,
+    restoreToken: string,
+  ): Promise<GameSaveRestoreResult> {
+    return invoke('restore_game_save_backup', { steamId, slotNumber, restoreToken });
+  }
+
+  static async restoreGameSaveFromZip(steamId: string, slotNumber: number, zipPath: string): Promise<GameSaveRestoreResult> {
+    return invoke('restore_game_save_from_zip', { steamId, slotNumber, zipPath });
+  }
+
+  static async previewGameSaveBackupRestore(
+    steamId: string,
+    slotNumber: number,
+    backupPath?: string | null,
+  ): Promise<GameSaveRestorePreview> {
+    return invoke('preview_game_save_backup_restore', { steamId, slotNumber, backupPath: backupPath ?? null });
+  }
+
+  static async previewGameSaveZipRestore(steamId: string, slotNumber: number, zipPath: string): Promise<GameSaveRestorePreview> {
+    return invoke('preview_game_save_zip_restore', { steamId, slotNumber, zipPath });
+  }
+
+  static async repairDatabase(): Promise<{ success: boolean; backupPath: string }> {
+    const backupPath = await invoke<string>('repair_database');
+    return { success: true, backupPath };
+  }
+
   static async getCustomThemes(): Promise<CustomThemeDefinition[]> {
     return invoke('get_custom_themes');
   }
 
   static async getThemesDirectory(): Promise<string> {
     return invoke('get_themes_directory');
+  }
+
+  static async hideMainWindow(): Promise<void> {
+    await invoke('hide_main_window');
+  }
+
+  static async quitSimm(): Promise<void> {
+    await invoke('quit_simm');
+  }
+
+  // Telemetry
+  static async getTelemetryCapability(): Promise<TelemetryCapability> {
+    return invoke('get_telemetry_capability');
+  }
+
+  static async getTelemetryPreferences(): Promise<TelemetryPreferences> {
+    return invoke('get_telemetry_preferences');
+  }
+
+  static async saveTelemetryPreferences(
+    updates: TelemetryPreferencesUpdate,
+  ): Promise<TelemetryPreferences> {
+    return invoke('save_telemetry_preferences', { updates });
+  }
+
+  static async listTelemetryModPolicies(environmentId: string): Promise<TelemetryModPolicyItem[]> {
+    return invoke('list_telemetry_mod_policies', { environmentId });
+  }
+
+  static async saveTelemetryModRule(update: TelemetryModRuleUpdate): Promise<void> {
+    await invoke('save_telemetry_mod_rule', { update });
+  }
+
+  static async captureModTelemetrySnapshot(
+    request: ModTelemetryCaptureRequest,
+  ): Promise<ModTelemetrySnapshot> {
+    return invoke('capture_mod_telemetry_snapshot', { request });
+  }
+
+  static async listModTelemetrySnapshots(
+    environmentId?: string | null,
+  ): Promise<ModTelemetrySnapshotSummary[]> {
+    return invoke('list_mod_telemetry_snapshots', { environmentId: environmentId ?? null });
+  }
+
+  static async getModTelemetrySnapshot(snapshotId: string): Promise<ModTelemetrySnapshot> {
+    return invoke('get_mod_telemetry_snapshot', { snapshotId });
+  }
+
+  static async deleteModTelemetrySnapshot(snapshotId: string): Promise<{ success: boolean }> {
+    await invoke('delete_mod_telemetry_snapshot', { snapshotId });
+    return { success: true };
+  }
+
+  static async getLiveTelemetryStatus(): Promise<LiveTelemetryStatus[]> {
+    return invoke('get_live_telemetry_status');
+  }
+
+  static async listLiveTelemetryEvents(
+    environmentId?: string | null,
+    limit?: number,
+  ): Promise<LiveTelemetryEvent[]> {
+    return invoke('list_live_telemetry_events', {
+      environmentId: environmentId ?? null,
+      limit: limit ?? null,
+    });
+  }
+
+  static async clearLiveTelemetryHistory(environmentId?: string | null): Promise<{ success: boolean }> {
+    await invoke('clear_live_telemetry_history', { environmentId: environmentId ?? null });
+    return { success: true };
+  }
+
+  static async exportLiveTelemetryHistory(environmentId?: string | null): Promise<LiveTelemetryExport> {
+    return invoke('export_live_telemetry_history', { environmentId: environmentId ?? null });
+  }
+
+  static async previewTelemetryUpload(environmentId?: string | null): Promise<TelemetryUploadPreview> {
+    return invoke('preview_telemetry_upload', { environmentId: environmentId ?? null });
+  }
+
+  static async queueTelemetryUpload(previewPayload: string): Promise<TelemetryUploadReceipt> {
+    return invoke('queue_telemetry_upload', { previewPayload });
+  }
+
+  static async listTelemetryUploads(): Promise<TelemetryUploadReceipt[]> {
+    return invoke('list_telemetry_uploads');
+  }
+
+  static async flushQueuedTelemetryUploads(): Promise<TelemetryUploadReceipt[]> {
+    return invoke('flush_queued_telemetry_uploads');
+  }
+
+  static async retryTelemetryUpload(id: string): Promise<TelemetryUploadReceipt> {
+    return invoke('retry_telemetry_upload', { id });
   }
 
   // Environments
@@ -116,17 +312,92 @@ export class ApiService {
     return { success: result };
   }
 
+  static async exportEnvironmentProfile(environmentId: string): Promise<ModProfileManifest> {
+    return invoke('export_environment_profile', { environmentId });
+  }
+
+  static async listModProfiles(): Promise<StoredModProfile[]> {
+    return invoke('list_mod_profiles');
+  }
+
+  static async getModProfile(profileId: string): Promise<StoredModProfile> {
+    return invoke('get_mod_profile', { profileId });
+  }
+
+  static async saveModProfile(request: ModProfileSaveRequest): Promise<StoredModProfile> {
+    return invoke('save_mod_profile', { request });
+  }
+
+  static async captureModProfile(request: ModProfileCaptureRequest): Promise<StoredModProfile> {
+    return invoke('capture_mod_profile', { request });
+  }
+
+  static async importModProfileToLibrary(manifest: ModProfileManifest): Promise<StoredModProfile> {
+    return invoke('import_mod_profile_to_library', { manifest });
+  }
+
+  static async exportModProfileFromLibrary(
+    request: ModProfileExportRequest,
+  ): Promise<ModProfileManifest> {
+    return invoke('export_mod_profile_from_library', { request });
+  }
+
+  static async deleteModProfile(profileId: string): Promise<{ success: boolean }> {
+    const result = await invoke<boolean>('delete_mod_profile', { profileId });
+    return { success: result };
+  }
+
+  static async saveModProfileFile(
+    manifest: ModProfileManifest,
+    destination: string,
+  ): Promise<void> {
+    return invoke('save_mod_profile_file', { manifest, destination });
+  }
+
+  static async readModProfileFile(source: string): Promise<ModProfileManifest> {
+    return invoke('read_mod_profile_file', { source });
+  }
+
+  static async previewModProfileImport(
+    manifest: ModProfileManifest,
+    targetEnvironmentId?: string | null,
+  ): Promise<ModProfileImportPlan> {
+    return invoke('preview_mod_profile_import', {
+      manifest,
+      targetEnvironmentId: targetEnvironmentId ?? null,
+    });
+  }
+
+  static async applyModProfileImport(
+    request: ModProfileApplyRequest,
+  ): Promise<ModProfileApplyResult> {
+    return invoke('apply_mod_profile_import', { request });
+  }
+
+  static async previewModProfileApply(
+    profileId: string,
+    targetEnvironmentId: string,
+  ): Promise<ModProfileImportPlan> {
+    return invoke('preview_mod_profile_apply', { profileId, targetEnvironmentId });
+  }
+
+  static async applyModProfile(
+    profileId: string,
+    targetEnvironmentId: string,
+  ): Promise<ModProfileApplyResult> {
+    return invoke('apply_mod_profile', { profileId, targetEnvironmentId });
+  }
+
   // Downloads
   static async startDownload(
     environmentId: string,
-    _credentials?: {
-      username: string;
-      password: string;
-      steamGuard?: string;
-      saveCredentials?: boolean;
-    }
+    oneTimeCredentials?: OneTimeDownloadCredentials,
   ): Promise<{ success: boolean; downloadId: string }> {
-    return invoke('start_download', { environmentId });
+    // Do not add an undefined field to legacy calls: no-credential downloads
+    // retain their existing IPC payload exactly.
+    return invoke('start_download', oneTimeCredentials
+      ? { environmentId, oneTimeCredentials }
+      : { environmentId });
   }
 
   static async cancelDownload(downloadId: string): Promise<{ success: boolean }> {
@@ -187,13 +458,19 @@ export class ApiService {
     password: string,
     steamGuard?: string,
     saveCredentials?: boolean
-  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean }> {
+  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean; username?: string }> {
     return invoke('authenticate', {
       username,
       password,
       steamGuard,
       saveCredentials,
     });
+  }
+
+  static async authenticateQr(
+    saveCredentials: boolean = true
+  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean; username?: string }> {
+    return invoke('authenticate_qr', { saveCredentials });
   }
 
   // Credentials
@@ -267,12 +544,8 @@ export class ApiService {
 
   static async launchGame(
     environmentId: string,
-    launchMethod?: 'steam' | 'direct'
-  ): Promise<{
-    success: boolean;
-    executablePath?: string;
-  }> {
-    console.log(`[Launch] ApiService: Calling launch_game with environmentId: ${environmentId}, launchMethod: ${launchMethod}`);
+    launchMethod?: 'steam' | 'steam_restart' | 'direct'
+  ): Promise<LaunchGameResult> {
     return invoke('launch_game', {
       environmentId,
       launchMethod,
@@ -309,7 +582,14 @@ export class ApiService {
   }
 
   static async getModLibrary(): Promise<import('../types').ModLibraryResult> {
-    return invoke('get_mod_library');
+    if (!modLibraryRequest) {
+      modLibraryRequest = invoke<import('../types').ModLibraryResult>('get_mod_library')
+        .finally(() => {
+          modLibraryRequest = null;
+        });
+    }
+
+    return modLibraryRequest;
   }
 
   static async previewLocalModSourceLink(
@@ -629,6 +909,14 @@ export class ApiService {
     return { success: true };
   }
 
+  static async deleteUserLib(
+    environmentId: string,
+    userLibPath: string
+  ): Promise<{ success: boolean }> {
+    await invoke('delete_user_lib', { environmentId, userLibPath });
+    return { success: true };
+  }
+
   static async disableUserLib(
     environmentId: string,
     userLibPath: string
@@ -645,11 +933,31 @@ export class ApiService {
     return { success: true };
   }
 
-  // MelonLoader methods
-  static async getMelonLoaderStatus(environmentId: string): Promise<{
-    installed: boolean;
-    version?: string;
+  static async uploadUserLib(
+    environmentId: string,
+    filePath: string,
+    originalFileName: string,
+    runtime: string
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    installedFiles?: string[];
+    source?: string;
+    error?: string;
   }> {
+    return invoke('upload_user_lib', {
+      environmentId,
+      filePath,
+      originalFileName,
+      runtime,
+      metadata: {
+        source: 'local',
+      },
+    });
+  }
+
+  // MelonLoader methods
+  static async getMelonLoaderStatus(environmentId: string): Promise<MelonLoaderStatus> {
     return invoke('get_melon_loader_status', { environmentId });
   }
 
@@ -690,6 +998,8 @@ export class ApiService {
     message?: string;
     version?: string;
     installedFiles?: string[];
+    linuxPrerequisiteMessage?: string;
+    linuxLaunchOptions?: string;
   }> {
     try {
       const result = await invoke<{
@@ -698,15 +1008,12 @@ export class ApiService {
         message?: string;
         version?: string;
         installedFiles?: string[];
+        linuxPrerequisiteMessage?: string;
+        linuxLaunchOptions?: string;
       }>('install_melon_loader', { environmentId, versionTag: versionTag });
-      console.log('installMelonLoader result:', result);
       return result;
     } catch (err: any) {
       // Handle Tauri command errors - they throw exceptions
-      console.error('installMelonLoader error:', err);
-      console.error('Error type:', typeof err);
-      console.error('Error details:', JSON.stringify(err, null, 2));
-
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
         errorMessage = err;
@@ -731,6 +1038,24 @@ export class ApiService {
         error: errorMessage
       };
     }
+  }
+
+  static async repairMelonLoaderLaunchOptions(
+    environmentId: string
+  ): Promise<MelonLoaderLaunchOptionsRepairResult> {
+    return invoke('repair_melonloader_launch_options', { environmentId });
+  }
+
+  static async verifyMelonLoaderLaunch(
+    environmentId: string,
+    launchStartedAt: number,
+    timeoutMs: number = 20000,
+  ): Promise<MelonLoaderLaunchVerification> {
+    return invoke('verify_melonloader_launch', {
+      environmentId,
+      launchStartedAt,
+      timeoutMs,
+    });
   }
 
   static async extractGameVersion(environmentId: string): Promise<ExtractGameVersionResult> {
@@ -813,7 +1138,8 @@ export class ApiService {
 
   static async completeNexusManualDownloadSession(
     nxmUrl: string,
-    runtimeOverride?: 'IL2CPP' | 'Mono' | 'Both'
+    runtimeOverride?: 'IL2CPP' | 'Mono' | 'Both',
+    securityOverride?: boolean,
   ): Promise<{
     success: boolean;
     error?: string;
@@ -831,10 +1157,14 @@ export class ApiService {
     modName?: string;
     fileName?: string;
     version?: string;
+    securityScan?: SecurityScanSummary | SecurityScanReport;
+    securityScanConfirmationRequired?: boolean;
+    securityScanBlocked?: boolean;
   }> {
     return invoke('complete_nexus_manual_download_session', {
       nxmUrl,
       runtimeOverride: runtimeOverride ?? null,
+      securityOverride: securityOverride ?? false,
     });
   }
 
@@ -926,6 +1256,14 @@ export class ApiService {
     return invoke('get_nexus_mods_mod_files', { gameId, modId });
   }
 
+  static async getNexusModFileDependencies(
+    gameId: string,
+    modId: number,
+    fileId: number,
+  ): Promise<NexusModFileDependencies> {
+    return invoke('get_nexus_mod_file_dependencies', { gameId, modId, fileId });
+  }
+
   static async installNexusModsMod(
     environmentId: string,
     modId: number,
@@ -970,7 +1308,8 @@ export class ApiService {
 
   static async updateMod(
     environmentId: string,
-    modFileName: string
+    modFileName: string,
+    securityOverride = false,
   ): Promise<{
     success: boolean;
     message?: string;
@@ -983,8 +1322,8 @@ export class ApiService {
     runtime?: 'IL2CPP' | 'Mono';
     recoveryUrl?: string;
     alreadyUpToDate?: boolean;
-  }> {
-    return invoke('update_mod', { environmentId, modFileName });
+  } & SecurityGateResponse> {
+    return invoke('update_mod', { environmentId, modFileName, securityOverride });
   }
 
   static async getAvailableModUpdates(environmentId: string): Promise<{
@@ -1109,10 +1448,8 @@ export class ApiService {
         installedFiles?: string[];
         error?: string;
       }>('install_s1api', { environmentId, versionTag });
-      console.log('installS1API result:', result);
       return result;
     } catch (err: any) {
-      console.error('installS1API error:', err);
       // Extract error message from various Tauri error formats
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
@@ -1204,10 +1541,8 @@ export class ApiService {
         version?: string;
         error?: string;
       }>('install_mlvscan', { environmentId, versionTag });
-      console.log('installMLVScan result:', result);
       return result;
     } catch (err: any) {
-      console.error('installMLVScan error:', err);
       // Extract error message from various Tauri error formats
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
@@ -1360,7 +1695,6 @@ export class ApiService {
     });
 
     if (checkResult.installed) {
-      console.log(`Mod ${modName} version ${versionNumber} is already installed, skipping download`);
       return {
         success: true,
         message: 'Mod already installed',
@@ -1548,12 +1882,12 @@ export class ApiService {
     return invoke('read_log_file', { logPath, maxLines });
   }
 
-  static async watchLogFile(logPath: string): Promise<void> {
+  static async watchLogFile(logPath: string): Promise<LogWatchSession> {
     return invoke('watch_log_file', { logPath });
   }
 
-  static async stopWatchingLog(): Promise<void> {
-    return invoke('stop_watching_log');
+  static async stopWatchingLog(sessionId: number): Promise<boolean> {
+    return invoke('stop_watching_log', { sessionId });
   }
 
   static async exportLogs(

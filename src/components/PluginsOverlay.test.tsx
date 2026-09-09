@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { PluginsOverlay } from './PluginsOverlay';
@@ -109,6 +109,50 @@ describe('PluginsOverlay', () => {
       expect(screen.queryAllByText('MLVScan.dll')).toHaveLength(0);
       expect(screen.getAllByText('RuntimeFix.dll').length).toBeGreaterThan(0);
     });
+  });
+
+  it('keeps the newer environment inventory when an older request resolves last', async () => {
+    type PluginResponse = {
+      plugins: Array<{ name: string; fileName: string; path: string }>;
+      pluginsDirectory: string;
+      count: number;
+    };
+    let resolveA: ((value: PluginResponse) => void) | undefined;
+    let resolveB: ((value: PluginResponse) => void) | undefined;
+    apiMocks.getEnvironment.mockImplementation(async (environmentId: string) => ({
+      ...baseEnvironment,
+      id: environmentId,
+      name: environmentId === 'env-a' ? 'Environment A' : 'Environment B',
+    }));
+    apiMocks.getPlugins.mockImplementation((environmentId: string) => new Promise((resolve) => {
+      if (environmentId === 'env-a') resolveA = resolve;
+      else resolveB = resolve;
+    }));
+
+    const { rerender } = render(
+      <PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-a" />,
+    );
+    rerender(<PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-b" />);
+
+    await act(async () => {
+      resolveB?.({
+        plugins: [{ name: 'Plugin B', fileName: 'PluginB.dll', path: 'C:/B/PluginB.dll' }],
+        pluginsDirectory: 'C:/B',
+        count: 1,
+      });
+    });
+    expect((await screen.findAllByText('PluginB.dll')).length).toBeGreaterThan(0);
+
+    await act(async () => {
+      resolveA?.({
+        plugins: [{ name: 'Plugin A', fileName: 'PluginA.dll', path: 'C:/A/PluginA.dll' }],
+        pluginsDirectory: 'C:/A',
+        count: 1,
+      });
+    });
+
+    expect(screen.getAllByText('PluginB.dll').length).toBeGreaterThan(0);
+    expect(screen.queryByText('PluginA.dll')).toBeNull();
   });
 
   it('toggles plugin state from the inspector', async () => {

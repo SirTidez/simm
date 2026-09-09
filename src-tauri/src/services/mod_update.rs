@@ -13,6 +13,14 @@ use tauri::{AppHandle, Runtime};
 #[derive(Clone)]
 pub struct ModUpdateService;
 
+enum ProviderUpdateInstallResult {
+    Installed {
+        response: serde_json::Value,
+        report: Option<crate::types::SecurityScanReport>,
+    },
+    EarlyResponse(serde_json::Value),
+}
+
 #[derive(Clone)]
 struct ManagedLibraryUpdateCandidate {
     file_name: String,
@@ -23,6 +31,23 @@ struct ManagedLibraryUpdateCandidate {
 impl ModUpdateService {
     pub fn new() -> Self {
         Self
+    }
+
+    fn validated_provider_file_name(value: &str) -> Result<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed.contains(':')
+            || trimmed.chars().any(char::is_control)
+        {
+            anyhow::bail!("Provider returned an invalid file name");
+        }
+        let mut components = Path::new(trimmed).components();
+        match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(_)), None) => Ok(trimmed.to_string()),
+            _ => anyhow::bail!("Provider returned an invalid file name"),
+        }
     }
 
     fn cached_update_check_result(
@@ -165,7 +190,7 @@ impl ModUpdateService {
                 },
                 runtime_match: None,
                 mod_storage_id: Some(storage_id.clone()),
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: entry.security_scan.clone(),
             };
 
@@ -258,7 +283,7 @@ impl ModUpdateService {
                             },
                             runtime_match: None,
                             mod_storage_id: Some(storage_id.clone()),
-                            symlink_paths: None,
+                            managed_paths: None,
                             security_scan: entry.security_scan.clone(),
                         });
                     let Some(source) = storage_metadata.source.clone() else {
@@ -339,7 +364,7 @@ impl ModUpdateService {
                         },
                         runtime_match: None,
                         mod_storage_id: Some(storage_id.clone()),
-                        symlink_paths: storage_metadata.symlink_paths.clone(),
+                        managed_paths: storage_metadata.managed_paths.clone(),
                         security_scan: storage_metadata
                             .security_scan
                             .clone()
@@ -541,12 +566,6 @@ impl ModUpdateService {
                                     .or_else(|| file.get("mod_version"))
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
-                            })
-                            .or_else(|| {
-                                mod_info
-                                    .get("version")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
                             });
 
                         if let Some(latest_version) = latest_version {
@@ -593,6 +612,7 @@ impl ModUpdateService {
                             }))
                         } else {
                             metadata.update_available = Some(false);
+                            metadata.remote_version = None;
                             None
                         }
                     } else {
@@ -907,7 +927,7 @@ impl ModUpdateService {
                 detected_runtime: None,
                 runtime_match: None,
                 mod_storage_id: Some(entry.storage_id.clone()),
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: None,
             };
 
@@ -1314,11 +1334,26 @@ impl ModUpdateService {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_lowercase();
+        let tokens: HashSet<&str> = file_name
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect();
+        let has_il2cpp_signal =
+            tokens.contains("il2cpp") || tokens.contains("main") || tokens.contains("beta");
+        let has_mono_signal = tokens.contains("mono") || tokens.contains("alternate");
+
+        // A target alias is not sufficient when the same provider filename also names the
+        // opposite runtime. Mixed-family filenames are ambiguous and must be chosen manually.
+        if has_il2cpp_signal == has_mono_signal {
+            return false;
+        }
 
         if runtime_lower == "il2cpp" {
-            file_name.contains("il2cpp") || file_name.contains("main") || file_name.contains("beta")
+            has_il2cpp_signal
+        } else if runtime_lower == "mono" {
+            has_mono_signal
         } else {
-            file_name.contains("mono") || file_name.contains("alternate")
+            false
         }
     }
 
@@ -1333,13 +1368,7 @@ impl ModUpdateService {
             .cloned()
             .collect();
 
-        let pool: Vec<Value> = if compatible.is_empty() {
-            files.to_vec()
-        } else {
-            compatible
-        };
-
-        pool.into_iter().max_by(|left, right| {
+        compatible.into_iter().max_by(|left, right| {
             let left_version = Self::file_version_string(left);
             let right_version = Self::file_version_string(right);
             match Self::compare_versions(&left_version, &right_version) {
@@ -1383,6 +1412,84 @@ impl ModUpdateService {
         })
     }
 
+    async fn prepare_downloaded_update_security_scan(
+        settings: &crate::types::Settings,
+        temp_path: &Path,
+        metadata: serde_json::Value,
+        security_override: bool,
+    ) -> Result<crate::commands::mods::SecurityGateResult> {
+        crate::commands::mods::prepare_security_scan_with_settings(
+            settings,
+            temp_path.to_string_lossy().as_ref(),
+            Some(metadata),
+            security_override,
+        )
+        .await
+        .map_err(anyhow::Error::msg)
+    }
+
+    async fn run_security_gated_provider_install<F, Fut>(
+        settings: &crate::types::Settings,
+        temp_path: &Path,
+        metadata: serde_json::Value,
+        security_override: bool,
+        operation: &str,
+        install: F,
+    ) -> Result<ProviderUpdateInstallResult>
+    where
+        F: FnOnce(Option<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = Result<serde_json::Value>>,
+    {
+        let (metadata, report) = match Self::prepare_downloaded_update_security_scan(
+            settings,
+            temp_path,
+            metadata,
+            security_override,
+        )
+        .await
+        {
+            Ok(crate::commands::mods::SecurityGateResult::Continue { metadata, report }) => {
+                (metadata, report)
+            }
+            Ok(crate::commands::mods::SecurityGateResult::EarlyResponse(response)) => {
+                let _ = tokio::fs::remove_file(temp_path).await;
+                return Ok(ProviderUpdateInstallResult::EarlyResponse(response));
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(temp_path).await;
+                return Err(error);
+            }
+        };
+
+        let response = install(metadata).await;
+        let _ = tokio::fs::remove_file(temp_path).await;
+        let response = response?;
+        let response = Self::require_successful_install_response(response, operation)?;
+        Ok(ProviderUpdateInstallResult::Installed { response, report })
+    }
+
+    fn require_successful_install_response(
+        response: serde_json::Value,
+        operation: &str,
+    ) -> Result<serde_json::Value> {
+        match response.get("success").and_then(|value| value.as_bool()) {
+            Some(true) => Ok(response),
+            Some(false) => Err(anyhow::anyhow!(
+                "{} failed: {}",
+                operation,
+                response
+                    .get("error")
+                    .or_else(|| response.get("message"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("installer returned success: false")
+            )),
+            None => Err(anyhow::anyhow!(
+                "{} returned an invalid install response without success: true",
+                operation
+            )),
+        }
+    }
+
     pub async fn update_mod<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -1395,6 +1502,8 @@ impl ModUpdateService {
         nexus_game_id: &str,
         nexus_access_token: Option<&str>,
         github_service: &GitHubReleasesService,
+        settings: &crate::types::Settings,
+        security_override: bool,
     ) -> Result<serde_json::Value> {
         use crate::types::ModSource;
 
@@ -1570,20 +1679,39 @@ impl ModUpdateService {
                         .unwrap_or_default(),
                 });
 
-                let result = mods_service
-                    .install_zip_mod(
-                        &env.output_dir,
-                        &temp_path.to_string_lossy(),
-                        &format!("{}.zip", package_uuid),
-                        runtime_label,
-                        &env.branch,
-                        Some(metadata_json),
-                    )
-                    .await;
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                result.map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                Ok(serde_json::json!({ "success": true }))
+                let temp_path_string = temp_path.to_string_lossy().to_string();
+                let archive_file_name = format!("{}.zip", package_uuid);
+                let install_result = Self::run_security_gated_provider_install(
+                    settings,
+                    &temp_path,
+                    metadata_json,
+                    security_override,
+                    "Thunderstore mod update installation",
+                    |metadata| {
+                        mods_service.install_zip_mod(
+                            &env.output_dir,
+                            &temp_path_string,
+                            &archive_file_name,
+                            runtime_label,
+                            &env.branch,
+                            metadata,
+                        )
+                    },
+                )
+                .await?;
+                let (response, security_report) = match install_result {
+                    ProviderUpdateInstallResult::Installed { response, report } => {
+                        (response, report)
+                    }
+                    ProviderUpdateInstallResult::EarlyResponse(response) => return Ok(response),
+                };
+                Ok(crate::commands::mods::finalize_security_scan_response(
+                    mods_service,
+                    response,
+                    security_report.as_ref(),
+                    "installing a Thunderstore mod update",
+                )
+                .await)
             }
             ModSource::Nexusmods => {
                 let mod_id = source_id
@@ -1603,7 +1731,12 @@ impl ModUpdateService {
                     runtime_label,
                     metadata.source_version.as_deref(),
                 )
-                .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No Nexus update file explicitly matches the {} runtime; automatic update was refused",
+                        runtime_label
+                    )
+                })?;
 
                 let file_id = target_file
                     .get("file_id")
@@ -1635,15 +1768,17 @@ impl ModUpdateService {
                         "recoveryUrl": "accounts"
                     }));
                 };
-                let original_file_name = target_file
-                    .get("file_name")
-                    .or_else(|| target_file.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("nexus-update.zip");
+                let original_file_name = Self::validated_provider_file_name(
+                    target_file
+                        .get("file_name")
+                        .or_else(|| target_file.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("nexus-update.zip"),
+                )?;
                 let tracked_download = crate::services::tracked_downloads::start_file_download(
                     crate::services::tracked_downloads::new_download_id("mod-update-nexus"),
                     crate::types::TrackedDownloadKind::Mod,
-                    original_file_name.to_string(),
+                    original_file_name.clone(),
                     format!("Update -> {}", env.name),
                     Some("Downloading update".to_string()),
                 );
@@ -1684,12 +1819,15 @@ impl ModUpdateService {
                         return Err(anyhow::anyhow!(message));
                     }
                 };
-                let extension = Path::new(original_file_name)
+                let extension = Path::new(&original_file_name)
                     .extension()
                     .and_then(|v| v.to_str())
                     .unwrap_or("zip");
-                let temp_path =
-                    std::env::temp_dir().join(format!("{}.{}", temp_file_name, extension));
+                let temp_dir = std::env::temp_dir().join(&temp_file_name);
+                tokio::fs::create_dir_all(&temp_dir)
+                    .await
+                    .context("Failed to create Nexus update staging directory")?;
+                let temp_path = temp_dir.join(&original_file_name);
                 tokio::fs::write(&temp_path, bytes).await.map_err(|error| {
                     let message = format!("Failed to write Nexus update file: {}", error);
                     let _ = crate::services::tracked_downloads::emit(
@@ -1724,31 +1862,51 @@ impl ModUpdateService {
                     "author": mod_info.as_ref().and_then(|m| m.get("author")).and_then(|v| v.as_str()).unwrap_or_default(),
                 });
 
-                let result = if extension.eq_ignore_ascii_case("dll") {
-                    mods_service
-                        .install_dll_mod(
-                            &env.output_dir,
-                            &temp_path.to_string_lossy(),
-                            runtime_label,
-                            Some(metadata_json),
-                        )
-                        .await
-                } else {
-                    mods_service
-                        .install_zip_mod(
-                            &env.output_dir,
-                            &temp_path.to_string_lossy(),
-                            original_file_name,
-                            runtime_label,
-                            &env.branch,
-                            Some(metadata_json),
-                        )
-                        .await
+                let temp_path_string = temp_path.to_string_lossy().to_string();
+                let install_result = Self::run_security_gated_provider_install(
+                    settings,
+                    &temp_path,
+                    metadata_json,
+                    security_override,
+                    "Nexus mod update installation",
+                    |metadata| async {
+                        if extension.eq_ignore_ascii_case("dll") {
+                            mods_service
+                                .install_dll_mod(
+                                    &env.output_dir,
+                                    &temp_path_string,
+                                    runtime_label,
+                                    metadata,
+                                )
+                                .await
+                        } else {
+                            mods_service
+                                .install_zip_mod(
+                                    &env.output_dir,
+                                    &temp_path_string,
+                                    &original_file_name,
+                                    runtime_label,
+                                    &env.branch,
+                                    metadata,
+                                )
+                                .await
+                        }
+                    },
+                )
+                .await?;
+                let (response, security_report) = match install_result {
+                    ProviderUpdateInstallResult::Installed { response, report } => {
+                        (response, report)
+                    }
+                    ProviderUpdateInstallResult::EarlyResponse(response) => return Ok(response),
                 };
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                result.map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                Ok(serde_json::json!({ "success": true }))
+                Ok(crate::commands::mods::finalize_security_scan_response(
+                    mods_service,
+                    response,
+                    security_report.as_ref(),
+                    "installing a Nexus mod update",
+                )
+                .await)
             }
             ModSource::Github => {
                 let (owner, repo) = source_id
@@ -1832,20 +1990,38 @@ impl ModUpdateService {
                     "author": owner,
                 });
 
-                let result = mods_service
-                    .install_zip_mod(
-                        &env.output_dir,
-                        &temp_path.to_string_lossy(),
-                        "github-update.zip",
-                        runtime_label,
-                        &env.branch,
-                        Some(metadata_json),
-                    )
-                    .await;
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                result.map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                Ok(serde_json::json!({ "success": true }))
+                let temp_path_string = temp_path.to_string_lossy().to_string();
+                let install_result = Self::run_security_gated_provider_install(
+                    settings,
+                    &temp_path,
+                    metadata_json,
+                    security_override,
+                    "GitHub mod update installation",
+                    |metadata| {
+                        mods_service.install_zip_mod(
+                            &env.output_dir,
+                            &temp_path_string,
+                            "github-update.zip",
+                            runtime_label,
+                            &env.branch,
+                            metadata,
+                        )
+                    },
+                )
+                .await?;
+                let (response, security_report) = match install_result {
+                    ProviderUpdateInstallResult::Installed { response, report } => {
+                        (response, report)
+                    }
+                    ProviderUpdateInstallResult::EarlyResponse(response) => return Ok(response),
+                };
+                Ok(crate::commands::mods::finalize_security_scan_response(
+                    mods_service,
+                    response,
+                    security_report.as_ref(),
+                    "installing a GitHub mod update",
+                )
+                .await)
             }
             ModSource::Local | ModSource::Unknown => Ok(serde_json::json!({
                 "success": false,
@@ -1885,17 +2061,23 @@ impl Default for ModUpdateService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::mods::{
+        blocked_security_scan_report_for_test, install_security_scan_test_hook,
+    };
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
     use crate::services::github_releases::GitHubReleasesService;
     use crate::services::mods::ModsService;
     use crate::services::nexus_mods::NexusModsService;
+    use crate::services::settings::SettingsService;
     use crate::services::thunderstore::ThunderStoreService;
     use crate::types::{
         schedule_i_config, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
     use tauri::test::mock_app;
     use tempfile::tempdir;
 
@@ -1967,6 +2149,70 @@ mod tests {
     }
 
     #[test]
+    fn install_response_requires_explicit_success() {
+        let success = ModUpdateService::require_successful_install_response(
+            serde_json::json!({ "success": true, "storageId": "stored-mod" }),
+            "test install",
+        )
+        .expect("success: true should be accepted");
+        assert_eq!(success["storageId"], serde_json::json!("stored-mod"));
+
+        let failed = ModUpdateService::require_successful_install_response(
+            serde_json::json!({ "success": false, "error": "archive could not be installed" }),
+            "test install",
+        )
+        .expect_err("success: false must not be treated as an installed update");
+        assert!(failed
+            .to_string()
+            .contains("archive could not be installed"));
+
+        let malformed = ModUpdateService::require_successful_install_response(
+            serde_json::json!({ "storageId": "stored-mod" }),
+            "test install",
+        )
+        .expect_err("an install response without success must fail closed");
+        assert!(malformed.to_string().contains("without success: true"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn provider_update_gate_blocks_once_before_invoking_the_installer() -> Result<()> {
+        let temp = tempdir()?;
+        let update_archive = temp.path().join("blocked-provider-update.zip");
+        tokio::fs::write(&update_archive, b"provider-update").await?;
+        let scan_hook = install_security_scan_test_hook(
+            update_archive.to_string_lossy().to_string(),
+            blocked_security_scan_report_for_test(),
+        );
+        let installer_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_installer = Arc::clone(&installer_calls);
+        let settings = SettingsService::default_settings();
+
+        let result = ModUpdateService::run_security_gated_provider_install(
+            &settings,
+            &update_archive,
+            serde_json::json!({ "source": "github", "sourceId": "example/update" }),
+            false,
+            "test provider update installation",
+            move |_metadata| {
+                calls_for_installer.fetch_add(1, AtomicOrdering::SeqCst);
+                async { Ok(serde_json::json!({ "success": true })) }
+            },
+        )
+        .await?;
+
+        assert!(matches!(
+            result,
+            ProviderUpdateInstallResult::EarlyResponse(_)
+        ));
+        assert_eq!(scan_hook.call_count(), 1);
+        assert_eq!(installer_calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(!update_archive.exists());
+
+        Ok(())
+    }
+
+    #[test]
     fn nexus_manual_confirmation_response_includes_pending_session_target() {
         let response = ModUpdateService::nexus_manual_confirmation_required_response(
             "Failed to download Nexus update: forbidden".to_string(),
@@ -2008,11 +2254,27 @@ mod tests {
             .create_environment(
                 schedule_i_config().app_id,
                 "main".to_string(),
-                "".to_string(),
+                temp.path()
+                    .join("managed-environment")
+                    .to_string_lossy()
+                    .to_string(),
                 None,
                 None,
             )
             .await?;
+        // Environment creation now establishes a canonical, owned directory
+        // marker. Model the later incomplete configuration explicitly instead
+        // of creating an invalid managed root with an empty path.
+        let env = env_service
+            .update_environment(
+                &env.id,
+                [(
+                    "outputDir".to_string(),
+                    serde_json::Value::String(String::new()),
+                )],
+            )
+            .await?;
+        assert!(env.output_dir.is_empty());
 
         let service = ModUpdateService::new();
         let err = service
@@ -2046,6 +2308,7 @@ mod tests {
         let nexus_mods_service = NexusModsService::new();
         let github_service = GitHubReleasesService::new();
         let app = mock_app();
+        let settings = SettingsService::default_settings();
 
         let service = ModUpdateService::new();
         let err = service
@@ -2060,6 +2323,8 @@ mod tests {
                 "schedule1",
                 None,
                 &github_service,
+                &settings,
+                false,
             )
             .await
             .expect_err("expected missing environment error");
@@ -2220,6 +2485,104 @@ mod tests {
         .expect("selected nexus file");
 
         assert_eq!(selected.get("file_id").and_then(|v| v.as_u64()), Some(11));
+    }
+
+    #[test]
+    fn select_best_nexus_file_for_update_refuses_unknown_or_opposite_runtime_files() {
+        let ambiguous = vec![serde_json::json!({
+            "file_id": 20,
+            "file_name": "Example.zip",
+            "version": "2.0.0",
+            "is_primary": true
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &ambiguous,
+            "IL2CPP",
+            Some("1.0.0")
+        )
+        .is_none());
+
+        let mono_only = vec![serde_json::json!({
+            "file_id": 21,
+            "file_name": "Example Mono.zip",
+            "version": "2.0.0",
+            "is_primary": true
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &mono_only,
+            "IL2CPP",
+            Some("1.0.0")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn nexus_runtime_aliases_cannot_override_opposite_runtime_tokens() {
+        let mono_with_il2cpp_alias = vec![serde_json::json!({
+            "file_id": 30,
+            "file_name": "Example Mono beta.zip",
+            "version": "2.0.0"
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &mono_with_il2cpp_alias,
+            "IL2CPP",
+            Some("1.0.0")
+        )
+        .is_none());
+
+        let il2cpp_with_mono_alias = vec![serde_json::json!({
+            "file_id": 31,
+            "file_name": "Example IL2CPP alternate.zip",
+            "version": "2.0.0"
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &il2cpp_with_mono_alias,
+            "Mono",
+            Some("1.0.0")
+        )
+        .is_none());
+
+        let legitimate_il2cpp = vec![serde_json::json!({
+            "file_id": 32,
+            "file_name": "Example beta.zip",
+            "version": "2.0.0"
+        })];
+        assert_eq!(
+            ModUpdateService::select_best_nexus_file_for_update(
+                &legitimate_il2cpp,
+                "IL2CPP",
+                Some("1.0.0")
+            )
+            .and_then(|file| file.get("file_id").and_then(Value::as_u64)),
+            Some(32)
+        );
+
+        let legitimate_mono = vec![serde_json::json!({
+            "file_id": 33,
+            "file_name": "Example alternate.zip",
+            "version": "2.0.0"
+        })];
+        assert_eq!(
+            ModUpdateService::select_best_nexus_file_for_update(
+                &legitimate_mono,
+                "Mono",
+                Some("1.0.0")
+            )
+            .and_then(|file| file.get("file_id").and_then(Value::as_u64)),
+            Some(33)
+        );
+    }
+
+    #[test]
+    fn provider_update_file_name_is_kept_canonical_and_rejects_paths() -> Result<()> {
+        assert_eq!(
+            ModUpdateService::validated_provider_file_name("Example.dll")?,
+            "Example.dll"
+        );
+        assert!(ModUpdateService::validated_provider_file_name("../Example.dll").is_err());
+        assert!(ModUpdateService::validated_provider_file_name("nested/Example.dll").is_err());
+        assert!(ModUpdateService::validated_provider_file_name("nested\\Example.dll").is_err());
+        Ok(())
     }
 
     #[test]
@@ -2563,7 +2926,7 @@ mod tests {
                 detected_runtime: None,
                 runtime_match: None,
                 mod_storage_id: None,
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: None,
             },
         );

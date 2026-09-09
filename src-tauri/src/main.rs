@@ -4,6 +4,7 @@
 )]
 
 mod commands;
+mod config;
 mod db;
 mod discord_rpc;
 mod events;
@@ -14,9 +15,13 @@ mod types;
 mod utils;
 
 use sqlx::SqlitePool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{Emitter, Manager, RunEvent};
-use tauri_plugin_deep_link::DeepLinkExt;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+
+static DEPOT_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     // Initialize global logger FIRST to capture all output
@@ -48,119 +53,22 @@ fn main() {
         .setup(|app| {
             log::info!("Tauri app starting - running setup");
 
-            // Initialize SIMM directory (synchronous)
-            let simm_was_created =
-                crate::services::app_init::initialize_simm_directory().unwrap_or(false);
+            app.manage(crate::commands::app_init::AppPreparationState::default());
 
-            log::info!(
-                "SIMM directory initialized (was_created: {})",
-                simm_was_created
-            );
-
-            let (db_pool, database_was_created) =
-                tauri::async_runtime::block_on(crate::db::initialize_pool_with_startup_state())
-                    .map_err(|e| {
-                        log::error!("Failed to initialize database: {}", e);
-                        e
-                    })?;
-
-            let mut settings_service =
-                crate::services::settings::SettingsService::new(db_pool.clone()).map_err(|e| {
-                    log::error!("Failed to create SettingsService during setup: {}", e);
-                    e
-                })?;
-            match tauri::async_runtime::block_on(settings_service.load_settings()) {
-                Ok(settings) => {
-                    crate::services::logger::LoggerService::apply_settings(&settings);
-                }
-                Err(error) => {
-                    log::warn!(
-                        "Failed to load settings for logger configuration: {}",
-                        error
-                    );
+            #[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(error) = app.deep_link().register_all() {
+                    log::warn!("Failed to register desktop deep links: {}", error);
                 }
             }
-
-            app.manage(db_pool.clone());
-
-            #[cfg(windows)]
-            let should_register_runtime_scheme = cfg!(debug_assertions)
-                || std::env::current_exe()
-                    .ok()
-                    .map(|path| {
-                        path.components().any(|component| {
-                            component
-                                .as_os_str()
-                                .to_string_lossy()
-                                .eq_ignore_ascii_case("target")
-                        })
-                    })
-                    .unwrap_or(false);
-
-            // Store startup state so frontend can choose fresh-install and upgrade setup flows.
-            app.manage(crate::types::AppStartupState {
-                simm_directory_created: simm_was_created,
-                database_created: database_was_created,
-            });
-
-            let registration_app = app.handle().clone();
-            let registration_db_pool = db_pool.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    crate::commands::nexus_mods::cleanup_stale_nxm_runtime_registration(
-                        registration_db_pool.clone(),
-                    )
-                    .await
-                {
-                    log::warn!(
-                        "Failed to clean up stale runtime nxm registration: {}",
-                        error
-                    );
-                }
-
-                if let Err(error) = crate::commands::nexus_mods::ensure_nxm_runtime_registration(
-                    registration_db_pool.clone(),
-                )
-                .await
-                {
-                    log::warn!(
-                        "Failed to claim nxm protocol handler for app lifetime: {}",
-                        error
-                    );
-                }
-
-                #[cfg(windows)]
-                if should_register_runtime_scheme {
-                    if let Err(error) = registration_app.deep_link().register_all() {
-                        log::warn!("Failed to register deep-link scheme at runtime: {}", error);
-                    }
-                }
-            });
-
-            // Initialize services (async)
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = crate::services::app_init::initialize_services(app_handle).await {
-                    log::error!("Error during service initialization: {}", e);
-                    // Continue anyway - some services may still work
-                }
-            });
-
-            // Prime Thunderstore once per launch. Search and update-check paths use this
-            // local listing unless the scheduled refresh window explicitly asks for a
-            // network refresh.
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = crate::services::thunderstore::shared_thunderstore_service()
-                    .warm_community_cache("schedule-i")
-                    .await
-                {
-                    log::warn!("Failed to warm Thunderstore Schedule I cache: {}", error);
-                }
-            });
 
             // Explicitly set window icon (taskbar + title bar) from bundle icon
             if let Some(window) = app.get_webview_window("main") {
                 log::info!("Main window found");
+                if let Err(e) = window.set_decorations(false) {
+                    log::warn!("Failed to disable native window decorations: {}", e);
+                }
                 if let Some(icon) = app.default_window_icon() {
                     if let Err(e) = window.set_icon(icon.clone()) {
                         log::warn!("Failed to set window icon: {}", e);
@@ -168,9 +76,74 @@ fn main() {
                 } else {
                     log::warn!("No default window icon available");
                 }
+                let close_app = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let close_app = close_app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::commands::tray::handle_main_window_close(close_app).await;
+                        });
+                    }
+                });
             } else {
                 log::warn!("Main window not found!");
             }
+
+            let show = MenuItem::with_id(app, "show", "Show SIMM", true, None::<&str>)?;
+            let check_updates = MenuItem::with_id(
+                app,
+                "check_updates",
+                "Check for Updates",
+                true,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(app, "quit", "Quit SIMM", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &check_updates, &quit])?;
+            let mut tray = TrayIconBuilder::with_id("simm-tray").menu(&menu);
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.on_menu_event(|app, event| match event.id.as_ref() {
+                "show" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                "check_updates" => {
+                    if let Some(pool) = app.try_state::<Arc<SqlitePool>>() {
+                        let pool = pool.inner().clone();
+                        let app = app.clone();
+                        let runtime_settings = app
+                            .try_state::<crate::services::settings::RuntimeSettingsState>()
+                            .map(|state| state.inner().clone());
+                        tauri::async_runtime::spawn(async move {
+                            let Some(runtime_settings) = runtime_settings else {
+                                log::warn!(
+                                    "Runtime settings state is not ready for tray update check"
+                                );
+                                return;
+                            };
+                            if let Err(error) =
+                                crate::commands::update_check::run_background_update_checks(
+                                    pool,
+                                    app,
+                                    true,
+                                    runtime_settings.snapshot().await,
+                                )
+                                .await
+                            {
+                                log::warn!("Tray update check failed: {}", error);
+                            }
+                        });
+                    }
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            })
+            .build(app)?;
 
             log::info!("Tauri setup complete");
             Ok(())
@@ -179,9 +152,15 @@ fn main() {
             // App Init
             commands::app_update::check_app_update,
             commands::app_update::install_app_update,
+            commands::app_init::prepare_app,
             commands::app_init::was_simm_directory_just_created,
             commands::app_init::get_app_startup_state,
+            commands::app_init::get_linux_readiness_status,
+            commands::app_init::repair_linux_desktop_integration,
             commands::app_init::get_home_directory,
+            commands::app_init::get_backups_directory,
+            commands::tray::hide_main_window,
+            commands::tray::quit_simm,
             // DepotDownloader
             commands::depotdownloader::detect_depot_downloader,
             commands::depotdownloader::install_depot_downloader,
@@ -189,8 +168,27 @@ fn main() {
             commands::settings::get_settings,
             commands::settings::save_settings,
             commands::settings::backup_database,
+            commands::settings::repair_database,
             commands::settings::get_custom_themes,
             commands::settings::get_themes_directory,
+            commands::telemetry::get_telemetry_capability,
+            commands::telemetry::get_telemetry_preferences,
+            commands::telemetry::save_telemetry_preferences,
+            commands::telemetry::list_telemetry_mod_policies,
+            commands::telemetry::save_telemetry_mod_rule,
+            commands::telemetry::capture_mod_telemetry_snapshot,
+            commands::telemetry::list_mod_telemetry_snapshots,
+            commands::telemetry::get_mod_telemetry_snapshot,
+            commands::telemetry::delete_mod_telemetry_snapshot,
+            commands::telemetry::get_live_telemetry_status,
+            commands::telemetry::list_live_telemetry_events,
+            commands::telemetry::clear_live_telemetry_history,
+            commands::telemetry::export_live_telemetry_history,
+            commands::telemetry_upload::preview_telemetry_upload,
+            commands::telemetry_upload::queue_telemetry_upload,
+            commands::telemetry_upload::list_telemetry_uploads,
+            commands::telemetry_upload::flush_queued_telemetry_uploads,
+            commands::telemetry_upload::retry_telemetry_upload,
             commands::settings::save_credentials,
             commands::settings::clear_credentials,
             commands::settings::save_nexus_mods_api_key,
@@ -217,6 +215,7 @@ fn main() {
             commands::downloads::get_download_progress,
             // Auth
             commands::auth::authenticate,
+            commands::auth::authenticate_qr,
             // Filesystem
             commands::filesystem::open_folder,
             commands::filesystem::open_path,
@@ -248,6 +247,20 @@ fn main() {
             commands::mods::store_mod_archive,
             commands::mods::download_s1api_to_library,
             commands::mods::download_mlvscan_to_library,
+            commands::mod_profiles::export_environment_profile,
+            commands::mod_profiles::list_mod_profiles,
+            commands::mod_profiles::get_mod_profile,
+            commands::mod_profiles::save_mod_profile,
+            commands::mod_profiles::capture_mod_profile,
+            commands::mod_profiles::import_mod_profile_to_library,
+            commands::mod_profiles::export_mod_profile_from_library,
+            commands::mod_profiles::delete_mod_profile,
+            commands::mod_profiles::preview_mod_profile_apply,
+            commands::mod_profiles::apply_mod_profile,
+            commands::mod_profiles::save_mod_profile_file,
+            commands::mod_profiles::read_mod_profile_file,
+            commands::mod_profiles::preview_mod_profile_import,
+            commands::mod_profiles::apply_mod_profile_import,
             // Plugins
             commands::plugins::get_plugins,
             commands::plugins::get_plugins_count,
@@ -258,9 +271,11 @@ fn main() {
             // UserLibs
             commands::userlibs::get_userlibs,
             commands::userlibs::get_userlibs_count,
+            commands::userlibs::delete_user_lib,
             commands::userlibs::enable_user_lib,
             commands::userlibs::disable_user_lib,
             commands::userlibs::open_user_libs_folder,
+            commands::userlibs::upload_user_lib,
             // Update checks
             commands::update_check::check_update,
             commands::update_check::check_all_updates,
@@ -268,6 +283,8 @@ fn main() {
             // MelonLoader
             commands::melon_loader::get_melon_loader_status,
             commands::melon_loader::install_melon_loader,
+            commands::melon_loader::repair_melonloader_launch_options,
+            commands::melon_loader::verify_melonloader_launch,
             commands::melon_loader::uninstall_melon_loader,
             commands::melon_loader::get_available_melonloader_versions,
             // GitHub Releases
@@ -293,6 +310,7 @@ fn main() {
             commands::nexus_mods::get_nexus_mods_trending,
             commands::nexus_mods::get_nexus_mods_mod,
             commands::nexus_mods::get_nexus_mods_mod_files,
+            commands::nexus_mods::get_nexus_mod_file_dependencies,
             commands::nexus_mods::download_nexus_mods_mod_file,
             commands::nexus_mods::download_nexus_mod_to_library,
             commands::nexus_mods::install_nexus_mods_mod,
@@ -323,6 +341,14 @@ fn main() {
             commands::logs::get_app_log_retention_days,
             commands::logs::list_app_log_files,
             commands::logs::read_app_log_file,
+            // Schedule I save management
+            commands::save_backups::get_game_save_backup_status,
+            commands::save_backups::create_game_save_backup,
+            commands::save_backups::export_game_save_backup,
+            commands::save_backups::preview_game_save_backup_restore,
+            commands::save_backups::preview_game_save_zip_restore,
+            commands::save_backups::restore_game_save_backup,
+            commands::save_backups::restore_game_save_from_zip,
             // Config
             commands::config::get_config_catalog,
             commands::config::get_config_document,
@@ -356,8 +382,27 @@ fn main() {
             std::process::exit(1);
         });
 
-    app.run(|app_handle, event| {
-        if let RunEvent::Exit = event {
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { code, api, .. }
+            if DEPOT_SHUTDOWN_STARTED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok() =>
+        {
+            api.prevent_exit();
+            let app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::commands::downloads::shutdown_downloads(&app_handle).await;
+                app_handle.exit(code.unwrap_or(0));
+            });
+        }
+        RunEvent::Exit => {
+            // Forced exits may skip ExitRequested. Keep a synchronous bounded
+            // fallback so SIMM never intentionally leaves its child process.
+            if !DEPOT_SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+                tauri::async_runtime::block_on(crate::commands::downloads::shutdown_downloads(
+                    app_handle,
+                ));
+            }
             if let Some(pool) = app_handle.try_state::<Arc<SqlitePool>>() {
                 if let Err(error) = tauri::async_runtime::block_on(
                     crate::commands::nexus_mods::cleanup_nxm_runtime_registration(
@@ -368,5 +413,6 @@ fn main() {
                 }
             }
         }
+        _ => {}
     });
 }

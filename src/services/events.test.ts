@@ -16,6 +16,7 @@ import {
   onUserLibsChanged,
   onModUpdatesChecked,
   onTrackedDownloadUpdated,
+  createAsyncListenerScope,
   type ProgressEvent,
   type TrackedDownloadUpdatedEvent,
   type UpdateAvailableEvent,
@@ -47,6 +48,7 @@ describe('events', () => {
         downloadId: 'download-1',
         progress: {
           downloadId: 'download-1',
+          operationId: 'operation-1',
           status: 'downloading',
           progress: 50,
         },
@@ -55,6 +57,7 @@ describe('events', () => {
 
     expect(handler).toHaveBeenCalledWith({
       downloadId: 'download-1',
+      operationId: 'operation-1',
       status: 'downloading',
       progress: 50,
     });
@@ -75,6 +78,7 @@ describe('events', () => {
         updateResult: {
           updateAvailable: true,
           branch: 'main',
+          runtime: 'IL2CPP',
           appId: '3164500',
           checkedAt: 'now',
         },
@@ -89,8 +93,8 @@ describe('events', () => {
   });
 
   it.each([
-    ['onComplete', onComplete, 'download_complete', { downloadId: 'd-1' }],
-    ['onError', onError, 'download_error', { downloadId: 'd-1', error: 'boom' }],
+    ['onComplete', onComplete, 'download_complete', { downloadId: 'd-1', operationId: 'op-1' }],
+    ['onError', onError, 'download_error', { downloadId: 'd-1', operationId: 'op-1', error: 'boom' }],
     ['onAuthWaiting', onAuthWaiting, 'auth_waiting', { downloadId: 'd-1', message: 'wait' }],
     ['onAuthSuccess', onAuthSuccess, 'auth_success', { downloadId: 'd-1' }],
     ['onAuthError', onAuthError, 'auth_error', { downloadId: 'd-1', error: 'bad' }],
@@ -148,5 +152,22 @@ describe('events', () => {
         kind: 'framework',
       })
     );
+  });
+
+  it('immediately disposes a listener that resolves after its scope closes', async () => {
+    let resolveListener: ((unlisten: () => void) => void) | undefined;
+    const delayedListener = new Promise<() => void>((resolve) => {
+      resolveListener = resolve;
+    });
+    const unlisten = vi.fn();
+    const scope = createAsyncListenerScope();
+
+    scope.register(() => delayedListener);
+    scope.dispose();
+    resolveListener?.(unlisten);
+    await Promise.resolve();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(scope.isActive()).toBe(false);
   });
 });

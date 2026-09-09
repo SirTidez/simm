@@ -1,3 +1,6 @@
+use crate::types::{
+    NexusDependencyCandidate, NexusDependencyRequirement, NexusModFileDependencies,
+};
 use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::Result;
@@ -8,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 const NEXUS_GRAPHQL_ENDPOINT: &str = "https://api.nexusmods.com/v2/graphql";
+const NEXUS_V3_API_BASE: &str = "https://api.nexusmods.com";
 const NEXUS_WEB_BASE: &str = "https://www.nexusmods.com";
 const SEARCH_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const BROWSE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
@@ -15,6 +19,7 @@ const MOD_INFO_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const MOD_FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const GAME_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const GAMES_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const NEXUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct NexusModsService {
@@ -40,6 +45,7 @@ impl NexusModsService {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .connect_timeout(NEXUS_CONNECT_TIMEOUT)
             .user_agent(http_identity::user_agent())
             .build()
             .expect("failed to build Nexus Mods HTTP client");
@@ -237,6 +243,194 @@ impl NexusModsService {
         }
 
         Ok(result.data.unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    async fn v3_get_json(&self, access_token: &str, path: &str) -> Result<Value> {
+        let endpoint = format!("{NEXUS_V3_API_BASE}{path}");
+        let response = self
+            .client
+            .get(&endpoint)
+            .bearer_auth(access_token)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
+            .send()
+            .await
+            .map_err(|error| anyhow::anyhow!("Nexus v3 request failed: {error}"))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to read Nexus v3 response: {error}"))?;
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Nexus v3 request failed ({status}): {}",
+                body.trim()
+            ));
+        }
+
+        serde_json::from_str(&body)
+            .map_err(|error| anyhow::anyhow!("Invalid Nexus v3 response: {error}"))
+    }
+
+    fn v3_data(value: &Value) -> &Value {
+        value.get("data").unwrap_or(value)
+    }
+
+    fn json_string(value: Option<&Value>) -> String {
+        value
+            .and_then(|entry| entry.as_str().map(str::to_string))
+            .or_else(|| value.and_then(|entry| entry.as_i64().map(|id| id.to_string())))
+            .or_else(|| value.and_then(|entry| entry.as_u64().map(|id| id.to_string())))
+            .unwrap_or_default()
+    }
+
+    fn parse_materialized_dependencies(
+        source_version_id: String,
+        value: &Value,
+    ) -> NexusModFileDependencies {
+        let requirements = Self::v3_data(value)
+            .get("dependencies")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|definition| {
+                let candidates = definition
+                    .get("candidate_mod_files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|candidate_file| {
+                        let mod_value = candidate_file.get("mod");
+                        let mod_id = Self::json_string(mod_value.and_then(|mod_value| {
+                            mod_value
+                                .get("game_scoped_id")
+                                .or_else(|| mod_value.get("id"))
+                        }));
+                        let mod_name = Self::json_string(
+                            mod_value.and_then(|mod_value| mod_value.get("name")),
+                        );
+                        let mod_file_id = Self::json_string(candidate_file.get("id"));
+                        let mod_file_name = Self::json_string(candidate_file.get("name"));
+
+                        candidate_file
+                            .get("candidate_versions")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .map(move |version| NexusDependencyCandidate {
+                                mod_id: mod_id.clone(),
+                                mod_name: mod_name.clone(),
+                                mod_file_id: mod_file_id.clone(),
+                                mod_file_name: mod_file_name.clone(),
+                                version_id: Self::json_string(version.get("id")),
+                                version_game_scoped_id: Self::json_string(
+                                    version.get("game_scoped_id"),
+                                ),
+                                version: Self::json_string(version.get("version")),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+
+                NexusDependencyRequirement {
+                    id: Self::json_string(definition.get("id")),
+                    candidates,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        NexusModFileDependencies {
+            source_version_id,
+            requirements,
+        }
+    }
+
+    async fn resolve_v3_mod_file_version_id(
+        &self,
+        access_token: &str,
+        game_domain: &str,
+        legacy_mod_id: u32,
+        legacy_file_id: u32,
+    ) -> Result<String> {
+        let game_domain = urlencoding::encode(game_domain);
+        let mod_response = self
+            .v3_get_json(
+                access_token,
+                &format!("/games/{game_domain}/mods/{legacy_mod_id}"),
+            )
+            .await?;
+        let mod_id = Self::json_string(Self::v3_data(&mod_response).get("id"));
+        if mod_id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Nexus v3 did not return an identifier for mod {legacy_mod_id}"
+            ));
+        }
+
+        let files = self
+            .v3_get_json(access_token, &format!("/mods/{mod_id}/files"))
+            .await?;
+        let files = Self::v3_data(&files)
+            .get("mod_files")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("Nexus v3 did not return mod files"))?;
+
+        let legacy_file_id = legacy_file_id.to_string();
+        for file in files {
+            let mod_file_id = Self::json_string(file.get("id"));
+            if mod_file_id.is_empty() {
+                continue;
+            }
+
+            let versions = self
+                .v3_get_json(access_token, &format!("/mod-files/{mod_file_id}/versions"))
+                .await?;
+            let Some(versions) = Self::v3_data(&versions)
+                .get("versions")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+
+            if let Some(version) = versions
+                .iter()
+                .find(|version| Self::json_string(version.get("game_scoped_id")) == legacy_file_id)
+            {
+                let version_id = Self::json_string(version.get("id"));
+                if !version_id.is_empty() {
+                    return Ok(version_id);
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Nexus v3 could not map file {legacy_file_id} on mod {legacy_mod_id} to a published file version"
+        ))
+    }
+
+    /// Resolve the public, file-version dependency candidates for a legacy Nexus file id.
+    pub async fn get_mod_file_dependencies(
+        &self,
+        access_token: &str,
+        game_domain: &str,
+        mod_id: u32,
+        file_id: u32,
+    ) -> Result<NexusModFileDependencies> {
+        let source_version_id = self
+            .resolve_v3_mod_file_version_id(access_token, game_domain, mod_id, file_id)
+            .await?;
+        let response = self
+            .v3_get_json(
+                access_token,
+                &format!("/mod-file-versions/{source_version_id}/dependencies/ranges/materialized"),
+            )
+            .await?;
+
+        Ok(Self::parse_materialized_dependencies(
+            source_version_id,
+            &response,
+        ))
     }
 
     async fn resolve_game_by_input_uncached(&self, game_input: &str) -> Result<(String, String)> {
@@ -1021,6 +1215,7 @@ impl NexusModsService {
         );
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .connect_timeout(NEXUS_CONNECT_TIMEOUT)
             .build()
             .map_err(|e| {
                 let message = format!("Failed to build Nexus OAuth download link client: {}", e);
@@ -1163,5 +1358,133 @@ impl NexusModsService {
 impl Default for NexusModsService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_u32(key: &str) -> Result<Option<u32>> {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|error| anyhow::anyhow!("Invalid {key}: {error}"))
+            })
+            .transpose()
+    }
+
+    fn looks_like_archive(bytes: &[u8]) -> bool {
+        bytes.starts_with(b"PK\x03\x04")
+            || bytes.starts_with(b"PK\x05\x06")
+            || bytes.starts_with(b"PK\x07\x08")
+            || bytes.starts_with(b"Rar!\x1a\x07")
+            || bytes.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])
+    }
+
+    #[test]
+    fn parses_materialized_dependency_candidates() {
+        let response = serde_json::json!({
+            "data": {
+                "dependencies": [
+                    {
+                        "id": "required-api",
+                        "candidate_mod_files": [
+                            {
+                                "id": "api-file",
+                                "name": "S1API",
+                                "mod": {
+                                    "id": "api-mod-internal",
+                                    "game_scoped_id": "42",
+                                    "name": "S1API"
+                                },
+                                "candidate_versions": [
+                                    {
+                                        "id": "api-version-internal",
+                                        "game_scoped_id": "420",
+                                        "version": "3.0.5"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let parsed = NexusModsService::parse_materialized_dependencies(
+            "source-version".to_string(),
+            &response,
+        );
+
+        assert_eq!(parsed.source_version_id, "source-version");
+        assert_eq!(parsed.requirements.len(), 1);
+        assert_eq!(parsed.requirements[0].id, "required-api");
+        assert_eq!(parsed.requirements[0].candidates.len(), 1);
+        assert_eq!(parsed.requirements[0].candidates[0].mod_id, "42");
+        assert_eq!(
+            parsed.requirements[0].candidates[0].version_game_scoped_id,
+            "420"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Queries live Nexus Mods Schedule I metadata"]
+    async fn live_schedule_i_metadata_query_returns_files() -> Result<()> {
+        let service = NexusModsService::new();
+        let mods = service.get_latest_updated_mods("schedule1").await?;
+        assert!(!mods.is_empty(), "Expected Nexus Schedule I mods");
+
+        let mod_id = mods
+            .iter()
+            .find_map(|entry| entry.get("mod_id").and_then(|value| value.as_u64()))
+            .ok_or_else(|| anyhow::anyhow!("No Nexus Schedule I mod id returned"))?
+            as u32;
+        let files = service.get_mod_files("schedule1", mod_id).await?;
+
+        assert!(
+            files.iter().any(|file| file
+                .get("file_id")
+                .and_then(|value| value.as_u64())
+                .is_some()),
+            "Expected Nexus Schedule I file metadata for mod {mod_id}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires SIMM_NEXUS_LIVE_ACCESS_TOKEN, SIMM_NEXUS_LIVE_MOD_ID, and SIMM_NEXUS_LIVE_FILE_ID"]
+    async fn live_oauth_downloads_configured_schedule_i_file() -> Result<()> {
+        let Some(access_token) = std::env::var("SIMM_NEXUS_LIVE_ACCESS_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("Skipping Nexus download smoke: SIMM_NEXUS_LIVE_ACCESS_TOKEN is not set.");
+            return Ok(());
+        };
+        let Some(mod_id) = env_u32("SIMM_NEXUS_LIVE_MOD_ID")? else {
+            eprintln!("Skipping Nexus download smoke: SIMM_NEXUS_LIVE_MOD_ID is not set.");
+            return Ok(());
+        };
+        let Some(file_id) = env_u32("SIMM_NEXUS_LIVE_FILE_ID")? else {
+            eprintln!("Skipping Nexus download smoke: SIMM_NEXUS_LIVE_FILE_ID is not set.");
+            return Ok(());
+        };
+
+        let service = NexusModsService::new();
+        let bytes = service
+            .download_mod_file(&access_token, "schedule1", mod_id, file_id)
+            .await?;
+
+        assert!(bytes.len() > 128, "Expected Nexus download bytes");
+        assert!(
+            looks_like_archive(&bytes),
+            "Expected Nexus download to have a known archive signature"
+        );
+        Ok(())
     }
 }

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.lockwirelabs.simm</id>
+  <name>Schedule I Mod Manager</name>
+  <summary>Manage Schedule I installations and mod development environments</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <developer_name>LockWire Labs</developer_name>
+  <launchable type="desktop-id">dev.lockwirelabs.simm.desktop</launchable>
+  <provides>
+    <binary>simmrust</binary>
+    <mediatype>x-scheme-handler/simm</mediatype>
+    <mediatype>x-scheme-handler/nxm</mediatype>
+  </provides>
+  <url type="homepage">https://github.com/SirTidez/simm</url>
+  <description>
+    <p>Schedule I Mod Manager manages game installations, mod libraries, and development environments.</p>
+  </description>
+  <releases>
+    <release version="0.8.6" date="2026-07-10"/>
+  </releases>
+</component>

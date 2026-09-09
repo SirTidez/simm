@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tokio::fs;
+
+static STEAM_LOCAL_CONFIG_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Steam detection and management service
 #[derive(Clone)]
@@ -17,6 +22,16 @@ pub struct SteamInstallation {
     pub manifest_path: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteamLaunchOptionsStatus {
+    pub configured: bool,
+    pub repairable: bool,
+    pub required: String,
+    pub current: Option<String>,
+    pub config_path: Option<String>,
+}
+
 impl SteamService {
     pub fn new() -> Self {
         Self
@@ -25,6 +40,353 @@ impl SteamService {
     /// Get Schedule I AppID
     pub fn get_steam_app_id() -> String {
         "3164500".to_string()
+    }
+
+    pub fn required_melonloader_launch_options() -> &'static str {
+        crate::services::melon_loader::MelonLoaderService::linux_melonloader_launch_options()
+    }
+
+    fn required_winedlloverrides_assignment() -> &'static str {
+        "WINEDLLOVERRIDES=\"version=n,b\""
+    }
+
+    fn required_winedlloverrides_entry() -> &'static str {
+        "version=n,b"
+    }
+
+    fn launch_options_contain_command(options: &str) -> bool {
+        options
+            .split_whitespace()
+            .any(|part| part.trim_matches(|ch| ch == '"' || ch == '\'') == "%command%")
+    }
+
+    fn launch_options_have_required_winedlloverride(options: &str) -> bool {
+        let Some(value) = Self::extract_winedlloverrides_value(options) else {
+            return false;
+        };
+
+        value.split(';').any(|entry| {
+            entry
+                .trim()
+                .eq_ignore_ascii_case(Self::required_winedlloverrides_entry())
+        })
+    }
+
+    fn schedule_i_launch_options_configured(options: &str) -> bool {
+        Self::launch_options_have_required_winedlloverride(options)
+            && Self::launch_options_contain_command(options)
+    }
+
+    fn merge_schedule_i_launch_options(current: Option<&str>) -> String {
+        let Some(current) = current.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Self::required_melonloader_launch_options().to_string();
+        };
+
+        let mut merged = if Self::launch_options_have_required_winedlloverride(current) {
+            current.to_string()
+        } else if let Some(updated) = Self::add_required_winedlloverride_to_existing(current) {
+            updated
+        } else {
+            format!(
+                "{} {}",
+                Self::required_winedlloverrides_assignment(),
+                current
+            )
+        };
+
+        if !Self::launch_options_contain_command(&merged) {
+            merged.push_str(" %command%");
+        }
+
+        merged
+    }
+
+    fn extract_winedlloverrides_value(options: &str) -> Option<String> {
+        let (_, value_start, value_end, _) = Self::find_winedlloverrides_assignment(options)?;
+        Some(options[value_start..value_end].to_string())
+    }
+
+    fn add_required_winedlloverride_to_existing(options: &str) -> Option<String> {
+        let (assignment_start, value_start, value_end, quote) =
+            Self::find_winedlloverrides_assignment(options)?;
+        let existing = &options[value_start..value_end];
+        let mut new_value = existing.trim().to_string();
+        if !new_value.is_empty() && !new_value.ends_with(';') {
+            new_value.push(';');
+        }
+        new_value.push_str(Self::required_winedlloverrides_entry());
+
+        let mut merged = String::with_capacity(options.len() + new_value.len());
+        merged.push_str(&options[..value_start]);
+        merged.push_str(&new_value);
+        merged.push_str(&options[value_end..]);
+
+        if quote.is_none() && new_value.contains(char::is_whitespace) {
+            return Some(format!(
+                "{}{}=\"{}\"{}",
+                &options[..assignment_start],
+                "WINEDLLOVERRIDES",
+                new_value,
+                &options[value_end..]
+            ));
+        }
+
+        Some(merged)
+    }
+
+    fn find_winedlloverrides_assignment(
+        options: &str,
+    ) -> Option<(usize, usize, usize, Option<char>)> {
+        let key = "WINEDLLOVERRIDES=";
+        let start = options
+            .to_ascii_lowercase()
+            .find(&key.to_ascii_lowercase())?;
+        let mut value_start = start + key.len();
+        let first = options[value_start..].chars().next()?;
+
+        if first == '"' || first == '\'' {
+            let quote = first;
+            value_start += first.len_utf8();
+            let mut value_end = options.len();
+            for (offset, ch) in options[value_start..].char_indices() {
+                if ch == quote {
+                    value_end = value_start + offset;
+                    break;
+                }
+            }
+            return Some((start, value_start, value_end, Some(quote)));
+        }
+
+        let mut value_end = options.len();
+        for (offset, ch) in options[value_start..].char_indices() {
+            if ch.is_whitespace() {
+                value_end = value_start + offset;
+                break;
+            }
+        }
+
+        Some((start, value_start, value_end, None))
+    }
+
+    pub fn get_schedule_i_launch_options_status(&self) -> Result<SteamLaunchOptionsStatus> {
+        let required = Self::required_melonloader_launch_options().to_string();
+        let config_path = match Self::steam_local_config_path() {
+            Ok(path) => path,
+            Err(_) => {
+                return Ok(SteamLaunchOptionsStatus {
+                    configured: false,
+                    repairable: false,
+                    required,
+                    current: None,
+                    config_path: None,
+                });
+            }
+        };
+
+        let current = if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)
+                .with_context(|| format!("Failed to read {}", config_path.display()))?;
+            let entries = parse_text_vdf(&content)
+                .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+            text_vdf_get_string(
+                &entries,
+                &[
+                    "UserLocalConfigStore",
+                    "Software",
+                    "Valve",
+                    "Steam",
+                    "apps",
+                    &Self::get_steam_app_id(),
+                ],
+                "LaunchOptions",
+            )
+            .map(ToOwned::to_owned)
+        } else {
+            None
+        };
+
+        Ok(SteamLaunchOptionsStatus {
+            configured: current
+                .as_deref()
+                .is_some_and(Self::schedule_i_launch_options_configured),
+            repairable: true,
+            required,
+            current,
+            config_path: Some(config_path.to_string_lossy().to_string()),
+        })
+    }
+
+    pub fn ensure_schedule_i_launch_options(&self) -> Result<SteamLaunchOptionsStatus> {
+        let _write_guard = STEAM_LOCAL_CONFIG_WRITE_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Steam launch-options update lock is unavailable"))?;
+        let config_path = Self::steam_local_config_path()?;
+        let original = if config_path.exists() {
+            Some(
+                std::fs::read(&config_path)
+                    .with_context(|| format!("Failed to read {}", config_path.display()))?,
+            )
+        } else {
+            None
+        };
+        let mut entries = if let Some(content) = original.as_deref() {
+            let content = std::str::from_utf8(content)
+                .with_context(|| format!("{} is not valid UTF-8", config_path.display()))?;
+            parse_text_vdf(content)
+                .with_context(|| format!("Failed to parse {}", config_path.display()))?
+        } else {
+            Vec::new()
+        };
+        let current = text_vdf_get_string(
+            &entries,
+            &[
+                "UserLocalConfigStore",
+                "Software",
+                "Valve",
+                "Steam",
+                "apps",
+                &Self::get_steam_app_id(),
+            ],
+            "LaunchOptions",
+        )
+        .map(ToOwned::to_owned);
+        let merged = Self::merge_schedule_i_launch_options(current.as_deref());
+
+        text_vdf_set_string(
+            &mut entries,
+            &[
+                "UserLocalConfigStore",
+                "Software",
+                "Valve",
+                "Steam",
+                "apps",
+                &Self::get_steam_app_id(),
+            ],
+            "LaunchOptions",
+            &merged,
+        );
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        Self::write_local_config_atomically(
+            &config_path,
+            original.as_deref(),
+            write_text_vdf(&entries).as_bytes(),
+        )?;
+
+        self.get_schedule_i_launch_options_status()
+    }
+
+    fn write_local_config_atomically(
+        target: &Path,
+        original: Option<&[u8]>,
+        content: &[u8],
+    ) -> Result<()> {
+        let rendered = std::str::from_utf8(content).context("Generated Steam config is invalid")?;
+        parse_text_vdf(rendered).context("Generated Steam config is invalid")?;
+        let parent = target
+            .parent()
+            .context("Steam local config has no parent directory")?;
+        let name = target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("Steam local config has no valid name")?;
+        let staged = parent.join(format!(".{name}.simm-{}.tmp", uuid::Uuid::new_v4()));
+        Self::write_synced_new_file(&staged, content)?;
+        let staged_contents = std::fs::read_to_string(&staged)
+            .context("Failed to re-read staged Steam local config")?;
+        parse_text_vdf(&staged_contents).context("Staged Steam local config is invalid")?;
+
+        let current = match std::fs::read(target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                let _ = std::fs::remove_file(&staged);
+                return Err(error)
+                    .context("Failed to re-check Steam local config before replacement");
+            }
+        };
+        if current.as_deref() != original {
+            let _ = std::fs::remove_file(&staged);
+            anyhow::bail!(
+                "Steam local config changed while SIMM was preparing the update; try again"
+            )
+        }
+
+        if let Some(original) = original {
+            let backup = parent.join(format!("{name}.simm-backup"));
+            let backup_staged =
+                parent.join(format!(".{name}.simm-backup-{}.tmp", uuid::Uuid::new_v4()));
+            Self::write_synced_new_file(&backup_staged, original)?;
+            Self::replace_file_atomically(&backup_staged, &backup)
+                .context("Failed to preserve the previous Steam local config")?;
+        }
+
+        if let Err(error) = Self::replace_file_atomically(&staged, target) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error).context("Failed to install updated Steam local config");
+        }
+        let installed = std::fs::read_to_string(target)
+            .context("Failed to verify updated Steam local config")?;
+        if installed.as_bytes() != content {
+            anyhow::bail!("Steam local config changed immediately after SIMM updated it")
+        }
+        parse_text_vdf(&installed).context("Updated Steam local config failed validation")?;
+        Ok(())
+    }
+
+    fn write_synced_new_file(path: &Path, content: &[u8]) -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("Failed to create staged file {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("Failed to write staged file {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("Failed to flush staged file {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to persist staged file {}", path.display()))
+    }
+
+    fn replace_file_atomically(replacement: &Path, target: &Path) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use winapi::um::winbase::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+            let replacement_wide = replacement
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let target_wide = target
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let replaced = unsafe {
+                MoveFileExW(
+                    replacement_wide.as_ptr(),
+                    target_wide.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if replaced == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("Failed to atomically replace Steam configuration");
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::fs::rename(replacement, target)
+                .context("Failed to atomically replace Steam configuration")
+        }
     }
 
     /// Find Steam installation directory
@@ -69,9 +431,30 @@ impl SteamService {
 
         #[cfg(target_os = "linux")]
         {
-            let steam_path = dirs::home_dir()?.join(".steam").join("steam");
-            if steam_path.exists() {
-                return Some(steam_path);
+            for env_name in ["STEAM_DIR", "STEAM_PATH"] {
+                if let Ok(steam_path) = std::env::var(env_name) {
+                    if let Some(path) = Self::steam_root_from_candidate(&steam_path) {
+                        return Some(path);
+                    }
+                }
+            }
+
+            let home = dirs::home_dir()?;
+            let common_paths = [
+                home.join(".steam").join("steam"),
+                home.join(".local").join("share").join("Steam"),
+                home.join(".var")
+                    .join("app")
+                    .join("com.valvesoftware.Steam")
+                    .join(".local")
+                    .join("share")
+                    .join("Steam"),
+            ];
+
+            for steam_path in common_paths {
+                if Self::is_valid_steam_root(&steam_path) {
+                    return Some(steam_path);
+                }
             }
         }
 
@@ -232,7 +615,7 @@ impl SteamService {
 
         if let Some(key) = Self::find_vdf_key_value(&content, "betakey") {
             let key = key.trim().to_ascii_lowercase();
-            return if key.is_empty() {
+            return if key.is_empty() || key == "public" {
                 Ok(Some("main".to_string()))
             } else {
                 Ok(Some(key))
@@ -259,6 +642,54 @@ impl SteamService {
             manifest_path,
         )
         .await
+    }
+
+    pub async fn winetricks_log_paths_for_app(
+        &self,
+        app_id: &str,
+        game_path: Option<&Path>,
+    ) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+
+        if let Some(game_path) = game_path {
+            if let Some(steamapps_dir) = Self::find_steamapps_dir(game_path) {
+                Self::push_unique_path(
+                    &mut paths,
+                    Self::winetricks_log_path_for_steamapps(&steamapps_dir, app_id),
+                );
+            }
+        }
+
+        if let Some(steam_path) = Self::get_steam_path() {
+            for library_path in self.get_library_folders(&steam_path).await? {
+                Self::push_unique_path(
+                    &mut paths,
+                    Self::winetricks_log_path_for_steamapps(
+                        &library_path.join("steamapps"),
+                        app_id,
+                    ),
+                );
+            }
+        }
+
+        Ok(paths)
+    }
+
+    fn winetricks_log_path_for_steamapps(steamapps_dir: &Path, app_id: &str) -> PathBuf {
+        steamapps_dir
+            .join("compatdata")
+            .join(app_id)
+            .join("pfx")
+            .join("winetricks.log")
+    }
+
+    fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+        if !paths
+            .iter()
+            .any(|existing| Self::path_key(existing) == Self::path_key(&path))
+        {
+            paths.push(path);
+        }
     }
 
     fn build_steam_installation(
@@ -362,6 +793,73 @@ impl SteamService {
             .to_ascii_lowercase()
     }
 
+    fn steam_local_config_path() -> Result<PathBuf> {
+        let steam_path = Self::get_steam_path().ok_or_else(|| {
+            anyhow::anyhow!("Steam installation not found; cannot locate localconfig.vdf")
+        })?;
+        let userdata_dir = steam_path.join("userdata");
+        let account_id = Self::most_recent_steam_account_id(&steam_path)
+            .or_else(|| Self::first_steam_userdata_account_id(&userdata_dir))
+            .ok_or_else(|| anyhow::anyhow!("No Steam userdata account found"))?;
+
+        Ok(userdata_dir
+            .join(account_id)
+            .join("config")
+            .join("localconfig.vdf"))
+    }
+
+    fn most_recent_steam_account_id(steam_path: &Path) -> Option<String> {
+        let login_users =
+            std::fs::read_to_string(steam_path.join("config").join("loginusers.vdf")).ok()?;
+        let mut current_user: Option<String> = None;
+
+        for line in login_users.lines() {
+            let values = Self::extract_quoted_values(line);
+            if values.len() == 1 && values[0].chars().all(|ch| ch.is_ascii_digit()) {
+                current_user = steam_account_id_from_steam_id64(&values[0]);
+            } else if values.len() >= 2
+                && values[0].eq_ignore_ascii_case("MostRecent")
+                && values[1] == "1"
+            {
+                return current_user;
+            }
+        }
+
+        None
+    }
+
+    fn first_steam_userdata_account_id(userdata_dir: &Path) -> Option<String> {
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir(userdata_dir)
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.chars().all(|ch| ch.is_ascii_digit()))
+            })
+            .collect();
+
+        candidates.sort_by(|left, right| {
+            let left_modified = left
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            let right_modified = right
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            right_modified.cmp(&left_modified)
+        });
+
+        candidates
+            .first()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+    }
+
     fn is_valid_steam_root(path: &Path) -> bool {
         #[cfg(target_os = "windows")]
         {
@@ -428,7 +926,11 @@ impl SteamService {
             return None;
         }
 
+        #[cfg(target_os = "windows")]
         let mut path = PathBuf::from(trimmed.replace('/', "\\"));
+        #[cfg(not(target_os = "windows"))]
+        let mut path = PathBuf::from(trimmed);
+
         if path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("steam.exe"))
@@ -450,9 +952,227 @@ impl Default for SteamService {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TextVdfValue {
+    Object(Vec<(String, TextVdfValue)>),
+    String(String),
+}
+
+fn parse_text_vdf(content: &str) -> Result<Vec<(String, TextVdfValue)>> {
+    TextVdfParser::new(content).parse_entries_until(None)
+}
+
+fn write_text_vdf(entries: &[(String, TextVdfValue)]) -> String {
+    let mut output = String::new();
+    write_text_vdf_entries(entries, 0, &mut output);
+    output
+}
+
+fn text_vdf_get_string<'a>(
+    entries: &'a [(String, TextVdfValue)],
+    path: &[&str],
+    key: &str,
+) -> Option<&'a str> {
+    let mut current = entries;
+    for segment in path {
+        let value = current.iter().find_map(|(entry_key, value)| {
+            entry_key.eq_ignore_ascii_case(segment).then_some(value)
+        })?;
+        let TextVdfValue::Object(children) = value else {
+            return None;
+        };
+        current = children;
+    }
+
+    current.iter().find_map(|(entry_key, value)| {
+        if entry_key.eq_ignore_ascii_case(key) {
+            if let TextVdfValue::String(value) = value {
+                return Some(value.as_str());
+            }
+        }
+        None
+    })
+}
+
+fn text_vdf_set_string(
+    entries: &mut Vec<(String, TextVdfValue)>,
+    path: &[&str],
+    key: &str,
+    value: &str,
+) {
+    let parent = ensure_text_vdf_object_path(entries, path);
+    if let Some((_, existing)) = parent
+        .iter_mut()
+        .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
+    {
+        *existing = TextVdfValue::String(value.to_string());
+        return;
+    }
+
+    parent.push((key.to_string(), TextVdfValue::String(value.to_string())));
+}
+
+fn ensure_text_vdf_object_path<'a>(
+    entries: &'a mut Vec<(String, TextVdfValue)>,
+    path: &[&str],
+) -> &'a mut Vec<(String, TextVdfValue)> {
+    if path.is_empty() {
+        return entries;
+    }
+
+    let key = path[0];
+    let index = if let Some(index) = entries
+        .iter()
+        .position(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
+    {
+        if !matches!(entries[index].1, TextVdfValue::Object(_)) {
+            entries[index].1 = TextVdfValue::Object(Vec::new());
+        }
+        index
+    } else {
+        entries.push((key.to_string(), TextVdfValue::Object(Vec::new())));
+        entries.len() - 1
+    };
+
+    let TextVdfValue::Object(children) = &mut entries[index].1 else {
+        unreachable!();
+    };
+    ensure_text_vdf_object_path(children, &path[1..])
+}
+
+fn write_text_vdf_entries(entries: &[(String, TextVdfValue)], indent: usize, output: &mut String) {
+    let prefix = "\t".repeat(indent);
+    for (key, value) in entries {
+        output.push_str(&prefix);
+        output.push('"');
+        output.push_str(&escape_text_vdf_string(key));
+        output.push('"');
+
+        match value {
+            TextVdfValue::String(value) => {
+                output.push_str("\t\t\"");
+                output.push_str(&escape_text_vdf_string(value));
+                output.push_str("\"\n");
+            }
+            TextVdfValue::Object(children) => {
+                output.push('\n');
+                output.push_str(&prefix);
+                output.push_str("{\n");
+                write_text_vdf_entries(children, indent + 1, output);
+                output.push_str(&prefix);
+                output.push_str("}\n");
+            }
+        }
+    }
+}
+
+fn escape_text_vdf_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn steam_account_id_from_steam_id64(steam_id64: &str) -> Option<String> {
+    let id = steam_id64.parse::<u64>().ok()?;
+    let account_id = id.checked_sub(76_561_197_960_265_728)?;
+    Some(account_id.to_string())
+}
+
+struct TextVdfParser<'a> {
+    chars: Vec<char>,
+    cursor: usize,
+    _source: std::marker::PhantomData<&'a str>,
+}
+
+impl<'a> TextVdfParser<'a> {
+    fn new(content: &'a str) -> Self {
+        Self {
+            chars: content.chars().collect(),
+            cursor: 0,
+            _source: std::marker::PhantomData,
+        }
+    }
+
+    fn parse_entries_until(
+        &mut self,
+        terminator: Option<char>,
+    ) -> Result<Vec<(String, TextVdfValue)>> {
+        let mut entries = Vec::new();
+
+        loop {
+            self.skip_whitespace();
+            if self.is_eof() {
+                if terminator.is_some() {
+                    return Err(anyhow::anyhow!("Unexpected end of VDF object"));
+                }
+                return Ok(entries);
+            }
+
+            if let Some(terminator) = terminator {
+                if self.peek() == Some(terminator) {
+                    self.cursor += 1;
+                    return Ok(entries);
+                }
+            }
+
+            let key = self.parse_quoted_string()?;
+            self.skip_whitespace();
+            let value = if self.peek() == Some('{') {
+                self.cursor += 1;
+                TextVdfValue::Object(self.parse_entries_until(Some('}'))?)
+            } else {
+                TextVdfValue::String(self.parse_quoted_string()?)
+            };
+            entries.push((key, value));
+        }
+    }
+
+    fn parse_quoted_string(&mut self) -> Result<String> {
+        self.skip_whitespace();
+        if self.peek() != Some('"') {
+            return Err(anyhow::anyhow!("Expected quoted VDF string"));
+        }
+        self.cursor += 1;
+
+        let mut value = String::new();
+        while let Some(ch) = self.peek() {
+            self.cursor += 1;
+            match ch {
+                '"' => return Ok(value),
+                '\\' => {
+                    if let Some(next) = self.peek() {
+                        self.cursor += 1;
+                        value.push(next);
+                    } else {
+                        value.push('\\');
+                    }
+                }
+                _ => value.push(ch),
+            }
+        }
+
+        Err(anyhow::anyhow!("Unterminated quoted VDF string"))
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.cursor += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.cursor).copied()
+    }
+
+    fn is_eof(&self) -> bool {
+        self.cursor >= self.chars.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SteamService;
+    use super::{
+        parse_text_vdf, text_vdf_get_string, text_vdf_set_string, write_text_vdf,
+        SteamInstallation, SteamService,
+    };
     use anyhow::Result;
     use tempfile::TempDir;
     use tokio::fs;
@@ -512,6 +1232,222 @@ mod tests {
         assert_eq!(
             SteamService::find_vdf_key_value(manifest, "betakey"),
             Some("beta".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_installed_branch_canonicalizes_explicit_public_key_to_main() -> Result<()> {
+        let temp = TempDir::new()?;
+        let steamapps = temp.path().join("steamapps");
+        let game_dir = steamapps.join("common").join("Schedule I");
+        fs::create_dir_all(&game_dir).await?;
+        let manifest_path = steamapps.join("appmanifest_3164500.acf");
+        fs::write(
+            &manifest_path,
+            "\"AppState\"\n{\n  \"UserConfig\"\n  {\n    \"BetaKey\" \"public\"\n  }\n}\n",
+        )
+        .await?;
+        let installation = SteamInstallation {
+            path: game_dir.to_string_lossy().to_string(),
+            executable_path: game_dir
+                .join("Schedule I.exe")
+                .to_string_lossy()
+                .to_string(),
+            app_id: SteamService::get_steam_app_id(),
+            steamapps_dir: Some(steamapps.to_string_lossy().to_string()),
+            manifest_path: Some(manifest_path.to_string_lossy().to_string()),
+        };
+
+        assert_eq!(
+            SteamService::new()
+                .detect_installed_branch_for_installation(&installation)
+                .await?,
+            Some("main".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn text_vdf_set_string_inserts_schedule_launch_options_without_losing_other_apps() {
+        let content = r#"
+"UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "123"
+                    {
+                        "LaunchOptions" "OTHER=1 %command%"
+                    }
+                }
+            }
+        }
+    }
+
+}
+"#;
+
+        let mut entries = parse_text_vdf(content).expect("parse localconfig");
+        text_vdf_set_string(
+            &mut entries,
+            &[
+                "UserLocalConfigStore",
+                "Software",
+                "Valve",
+                "Steam",
+                "apps",
+                "3164500",
+            ],
+            "LaunchOptions",
+            SteamService::required_melonloader_launch_options(),
+        );
+        let rendered = write_text_vdf(&entries);
+        let reparsed = parse_text_vdf(&rendered).expect("parse rendered localconfig");
+
+        assert_eq!(
+            text_vdf_get_string(
+                &reparsed,
+                &[
+                    "UserLocalConfigStore",
+                    "Software",
+                    "Valve",
+                    "Steam",
+                    "apps",
+                    "123"
+                ],
+                "LaunchOptions"
+            ),
+            Some("OTHER=1 %command%")
+        );
+        assert_eq!(
+            text_vdf_get_string(
+                &reparsed,
+                &[
+                    "UserLocalConfigStore",
+                    "Software",
+                    "Valve",
+                    "Steam",
+                    "apps",
+                    "3164500"
+                ],
+                "LaunchOptions"
+            ),
+            Some("WINEDLLOVERRIDES=\"version=n,b\" %command%")
+        );
+    }
+
+    #[test]
+    fn local_config_atomic_write_preserves_a_valid_backup() {
+        let temp = TempDir::new().expect("temp dir");
+        let target = temp.path().join("localconfig.vdf");
+        let original = b"\"Root\" { \"Value\" \"before\" }\n";
+        let updated = b"\"Root\" { \"Value\" \"after\" }\n";
+        std::fs::write(&target, original).expect("seed local config");
+
+        SteamService::write_local_config_atomically(&target, Some(original), updated)
+            .expect("atomic local config update");
+
+        let installed = std::fs::read_to_string(&target).expect("updated local config");
+        parse_text_vdf(&installed).expect("parse updated local config");
+        assert!(installed.contains("after"));
+        let backup = std::fs::read_to_string(temp.path().join("localconfig.vdf.simm-backup"))
+            .expect("local config backup");
+        parse_text_vdf(&backup).expect("parse local config backup");
+        assert!(backup.contains("before"));
+    }
+
+    #[test]
+    fn text_vdf_set_string_repairs_existing_schedule_launch_options() {
+        let mut entries = parse_text_vdf(
+            "\"UserLocalConfigStore\"{\"Software\"{\"Valve\"{\"Steam\"{\"apps\"{\"3164500\"{\"LaunchOptions\" \"old\"}}}}}}",
+        )
+        .expect("parse localconfig");
+
+        text_vdf_set_string(
+            &mut entries,
+            &[
+                "UserLocalConfigStore",
+                "Software",
+                "Valve",
+                "Steam",
+                "apps",
+                "3164500",
+            ],
+            "LaunchOptions",
+            SteamService::required_melonloader_launch_options(),
+        );
+
+        assert_eq!(
+            text_vdf_get_string(
+                &entries,
+                &[
+                    "UserLocalConfigStore",
+                    "Software",
+                    "Valve",
+                    "Steam",
+                    "apps",
+                    "3164500"
+                ],
+                "LaunchOptions"
+            ),
+            Some("WINEDLLOVERRIDES=\"version=n,b\" %command%")
+        );
+    }
+
+    #[test]
+    fn merge_schedule_launch_options_preserves_existing_arguments() {
+        assert_eq!(
+            SteamService::merge_schedule_i_launch_options(Some("PROTON_LOG=1 %command%")),
+            "WINEDLLOVERRIDES=\"version=n,b\" PROTON_LOG=1 %command%"
+        );
+    }
+
+    #[test]
+    fn merge_schedule_launch_options_extends_existing_winedlloverrides() {
+        assert_eq!(
+            SteamService::merge_schedule_i_launch_options(Some(
+                "WINEDLLOVERRIDES=\"winhttp=n,b\" PROTON_LOG=1 %command%"
+            )),
+            "WINEDLLOVERRIDES=\"winhttp=n,b;version=n,b\" PROTON_LOG=1 %command%"
+        );
+    }
+
+    #[test]
+    fn merge_schedule_launch_options_keeps_configured_options_unchanged() {
+        let configured = "WINEDLLOVERRIDES=\"winhttp=n,b;version=n,b\" gamemoderun %command%";
+
+        assert_eq!(
+            SteamService::merge_schedule_i_launch_options(Some(configured)),
+            configured
+        );
+        assert!(SteamService::schedule_i_launch_options_configured(
+            configured
+        ));
+    }
+
+    #[test]
+    fn merge_schedule_launch_options_accepts_quoted_command_placeholder() {
+        let configured = "WINEDLLOVERRIDES=\"version=n,b\" gamemoderun \"%command%\"";
+
+        assert_eq!(
+            SteamService::merge_schedule_i_launch_options(Some(configured)),
+            configured
+        );
+        assert!(SteamService::schedule_i_launch_options_configured(
+            configured
+        ));
+    }
+
+    #[test]
+    fn merge_schedule_launch_options_adds_missing_command_placeholder() {
+        assert_eq!(
+            SteamService::merge_schedule_i_launch_options(Some("PROTON_LOG=1")),
+            "WINEDLLOVERRIDES=\"version=n,b\" PROTON_LOG=1 %command%"
         );
     }
 
@@ -653,6 +1589,64 @@ mod tests {
             .detect_installed_branch_for_installation(&installations[0])
             .await?;
         assert_eq!(branch.as_deref(), Some("beta"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires a live Steam installation with Schedule I installed"]
+    async fn live_detects_schedule_i_installation_branch_and_launch_options_status() -> Result<()> {
+        let steam_path = SteamService::get_steam_path()
+            .ok_or_else(|| anyhow::anyhow!("Steam installation not found"))?;
+        assert!(
+            steam_path.exists(),
+            "Steam root should exist: {}",
+            steam_path.display()
+        );
+
+        let service = SteamService::new();
+        let installations = service.detect_steam_installations().await?;
+        assert!(
+            !installations.is_empty(),
+            "Expected at least one live Schedule I Steam installation"
+        );
+
+        let installation = installations
+            .iter()
+            .find(|installation| installation.app_id == SteamService::get_steam_app_id())
+            .ok_or_else(|| anyhow::anyhow!("Schedule I Steam installation was not detected"))?;
+
+        assert!(std::path::Path::new(&installation.path).exists());
+        assert!(std::path::Path::new(&installation.executable_path).exists());
+        assert!(
+            installation
+                .manifest_path
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path).exists()),
+            "Detected installation should include an existing appmanifest path"
+        );
+
+        let branch = service
+            .detect_installed_branch_for_installation(installation)
+            .await?;
+        assert!(
+            branch.as_deref().is_some_and(|value| !value.is_empty()),
+            "Expected branch detection to resolve main or a beta key"
+        );
+
+        let launch_options = service.get_schedule_i_launch_options_status()?;
+        assert_eq!(
+            launch_options.required,
+            SteamService::required_melonloader_launch_options()
+        );
+        assert!(launch_options.repairable);
+        assert!(
+            launch_options
+                .config_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("localconfig.vdf")),
+            "Expected launch option status to identify Steam localconfig.vdf"
+        );
 
         Ok(())
     }

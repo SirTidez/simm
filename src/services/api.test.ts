@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiService } from './api';
 import { invoke } from '@tauri-apps/api/core';
+import type { ModProfileManifest } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -32,6 +33,110 @@ describe('ApiService', () => {
       success: true,
       path: 'C:/Users/Test/SIMM/backups/SIMM-db-backup-manual-20260326-034426.db',
     });
+  });
+
+  it('gets the backend-owned backups directory without reconstructing a platform path', async () => {
+    invokeMock.mockResolvedValueOnce('C:/Users/Test/SIMM/backups');
+
+    await expect(ApiService.getBackupsDirectory()).resolves.toBe('C:/Users/Test/SIMM/backups');
+    expect(invokeMock).toHaveBeenCalledWith('get_backups_directory');
+  });
+
+  it('gets telemetry capability from the backend instead of a build-time flag', async () => {
+    invokeMock.mockResolvedValueOnce({ available: true });
+
+    await expect(ApiService.getTelemetryCapability()).resolves.toEqual({ available: true });
+    expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
+  });
+
+  it('forwards one-time download credentials while preserving the legacy no-credential payload', async () => {
+    const oneTimeCredentials = {
+      username: 'steam-user',
+      password: 'one-time-password',
+      steamGuard: '12345',
+      saveCredentials: false,
+    };
+    invokeMock.mockResolvedValue({ success: true, downloadId: 'env-1' });
+
+    await ApiService.startDownload('env-1', oneTimeCredentials);
+    await ApiService.startDownload('env-2');
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'start_download', {
+      environmentId: 'env-1',
+      oneTimeCredentials,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'start_download', {
+      environmentId: 'env-2',
+    });
+  });
+
+  it('uses the explicit Nexus manual-download security override contract', async () => {
+    invokeMock.mockResolvedValueOnce({ success: true });
+
+    await ApiService.completeNexusManualDownloadSession('nxm://schedule1/mods/1/files/2', 'IL2CPP', true);
+
+    expect(invokeMock).toHaveBeenCalledWith('complete_nexus_manual_download_session', {
+      nxmUrl: 'nxm://schedule1/mods/1/files/2',
+      runtimeOverride: 'IL2CPP',
+      securityOverride: true,
+    });
+  });
+
+  it('uses explicit commands for Schedule I save backup status and creation', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        available: true,
+        sourcePath: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves',
+        backupRoot: 'C:/Users/Test/SIMM/backups/schedule-i-saves',
+        profiles: [],
+        backups: [],
+        message: null,
+      })
+      .mockResolvedValueOnce({
+        steamId: '76561198000000000',
+        slotNumber: 1,
+        backup: {
+          path: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/backups/SaveGame_1',
+          sizeBytes: 64,
+          lastModified: '2026-07-25T12:00:00Z',
+        },
+        prunedBackupCount: 0,
+      });
+
+    await ApiService.getGameSaveBackupStatus();
+    await ApiService.createGameSaveBackup('76561198000000000', 1, 10);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'get_game_save_backup_status');
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'create_game_save_backup', {
+      steamId: '76561198000000000',
+      slotNumber: 1,
+      retentionLimit: 10,
+    });
+  });
+
+  it('coalesces concurrent mod library requests', async () => {
+    let resolveLibrary: (value: { downloaded: [] }) => void = () => {};
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLibrary = resolve;
+    }));
+
+    const firstRequest = ApiService.getModLibrary();
+    const secondRequest = ApiService.getModLibrary();
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('get_mod_library');
+
+    resolveLibrary({ downloaded: [] });
+
+    await expect(Promise.all([firstRequest, secondRequest])).resolves.toEqual([
+      { downloaded: [] },
+      { downloaded: [] },
+    ]);
+
+    invokeMock.mockResolvedValueOnce({ downloaded: [] });
+    await ApiService.getModLibrary();
+
+    expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 
   it('checkAppUpdate forwards the selected channel to the backend', async () => {
@@ -83,12 +188,217 @@ describe('ApiService', () => {
     expect(result).toEqual({ success: true });
   });
 
+  it('profile commands use the environment profile IPC contract', async () => {
+    const manifest: ModProfileManifest = {
+      schemaVersion: 1,
+      kind: 'simm.profile',
+      profile: {
+        name: 'Co-op',
+        game: 'schedule-i',
+        runtime: 'Mono',
+        branch: 'alternate',
+        exportedAt: '2026-05-31T00:00:00Z',
+      },
+      items: [],
+    };
+    const plan = {
+      profile: manifest.profile,
+      targetEnvironmentId: 'env-2',
+      items: [],
+      summary: {
+        total: 0,
+        alreadyInstalled: 0,
+        readyToInstall: 0,
+        needsDownload: 0,
+        manualRequired: 0,
+        runtimeMismatches: 0,
+        unsupported: 0,
+      },
+    };
+
+    invokeMock.mockResolvedValueOnce(manifest);
+    invokeMock.mockResolvedValueOnce(undefined);
+    invokeMock.mockResolvedValueOnce(manifest);
+    invokeMock.mockResolvedValueOnce(plan);
+    invokeMock.mockResolvedValueOnce({ plan, installed: 0, skipped: 0, unresolved: 0, messages: [] });
+
+    await ApiService.exportEnvironmentProfile('env-1');
+    await ApiService.saveModProfileFile(manifest, 'C:\\Profiles\\coop.json');
+    await ApiService.readModProfileFile('C:\\Profiles\\coop.json');
+    await ApiService.previewModProfileImport(manifest, 'env-2');
+    await ApiService.applyModProfileImport({ manifest, targetEnvironmentId: 'env-2' });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'export_environment_profile', { environmentId: 'env-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'save_mod_profile_file', {
+      manifest,
+      destination: 'C:\\Profiles\\coop.json',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'read_mod_profile_file', {
+      source: 'C:\\Profiles\\coop.json',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'preview_mod_profile_import', {
+      manifest,
+      targetEnvironmentId: 'env-2',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, 'apply_mod_profile_import', {
+      request: { manifest, targetEnvironmentId: 'env-2' },
+    });
+  });
+
   it('getProgress throws when download is missing', async () => {
     invokeMock.mockResolvedValueOnce(null);
 
     await expect(ApiService.getProgress('download-1')).rejects.toThrow('Download not found');
     expect(invokeMock).toHaveBeenCalledWith('get_download_progress', {
       downloadId: 'download-1',
+    });
+  });
+
+  it('uses a Steam account and game slot for explicit Schedule I save management', async () => {
+    const restorePreview = {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      sourceLabel: 'Game backup',
+      sourcePath: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/backups/SaveGame_2',
+      restoreToken: 'preview-token-for-selected-snapshot',
+      current: {
+        slotNumber: 2, organizationName: 'Current', cashBalance: 100, onlineBalance: 200, netWorth: 300,
+        rank: 2, tier: 1, totalXp: 250, createdAt: null, lastPlayedAt: null, lastSaveVersion: null,
+        path: 'C:/Saves/SaveGame_2', exists: true, sizeBytes: 64, lastModified: null, backup: null, backups: [],
+      },
+      restored: {
+        slotNumber: 2, organizationName: 'Backup', cashBalance: 80, onlineBalance: 180, netWorth: 260,
+        rank: 2, tier: 1, totalXp: 220, createdAt: null, lastPlayedAt: null, lastSaveVersion: null,
+        path: 'C:/Saves/backups/SaveGame_2', exists: true, sizeBytes: 64, lastModified: null, backup: null, backups: [],
+      },
+    };
+    invokeMock
+      .mockResolvedValueOnce({
+        available: true,
+        sourcePath: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves',
+        accounts: [],
+        message: null,
+      })
+      .mockResolvedValueOnce({
+        steamId: '76561198000000000',
+        slotNumber: 2,
+          backup: {
+            path: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/backups/SaveGame_2',
+            sizeBytes: 64,
+            lastModified: '2026-07-25T12:00:00Z',
+          },
+          prunedBackupCount: 0,
+      })
+      .mockResolvedValueOnce({
+        steamId: '76561198000000000',
+        slotNumber: 2,
+        path: 'C:/Backups/schedule-i-save-2.zip',
+        sizeBytes: 512,
+      })
+      .mockResolvedValueOnce({
+        ...restorePreview,
+      })
+      .mockResolvedValueOnce({
+        steamId: '76561198000000000',
+        slotNumber: 2,
+        path: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/SaveGame_2',
+        sizeBytes: 64,
+      })
+      .mockResolvedValueOnce({
+        ...restorePreview,
+        sourceLabel: 'ZIP: schedule-i-save-2.zip',
+        sourcePath: 'C:/Backups/schedule-i-save-2.zip',
+        restoreToken: null,
+      })
+      .mockResolvedValueOnce({
+        steamId: '76561198000000000',
+        slotNumber: 2,
+        path: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/SaveGame_2',
+        sizeBytes: 64,
+      });
+
+    await ApiService.getGameSaveBackupStatus();
+    await ApiService.createGameSaveBackup('76561198000000000', 2, 5);
+    await ApiService.exportGameSaveBackup('76561198000000000', 2, 'C:/Backups/schedule-i-save-2.zip');
+    await ApiService.previewGameSaveBackupRestore('76561198000000000', 2, restorePreview.sourcePath);
+    await ApiService.restoreGameSaveBackup('76561198000000000', 2, restorePreview.restoreToken);
+    await ApiService.previewGameSaveZipRestore('76561198000000000', 2, 'C:/Backups/schedule-i-save-2.zip');
+    await ApiService.restoreGameSaveFromZip('76561198000000000', 2, 'C:/Backups/schedule-i-save-2.zip');
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'get_game_save_backup_status');
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'create_game_save_backup', {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      retentionLimit: 5,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'export_game_save_backup', {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      destinationPath: 'C:/Backups/schedule-i-save-2.zip',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'preview_game_save_backup_restore', {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      backupPath: restorePreview.sourcePath,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, 'restore_game_save_backup', {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      restoreToken: restorePreview.restoreToken,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(6, 'preview_game_save_zip_restore', {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      zipPath: 'C:/Backups/schedule-i-save-2.zip',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(7, 'restore_game_save_from_zip', {
+      steamId: '76561198000000000',
+      slotNumber: 2,
+      zipPath: 'C:/Backups/schedule-i-save-2.zip',
+    });
+  });
+
+  it('uses the reviewed telemetry upload IPC contract', async () => {
+    const preview = {
+      uploadId: '00000000-0000-4000-8000-000000000001',
+      payload: '{"schemaVersion":1,"sessions":[]}',
+      sessionCount: 0,
+      eventCount: 0,
+      exclusions: ['Active sessions are excluded.'],
+    };
+    const receipt = {
+      id: 'queue-1', uploadId: '00000000-0000-4000-8000-000000000001',
+      state: 'failed' as const, attempts: 1, lastErrorCode: 'failed_before_acceptance',
+      createdAt: '2026-07-14T00:00:00Z', updatedAt: '2026-07-14T00:00:00Z',
+    };
+    invokeMock.mockResolvedValueOnce(preview).mockResolvedValueOnce(receipt).mockResolvedValueOnce([receipt]).mockResolvedValueOnce(receipt);
+
+    await ApiService.previewTelemetryUpload('env-1');
+    await ApiService.queueTelemetryUpload(preview.payload);
+    await ApiService.listTelemetryUploads();
+    await ApiService.retryTelemetryUpload('queue-1');
+
+    expect(receipt).not.toHaveProperty('payload');
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'preview_telemetry_upload', { environmentId: 'env-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'queue_telemetry_upload', { previewPayload: preview.payload });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'list_telemetry_uploads');
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'retry_telemetry_upload', { id: 'queue-1' });
+  });
+
+  it('uses the telemetry mod-rule IPC contract with an explicit scope', async () => {
+    invokeMock.mockResolvedValueOnce([]).mockResolvedValueOnce(undefined);
+
+    await ApiService.listTelemetryModPolicies('env-1');
+    await ApiService.saveTelemetryModRule({
+      modKey: 'mod-development',
+      environmentId: 'env-1',
+      mode: 'local_only',
+    });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'list_telemetry_mod_policies', { environmentId: 'env-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'save_telemetry_mod_rule', {
+      update: { modKey: 'mod-development', environmentId: 'env-1', mode: 'local_only' },
     });
   });
 
@@ -159,6 +469,23 @@ describe('ApiService', () => {
         uploaded_time: '2025-04-01T12:00:00Z',
       }),
     );
+  });
+
+  it('gets published Nexus dependencies for a selected file', async () => {
+    const dependencies = {
+      sourceVersionId: 'version-1',
+      requirements: [],
+    };
+    invokeMock.mockResolvedValueOnce(dependencies);
+
+    await expect(
+      ApiService.getNexusModFileDependencies('schedule1', 42, 420),
+    ).resolves.toEqual(dependencies);
+    expect(invokeMock).toHaveBeenCalledWith('get_nexus_mod_file_dependencies', {
+      gameId: 'schedule1',
+      modId: 42,
+      fileId: 420,
+    });
   });
 
   it('uploadMod forwards detectedRuntime metadata', async () => {
@@ -329,9 +656,11 @@ describe('ApiService', () => {
 
   it.each([
     ['getReleaseApiHealth', () => ApiService.getReleaseApiHealth(), 'get_release_api_health', undefined],
+    ['getLinuxReadinessStatus', () => ApiService.getLinuxReadinessStatus(), 'get_linux_readiness_status', undefined],
+    ['repairLinuxDesktopIntegration', () => ApiService.repairLinuxDesktopIntegration(), 'repair_linux_desktop_integration', undefined],
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
-    ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
+    ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll', securityOverride: false }],
     ['refreshThunderstorePackageCache', () => ApiService.refreshThunderstorePackageCache('schedule-i'), 'refresh_thunderstore_package_cache', { gameId: 'schedule-i' }],
     ['openPath', () => ApiService.openPath('C:/test/file.cfg'), 'open_path', { path: 'C:/test/file.cfg' }],
     ['openExternalUrl', () => ApiService.openExternalUrl('https://example.com/mod'), 'open_external_url', { url: 'https://example.com/mod' }],

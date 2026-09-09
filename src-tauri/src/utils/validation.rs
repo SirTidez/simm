@@ -113,7 +113,11 @@ mod tests {
             Some(base_path.to_string_lossy().as_ref()),
         )?;
         let allowed_path = PathBuf::from(allowed);
-        assert!(allowed_path.starts_with(base_path));
+        let normalized_base = PathBuf::from(validate_directory_path(
+            base_path.to_string_lossy().as_ref(),
+            None,
+        )?);
+        assert!(allowed_path.starts_with(normalized_base));
 
         let other_temp = tempdir()?;
         let denied = validate_directory_path(

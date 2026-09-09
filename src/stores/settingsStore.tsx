@@ -44,6 +44,8 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
   const [error, setError] = useState<string | null>(null);
   const customThemesRef = useRef<CustomThemeDefinition[]>([]);
   const themesDirectoryRef = useRef<string | null>(null);
+  const refreshSettingsInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshDepotDownloaderInFlightRef = useRef<Promise<void> | null>(null);
 
   const applyTheme = useCallback((
     theme: Settings['theme'] | undefined,
@@ -61,7 +63,11 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
   }, [themesDirectory]);
 
   const refreshSettings = useCallback(async () => {
-    try {
+    if (refreshSettingsInFlightRef.current) {
+      return refreshSettingsInFlightRef.current;
+    }
+
+    const request = (async () => {
       setLoading(true);
       setError(null);
       const [settingsResult, themesResult, directoryResult] = await Promise.allSettled([
@@ -104,12 +110,20 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       if (resolvedTheme !== sanitizedSettings.theme) {
         setSettings({ ...sanitizedSettings, theme: resolvedTheme });
       }
-    } catch (err) {
+    })();
+
+    const operation = request.catch((err) => {
       logger.error('Failed to refresh application settings', err);
       setError(err instanceof Error ? err.message : 'Failed to load settings');
-    } finally {
+    }).finally(() => {
+      if (refreshSettingsInFlightRef.current === operation) {
+        refreshSettingsInFlightRef.current = null;
+      }
       setLoading(false);
-    }
+    });
+
+    refreshSettingsInFlightRef.current = operation;
+    return operation;
   }, [applyTheme]);
 
   const refreshThemes = useCallback(async () => {
@@ -154,15 +168,28 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       setError(err instanceof Error ? err.message : 'Failed to load custom themes');
       throw err;
     }
-  }, [applyTheme, settings, themesDirectory, customThemes]);
+  }, [applyTheme, settings]);
 
   const refreshDepotDownloader = useCallback(async () => {
-    try {
+    if (refreshDepotDownloaderInFlightRef.current) {
+      return refreshDepotDownloaderInFlightRef.current;
+    }
+
+    const request = (async () => {
       const info = await ApiService.detectDepotDownloader();
       setDepotDownloader(info);
-    } catch (err) {
+    })();
+
+    const operation = request.catch((err) => {
       logger.warn('Failed to detect DepotDownloader', err);
-    }
+    }).finally(() => {
+      if (refreshDepotDownloaderInFlightRef.current === operation) {
+        refreshDepotDownloaderInFlightRef.current = null;
+      }
+    });
+
+    refreshDepotDownloaderInFlightRef.current = operation;
+    return operation;
   }, []);
 
   const updateSettings = useCallback(async (updates: Partial<Settings>) => {

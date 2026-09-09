@@ -18,7 +18,7 @@ function shouldForwardToBackend(level: string): boolean {
 }
 
 /**
- * Safely stringify an object, handling circular references
+ * Safely stringify an object only when it must become log message text.
  */
 function safeStringify(obj: any): string {
   try {
@@ -41,7 +41,9 @@ function sendToBackend(level: string, message: string, data?: any) {
   invoke('log_frontend_message', {
     level,
     message,
-    data: data ? safeStringify(data) : null,
+    // Keep structured values structured across the IPC boundary. The backend
+    // recursively redacts sensitive keys before serializing them for disk.
+    data: data ?? null,
   }).catch((error) => {
     if (backendForwardFailureLogged) {
       return;

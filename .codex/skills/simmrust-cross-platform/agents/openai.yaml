@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM Cross Platform"
+  short_description: "Keep Windows and Linux SIMM work in sync"
+  default_prompt: "Use $simmrust-cross-platform to plan and validate Windows/Linux parity for this SIMM change."

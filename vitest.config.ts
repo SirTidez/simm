@@ -18,6 +18,7 @@ export default defineConfig({
       'e2e/**',
       'node_modules/**',
       '**/node_modules/**',
+      '.worktrees/**',
       '.browser-pilot/**',
       '.claude/**',
       'dist/**',

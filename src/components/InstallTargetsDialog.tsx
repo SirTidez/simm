@@ -28,18 +28,9 @@ interface Props {
 }
 
 export function getNormalizedRuntime(environment: Pick<Environment, 'branch' | 'runtime'>): 'IL2CPP' | 'Mono' {
-  const normalizedBranch = (environment.branch || '').toLowerCase().replace(/[\s_]+/g, '-');
-  if (
-    normalizedBranch === 'alternate' ||
-    normalizedBranch === 'alternate-beta' ||
-    normalizedBranch === 'alternatebeta'
-  ) {
-    return 'Mono';
-  }
-  if (normalizedBranch === 'main' || normalizedBranch === 'beta') {
-    return 'IL2CPP';
-  }
-  return environment.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+  // Runtime is a backend-owned typed value. Branch names are user-selected
+  // labels and must never override a detected custom-branch runtime.
+  return String(environment.runtime).toLowerCase() === 'mono' ? 'Mono' : 'IL2CPP';
 }
 
 export function InstallTargetsDialog({
@@ -78,7 +69,7 @@ export function InstallTargetsDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => {
-      if (!open) {
+      if (!open && !installing) {
         onClose();
       }
     }}>
@@ -89,7 +80,7 @@ export function InstallTargetsDialog({
       >
         <DialogHeader className="modal-header">
           <DialogTitle>{title}</DialogTitle>
-          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close install target dialog">×</SimmButton>
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} disabled={installing} aria-label="Close install target dialog">×</SimmButton>
         </DialogHeader>
         <div className="workspace-install-dialog__body">
           <div className="workspace-install-dialog__summary">
@@ -117,16 +108,16 @@ export function InstallTargetsDialog({
           )}
 
           <div className="workspace-install-dialog__quick-actions">
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible} disabled={mode === 'installed'}>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible} disabled={mode === 'installed' || installing}>
               All compatible
             </SimmButton>
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={mode === 'installed' || byRuntime.IL2CPP.length === 0}>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={mode === 'installed' || installing || byRuntime.IL2CPP.length === 0}>
               All IL2CPP
             </SimmButton>
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={mode === 'installed' || byRuntime.Mono.length === 0}>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={mode === 'installed' || installing || byRuntime.Mono.length === 0}>
               All Mono
             </SimmButton>
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onClear} disabled={mode === 'installed'}>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onClear} disabled={mode === 'installed' || installing}>
               Clear
             </SimmButton>
           </div>
@@ -143,7 +134,7 @@ export function InstallTargetsDialog({
               >
                 <Checkbox
                   checked={selectedEnvironmentIds.has(environment.id)}
-                  disabled={isLocked}
+                  disabled={isLocked || installing}
                   onCheckedChange={() => onToggleEnvironment(environment.id)}
                 />
                 <span className="workspace-install-dialog__row-main">
@@ -164,8 +155,8 @@ export function InstallTargetsDialog({
           )}
         </div>
         <DialogFooter className="modal-actions">
-          <SimmButton type="button" className="btn btn-secondary" onClick={onClose}>
-            Cancel
+          <SimmButton type="button" className="btn btn-secondary" onClick={onClose} disabled={installing}>
+            {installing ? 'Installation in progress' : 'Cancel'}
           </SimmButton>
           <SimmButton
             type="button"

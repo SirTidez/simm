@@ -1,3 +1,4 @@
+use std::env;
 use std::path::Path;
 use std::process::Command;
 
@@ -23,41 +24,33 @@ fn main() {
     };
 
     if should_build {
-        let npm_build_result = if cfg!(target_os = "windows") {
-            Command::new("cmd")
-                .args(["/C", "npm run build"])
-                .current_dir(root_dir)
-                .status()
-        } else {
-            Command::new("sh")
-                .args(["-c", "npm run build"])
-                .current_dir(root_dir)
-                .status()
-        };
+        let package_manager =
+            env::var("SIMM_FRONTEND_PACKAGE_MANAGER").unwrap_or_else(|_| "bun".to_string());
+        let frontend_build_result = Command::new(&package_manager)
+            .args(["run", "build"])
+            .current_dir(root_dir)
+            .status();
 
-        match npm_build_result {
+        match frontend_build_result {
             Ok(status) if status.success() => {}
             Ok(status) => {
-                eprintln!(
-                    "cargo:warning=Frontend build failed with exit code: {:?}",
-                    status.code()
+                panic!(
+                    "frontend build failed with exit code {:?}. Run '{} run build' from the repo root for details.",
+                    status.code(),
+                    package_manager
                 );
-                eprintln!("cargo:warning=Continuing with Rust build anyway. Make sure to run 'npm run build' manually if needed.");
             }
             Err(e) => {
-                eprintln!(
-                    "cargo:warning=Failed to run npm build: {}. Continuing anyway...",
-                    e
-                );
-                eprintln!(
-                    "cargo:warning=Make sure npm is installed and 'npm run build' works manually."
+                panic!(
+                    "failed to run frontend build command '{} run build': {}",
+                    package_manager, e
                 );
             }
         }
     }
 
-    // Don't require elevation for `tauri dev`.
-    // We use a separate manifest for release builds if/when elevation is desired.
+    // Keep both dev and release app launches unelevated. The installer can still
+    // request elevation for machine-wide install or prerequisites when needed.
     let app_manifest = if cfg!(debug_assertions) {
         include_str!("windows/app.dev.manifest")
     } else {

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { App } from './App';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { App, formatDashboardTime, formatDashboardTimeDetail } from './App';
 import type { ReactNode } from 'react';
 
 const invokeMock = vi.hoisted(() => vi.fn());
-const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
+const listenMock = vi.hoisted(() => vi.fn(async (_eventName?: string, _handler?: unknown) => () => {}));
 const deepLinkMocks = vi.hoisted(() => ({
   getCurrent: vi.fn(),
   onOpenUrl: vi.fn(),
@@ -74,6 +74,7 @@ vi.mock('@tauri-apps/plugin-process', () => ({
 const windowMocks = vi.hoisted(() => ({
   isMaximized: vi.fn(),
   onResized: vi.fn(),
+  setDecorations: vi.fn(),
   minimize: vi.fn(),
   toggleMaximize: vi.fn(),
   close: vi.fn(),
@@ -315,6 +316,13 @@ vi.mock('./DownloadsPanel', () => ({
 }));
 
 describe('App', () => {
+  it('formats home dashboard check timestamps without seconds or a four-digit year', () => {
+    const localTimestampSeconds = Math.floor(new Date(2026, 6, 13, 17, 59, 29).getTime() / 1000);
+
+    expect(formatDashboardTime(localTimestampSeconds)).toBe('07/13/26, 5:59 PM');
+    expect(formatDashboardTimeDetail(localTimestampSeconds)).toBe('7/13/2026, 5:59:29 PM');
+  });
+
   beforeEach(() => {
     modLibraryOverlayMocks.lastNavigationState = null;
     modLibraryOverlayMocks.suspendOnRender = false;
@@ -322,6 +330,8 @@ describe('App', () => {
     modLibraryOverlayMocks.resolveSuspend = null;
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
+    listenMock.mockReset();
+    listenMock.mockImplementation(async () => () => {});
     deepLinkMocks.getCurrent.mockReset();
     deepLinkMocks.onOpenUrl.mockReset();
     deepLinkMocks.getCurrent.mockResolvedValue(null);
@@ -362,6 +372,7 @@ describe('App', () => {
 
     windowMocks.isMaximized.mockReset();
     windowMocks.onResized.mockReset();
+    windowMocks.setDecorations.mockReset();
     windowMocks.minimize.mockReset();
     windowMocks.toggleMaximize.mockReset();
     windowMocks.close.mockReset();
@@ -369,6 +380,7 @@ describe('App', () => {
 
     windowMocks.isMaximized.mockResolvedValue(false);
     windowMocks.onResized.mockResolvedValue(() => {});
+    windowMocks.setDecorations.mockResolvedValue(undefined);
     windowMocks.minimize.mockResolvedValue(undefined);
     windowMocks.toggleMaximize.mockResolvedValue(undefined);
     windowMocks.close.mockResolvedValue(undefined);
@@ -386,6 +398,7 @@ describe('App', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -395,7 +408,54 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.queryByText('Detecting game and MelonLoader versions')).toBeNull();
     });
+    await waitFor(() => expect(windowMocks.setDecorations).toHaveBeenCalledWith(false));
     expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
+  });
+
+  it('hides telemetry navigation while the backend capability is unavailable', async () => {
+    invokeMock.mockImplementation((command: string) => (
+      command === 'get_telemetry_capability'
+        ? Promise.resolve({ available: false })
+        : Promise.resolve(false)
+    ));
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    expect(screen.queryByRole('button', { name: 'Telemetry' })).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
+  });
+
+  it('warns when a Steam runtime switch has no downloaded counterpart', async () => {
+    let runtimeSwitchHandler: ((event: { payload: unknown }) => void) | null = null;
+    listenMock.mockImplementation(async (eventName?: string, handler?: unknown) => {
+      if (eventName === 'steam_runtime_switched') {
+        runtimeSwitchHandler = handler as (event: { payload: unknown }) => void;
+      }
+      return () => {};
+    });
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    await waitFor(() => expect(runtimeSwitchHandler).not.toBeNull());
+    const emitRuntimeSwitch = runtimeSwitchHandler as unknown as (event: { payload: unknown }) => void;
+    emitRuntimeSwitch({
+      payload: {
+        environmentId: 'steam-main',
+        environmentName: 'Steam Installation',
+        previousBranch: 'closed-beta',
+        branch: 'main',
+        previousRuntime: 'IL2CPP',
+        runtime: 'Mono',
+        disabledItems: 2,
+        installedItems: 1,
+        missingItems: ['Mono Missing Mod'],
+        errors: [],
+      },
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Steam Runtime Changed' })).toBeTruthy();
+    expect(screen.getByText(/Mono Missing Mod/)).toBeTruthy();
+    expect(screen.getByText(/Those items remain disabled/)).toBeTruthy();
   });
 
   it('shows a release and changelog feed on the Home dashboard', async () => {
@@ -509,6 +569,171 @@ describe('App', () => {
 
     expect(await screen.findByText('Focused Environment: env-beta')).toBeTruthy();
     expect(screen.getByText('Focus Request: 2')).toBeTruthy();
+  });
+
+  it('launches the selected non-Steam environment through Steam from the shell action', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('launch_game', {
+        environmentId: 'env-main',
+        launchMethod: 'steam',
+      });
+    });
+  });
+
+  it('launches the selected Steam-managed environment through Steam from the shell action', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'steam-main',
+          name: 'Steam Installation',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Steam/Schedule I',
+          runtime: 'Mono',
+          status: 'completed',
+          environmentType: 'Steam',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('launch_game', {
+        environmentId: 'steam-main',
+        launchMethod: 'steam',
+      });
+    });
+  });
+
+  it('warns when MelonLoader launch verification does not confirm a fresh log', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        return Promise.resolve({ success: true, launchStartedAt: 12345 });
+      }
+      if (command === 'verify_melonloader_launch') {
+        return Promise.resolve({
+          status: 'staleLog',
+          confirmed: false,
+          logPath: 'C:/Games/Main/MelonLoader/Latest.log',
+          message: 'MelonLoader log exists, but it has not been refreshed since this launch request.',
+        });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('verify_melonloader_launch', {
+        environmentId: 'env-main',
+        launchStartedAt: 12345,
+        timeoutMs: 20000,
+      });
+    });
+    await waitFor(() => {
+      expect(dialogMocks.message).toHaveBeenCalledWith(
+        expect.stringContaining('MelonLoader log exists'),
+        {
+          title: 'MelonLoader Launch Not Confirmed: Main',
+          kind: 'warning',
+        },
+      );
+    });
+  });
+
+  it('offers to restart Steam from the shell action when a shortcut reload is required', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        const lastCall = invokeMock.mock.calls.filter(([name]) => name === 'launch_game').length;
+        if (lastCall === 1) {
+          return Promise.reject("Steam needs to reload SIMM's shortcut for C:/Games/Schedule I Custom before it can launch through Steam.");
+        }
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Il2Cpp',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(dialogMocks.confirm).toHaveBeenCalledWith(
+        expect.stringContaining("Steam needs to reload SIMM's shortcut"),
+        {
+          title: 'Restart Steam: Il2Cpp',
+          kind: 'warning',
+        },
+      );
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('launch_game', {
+        environmentId: 'env-main',
+        launchMethod: 'steam_restart',
+      });
+    });
   });
 
   it('orders shell environments the same way as the environments page', async () => {
@@ -1004,6 +1229,165 @@ describe('App', () => {
     });
   });
 
+  it('does not start automatic app-update checks when the shared update toggle is disabled', async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        appUpdate: { channel: 'stable' },
+        autoCheckUpdates: false,
+        setupGuideCompleted: true,
+      },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(0);
+  });
+
+  it('uses the configured app-update interval instead of a fixed six-hour timer', async () => {
+    vi.useFakeTimers();
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        appUpdate: { channel: 'stable' },
+        autoCheckUpdates: true,
+        updateCheckInterval: 5,
+        setupGuideCompleted: true,
+      },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'check_app_update') {
+        return Promise.resolve({
+          currentVersion: '0.8.0',
+          version: '0.8.0',
+          versionNormalized: '0.8.0',
+          updateAvailable: false,
+          channel: 'stable',
+          manifestUrl: 'https://example.test/stable.json',
+          checkedAt: '2026-08-20T00:00:00Z',
+        });
+      }
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    });
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(2);
+  });
+
+  it('drops a deferred old-channel result immediately when the selected channel changes', async () => {
+    let activeSettings: {
+      appUpdate: { channel: 'stable' | 'beta' };
+      setupGuideCompleted: boolean;
+    } = {
+      appUpdate: { channel: 'beta' },
+      setupGuideCompleted: true,
+    };
+    settingsStoreMocks.useSettingsStore.mockImplementation(() => ({
+      settings: activeSettings,
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    let resolveBeta: ((value: unknown) => void) | undefined;
+    let resolveStable: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command: string, args?: { channel?: string }) => {
+      if (command === 'check_app_update') {
+        return new Promise((resolve) => {
+          if (args?.channel === 'beta') {
+            resolveBeta = resolve;
+          } else {
+            resolveStable = resolve;
+          }
+        });
+      }
+      return Promise.resolve(false);
+    });
+
+    const view = render(<App />);
+    await waitFor(() => expect(resolveBeta).toBeTypeOf('function'));
+
+    activeSettings = {
+      appUpdate: { channel: 'stable' },
+      setupGuideCompleted: true,
+    };
+    view.rerender(<App />);
+    await waitFor(() => expect(resolveStable).toBeTypeOf('function'));
+
+    await act(async () => {
+      resolveBeta?.({
+        currentVersion: '0.8.0',
+        version: '0.8.1-beta.1',
+        versionNormalized: '0.8.1',
+        updateAvailable: true,
+        channel: 'beta',
+        manifestUrl: 'https://example.test/beta.json',
+        checkedAt: '2026-08-20T00:00:00Z',
+      });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('button', { name: 'Install App Update' })).toBeNull();
+
+    await act(async () => {
+      resolveStable?.({
+        currentVersion: '0.8.0',
+        version: '0.8.1',
+        versionNormalized: '0.8.1',
+        updateAvailable: true,
+        channel: 'stable',
+        manifestUrl: 'https://example.test/stable.json',
+        checkedAt: '2026-08-20T00:00:00Z',
+      });
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole('button', { name: 'Install App Update' })).toBeTruthy();
+  });
+
+  it('does not let a beta skip hide the stable release with the same version core', async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        appUpdate: {
+          channel: 'stable',
+          byChannel: {
+            beta: { skippedVersionNormalized: '0.8.1-beta.1' },
+          },
+        },
+        setupGuideCompleted: true,
+      },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'check_app_update') {
+        return Promise.resolve({
+          currentVersion: '0.8.0',
+          version: '0.8.1',
+          versionNormalized: '0.8.1',
+          updateAvailable: true,
+          channel: 'stable',
+          manifestUrl: 'https://example.test/stable.json',
+          checkedAt: '2026-08-20T00:00:00Z',
+        });
+      }
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole('button', { name: 'Install App Update' })).toBeTruthy();
+  });
+
   it('does not immediately rerun app update checks when the settings updater identity changes', async () => {
     let updateSettingsVersion = 0;
     const firstUpdateSettings = vi.fn().mockImplementation(async () => {
@@ -1107,6 +1491,73 @@ describe('App', () => {
         ([command]) => command === 'complete_nexus_manual_download_session',
       ),
     ).toHaveLength(2);
+  });
+
+  it('handles Nexus manual download URLs delivered through single-instance args', async () => {
+    const nxmUrl = 'nxm://schedule1/mods/123/files/456?key=abc&expires=999&user_id=1';
+    type SingleInstanceHandler = (event: { payload?: { args?: string[] } }) => void;
+    let singleInstanceHandler: SingleInstanceHandler | null = null;
+    listenMock.mockImplementation(async (eventName?: string, handler?: unknown) => {
+      if (eventName === 'single-instance-args') {
+        singleInstanceHandler = handler as SingleInstanceHandler;
+      }
+      return () => {};
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'complete_nexus_manual_download_session') {
+        return Promise.resolve({
+          success: true,
+          requestedKind: 'library',
+          storageId: 'nexus-mod-1-0-0',
+        });
+      }
+
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(singleInstanceHandler).not.toBeNull();
+    });
+
+    const handler = singleInstanceHandler as SingleInstanceHandler | null;
+    if (!handler) {
+      throw new Error('single-instance listener was not registered');
+    }
+
+    handler({
+      payload: {
+        args: ['/usr/bin/simm', nxmUrl],
+      },
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('complete_nexus_manual_download_session', {
+        nxmUrl,
+        runtimeOverride: null,
+        securityOverride: false,
+      });
+    });
+  });
+
+  it('disposes a deep-link listener that finishes registering after unmount', async () => {
+    let resolveDeepLinkListener: ((unlisten: () => void) => void) | null = null;
+    const lateUnlisten = vi.fn();
+    deepLinkMocks.onOpenUrl.mockReturnValueOnce(new Promise((resolve) => {
+      resolveDeepLinkListener = resolve;
+    }));
+
+    const view = render(<App />);
+    await waitFor(() => expect(deepLinkMocks.onOpenUrl).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    await act(async () => {
+      const resolve = resolveDeepLinkListener as ((unlisten: () => void) => void) | null;
+      resolve?.(lateUnlisten);
+    });
+
+    expect(lateUnlisten).toHaveBeenCalledTimes(1);
   });
 
   it('consumes a replayed successful Nexus OAuth callback when no pending flow remains', async () => {

@@ -1,11 +1,13 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
+use crate::services::settings::RuntimeSettingsState;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use crate::utils::validation::validate_directory_path;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 use tokio::fs;
@@ -34,6 +36,26 @@ fn command_error(message: impl Into<String>) -> String {
     let message = message.into();
     error_with_location(&message);
     message
+}
+
+fn now_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn resolve_launch_method<'a>(
+    requested_method: Option<&'a str>,
+    is_steam_environment: bool,
+) -> &'a str {
+    match requested_method {
+        Some(method) => method,
+        None if cfg!(target_os = "linux") => "steam",
+        None if is_steam_environment => "steam",
+        None => "direct",
+    }
 }
 
 #[tauri::command]
@@ -91,12 +113,16 @@ pub async fn reveal_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn launch_game(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     launch_method: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service
+    let env_service = EnvironmentService::new(db.inner().clone())
+        .map_err(|e| e.to_string())?
+        .with_runtime_settings(runtime_settings.snapshot().await);
+    let mut env = env_service
         .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -124,37 +150,63 @@ pub async fn launch_game(
         }
     }
 
+    if let Some(runtime_switch) = env_service
+        .reconcile_steam_env_branch_runtime_from_disk(&mut env)
+        .await
+        .map_err(|error| {
+            command_error(format!(
+                "Failed to refresh the Steam branch before launch: {}",
+                error
+            ))
+        })?
+    {
+        let switch_errors = runtime_switch.errors.clone();
+        let _ = crate::events::emit_runtime_switch(&app, runtime_switch);
+        let _ = crate::events::emit_mods_changed(&app, environment_id.clone());
+        let _ = crate::events::emit_plugins_changed(&app, environment_id.clone());
+        let _ = crate::events::emit_userlibs_changed(&app, environment_id.clone());
+        if !switch_errors.is_empty() {
+            return Err(command_error(format!(
+                "SIMM detected a Steam runtime switch but could not complete it safely: {}",
+                switch_errors.join(" ")
+            )));
+        }
+    }
+
     let fs_service = get_fs_service().await?;
 
-    // Determine launch method based on environment type or provided method
-    let method_str = if let Some(ref m) = launch_method {
-        m.as_str()
-    } else if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
-        "steam" // Steam environments should launch via Steam
-    } else {
-        "direct" // DepotDownloader environments should launch directly
-    };
-
     let is_steam_environment = env.environment_type == Some(crate::types::EnvironmentType::Steam);
+    let method_str = resolve_launch_method(launch_method.as_deref(), is_steam_environment);
+    if cfg!(target_os = "linux") && method_str == "direct" {
+        return Err(command_warn(
+            "Direct local launch is not supported on Linux because Schedule I runs through Steam Proton. Use Steam launch instead.",
+        ));
+    }
     let game_dir_for_launch = if method_str == "steam" && is_steam_environment {
         None
     } else {
         Some(env.output_dir.as_str())
     };
 
+    let launch_started_at = now_epoch_millis();
     let result = fs_service
         .launch_game(game_dir_for_launch, Some(method_str))
         .await
         .map_err(|e| {
+            let launch_error = e.to_string();
             command_error(format!(
                 "Launch command failed for environment {} via {}: {}",
-                environment_id, method_str, e
-            ))
+                environment_id, method_str, launch_error
+            ));
+            launch_error
         })?;
 
     Ok(serde_json::json!({
         "success": true,
-        "executablePath": result
+        "executablePath": result,
+        "launchStartedAt": launch_started_at,
+        "launchMethod": method_str,
+        "environmentId": environment_id
     }))
 }
 
@@ -260,6 +312,39 @@ pub async fn create_directory(path: String) -> Result<serde_json::Value, String>
             "path": dir_path.to_string_lossy().to_string()
         })),
         Err(e) => Err(format!("Failed to create directory: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_launch_method;
+
+    #[test]
+    fn launch_method_defaults_to_steam_for_steam_environments() {
+        assert_eq!(resolve_launch_method(None, true), "steam");
+    }
+
+    #[test]
+    fn launch_method_defaults_for_non_steam_environments() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(resolve_launch_method(None, false), "steam");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(resolve_launch_method(None, false), "direct");
+    }
+
+    #[test]
+    fn launch_method_preserves_explicit_steam_for_non_steam_environments() {
+        assert_eq!(resolve_launch_method(Some("steam"), false), "steam");
+    }
+
+    #[test]
+    fn launch_method_preserves_known_and_unknown_explicit_methods_for_steam_environments() {
+        assert_eq!(resolve_launch_method(Some("direct"), true), "direct");
+        assert_eq!(
+            resolve_launch_method(Some("steam_restart"), false),
+            "steam_restart"
+        );
+        assert_eq!(resolve_launch_method(Some("mystery"), true), "mystery");
     }
 }
 

@@ -1,10 +1,14 @@
 use chrono::Utc;
 use tauri::{AppHandle, Runtime};
+use uuid::Uuid;
 
 use crate::types::{DownloadStatus, TrackedDownload, TrackedDownloadKind};
 
 pub fn new_download_id(prefix: &str) -> String {
-    format!("{}-{}", prefix, Utc::now().timestamp_millis())
+    // Timestamp-only identifiers collide under parallel UI requests. Keep the
+    // readable prefix for diagnostics while making every operation identity
+    // independent of scheduler resolution.
+    format!("{}-{}", prefix, Uuid::new_v4())
 }
 
 pub fn start_file_download(
@@ -126,5 +130,15 @@ mod tests {
         assert!(matches!(failed.status, DownloadStatus::Error));
         assert_eq!(failed.error.as_deref(), Some("boom"));
         assert!(failed.finished_at.is_some());
+    }
+
+    #[test]
+    fn generated_download_ids_are_unique_for_parallel_operations() {
+        let ids = (0..1_000)
+            .map(|_| new_download_id("nexus-library"))
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(ids.len(), 1_000);
+        assert!(ids.iter().all(|id| id.starts_with("nexus-library-")));
     }
 }

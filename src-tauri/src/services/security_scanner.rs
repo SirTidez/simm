@@ -1,4 +1,5 @@
 use crate::db;
+use crate::services::fomod::ArchiveBudget;
 use crate::types::{
     SecurityFindingSeverity, SecurityScanDisposition, SecurityScanDispositionClassification,
     SecurityScanFileReport, SecurityScanPolicy, SecurityScanReport, SecurityScanState,
@@ -26,6 +27,10 @@ const GITHUB_RELEASES_LATEST_URL: &str =
 const NUGET_PACKAGE_NAME: &str = "MLVScan.DevCLI";
 const WINDOWS_ZIP_ASSET_NAME: &str = "mlvscan-win-x64.zip";
 const WINDOWS_SHA256_ASSET_NAME: &str = "mlvscan-win-x64.sha256";
+#[cfg(target_os = "linux")]
+const DOTNET_INSTALL_SCRIPT_URL: &str = "https://dot.net/v1/dotnet-install.sh";
+#[cfg(target_os = "linux")]
+const MANAGED_DOTNET_SDK_CHANNEL: &str = "8.0";
 
 #[derive(Clone)]
 pub struct SecurityScannerService {
@@ -120,18 +125,41 @@ impl SecurityScannerService {
 
     pub async fn install_latest(&self, settings: &Settings) -> Result<SecurityScannerStatus> {
         let installed = if self.has_dotnet_sdk_8().await? {
-            match self.install_with_dotnet_tool().await {
+            match self.install_with_system_dotnet_tool().await {
                 Ok(executable) => executable,
                 Err(dotnet_error) => {
-                    log::warn!(
-                        "Failed to install MLVScan via dotnet tool, falling back to release binary: {}",
-                        dotnet_error
-                    );
-                    self.install_with_binary_release().await?
+                    if Self::binary_release_supported_on_host() {
+                        log::warn!(
+                            "Failed to install MLVScan via dotnet tool, falling back to release binary: {}",
+                            dotnet_error
+                        );
+                        self.install_with_binary_release().await?
+                    } else if cfg!(target_os = "linux") {
+                        log::warn!(
+                            "Failed to install MLVScan via system dotnet, falling back to SIMM managed .NET SDK: {}",
+                            dotnet_error
+                        );
+                        self.install_with_managed_dotnet_sdk()
+                            .await
+                            .with_context(|| {
+                                format!("System dotnet tool install also failed: {}", dotnet_error)
+                            })?
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Failed to install MLVScan.DevCLI with dotnet tool: {}. Install .NET SDK 8 and retry, or install the scanner manually with `dotnet tool install -g MLVScan.DevCLI`.",
+                            dotnet_error
+                        ));
+                    }
                 }
             }
-        } else {
+        } else if cfg!(target_os = "linux") {
+            self.install_with_managed_dotnet_sdk().await?
+        } else if Self::binary_release_supported_on_host() {
             self.install_with_binary_release().await?
+        } else {
+            return Err(anyhow::anyhow!(
+                "MLVScan Security Scanner requires .NET SDK 8 on this platform. Install .NET SDK 8 and retry, or install the scanner manually with `dotnet tool install -g MLVScan.DevCLI`."
+            ));
         };
 
         let installed_info = self
@@ -173,32 +201,47 @@ impl SecurityScannerService {
             Err(error) => return Ok(Self::unavailable_report(error.to_string(), settings)),
         };
 
+        // A configured scanner is a security gate, not a best-effort annotation.  Preserve
+        // scanner execution, parsing, collection, and archive-extraction failures as an
+        // explicit unavailable result so callers block materialization rather than silently
+        // proceeding unscanned. Users must restore successful scanning or disable the scanner
+        // policy in settings.
         let files = match archive_kind_for_path_or_signature(file_path) {
-            InputArchiveKind::Dll => vec![
-                self.scan_assembly_file(
+            InputArchiveKind::Dll => self
+                .scan_assembly_file(
                     &executable.path,
                     file_path,
                     file_path.to_string_lossy().as_ref(),
                 )
-                .await?,
-            ],
+                .await
+                .map(|report| vec![report]),
             InputArchiveKind::Zip => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::Zip)
-                    .await?
+                    .await
             }
             InputArchiveKind::Rar => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::Rar)
-                    .await?
+                    .await
             }
             InputArchiveKind::SevenZ => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::SevenZ)
-                    .await?
+                    .await
             }
             InputArchiveKind::TarGz => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::TarGz)
-                    .await?
+                    .await
             }
-            InputArchiveKind::Unsupported => Vec::new(),
+            InputArchiveKind::Unsupported => Ok(Vec::new()),
+        };
+
+        let files = match files {
+            Ok(files) => files,
+            Err(error) => {
+                return Ok(Self::unavailable_report(
+                    format!("MLVScan could not complete the security scan: {error}"),
+                    settings,
+                ));
+            }
         };
 
         if files.is_empty() {
@@ -236,7 +279,7 @@ impl SecurityScannerService {
     }
 
     async fn resolve_executable(&self) -> Result<Option<ResolvedScannerExecutable>> {
-        let executable = self.binary_install_dir()?.join("mlvscan.exe");
+        let executable = self.binary_install_executable_path()?;
         if executable.exists() {
             return Ok(Some(ResolvedScannerExecutable {
                 path: executable,
@@ -244,11 +287,17 @@ impl SecurityScannerService {
             }));
         }
 
-        let dotnet_tool_executable = self.dotnet_tool_install_dir()?.join("mlvscan.exe");
+        let dotnet_tool_executable = self.dotnet_tool_executable_path()?;
         if dotnet_tool_executable.exists() {
+            let install_method =
+                if cfg!(target_os = "linux") && self.managed_dotnet_executable_path()?.exists() {
+                    "managedDotnetSdkTool"
+                } else {
+                    "managedDotnetTool"
+                };
             return Ok(Some(ResolvedScannerExecutable {
                 path: dotnet_tool_executable,
-                install_method: "managedDotnetTool".to_string(),
+                install_method: install_method.to_string(),
             }));
         }
 
@@ -276,24 +325,84 @@ impl SecurityScannerService {
         Ok(self.tool_root_dir()?.join("dotnet-tool"))
     }
 
+    fn managed_dotnet_sdk_dir(&self) -> Result<PathBuf> {
+        Ok(self.tool_root_dir()?.join("dotnet-sdk-8"))
+    }
+
+    fn managed_dotnet_executable_path(&self) -> Result<PathBuf> {
+        Ok(self.managed_dotnet_sdk_dir()?.join("dotnet"))
+    }
+
+    fn scanner_executable_name() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "mlvscan.exe"
+        } else {
+            "mlvscan"
+        }
+    }
+
+    fn binary_install_executable_path(&self) -> Result<PathBuf> {
+        Ok(self
+            .binary_install_dir()?
+            .join(Self::scanner_executable_name()))
+    }
+
+    fn dotnet_tool_executable_path(&self) -> Result<PathBuf> {
+        Ok(self
+            .dotnet_tool_install_dir()?
+            .join(Self::scanner_executable_name()))
+    }
+
+    fn binary_release_supported_on_host() -> bool {
+        cfg!(target_os = "windows")
+    }
+
+    fn binary_release_asset_names() -> Option<(&'static str, &'static str)> {
+        if cfg!(target_os = "windows") {
+            Some((WINDOWS_ZIP_ASSET_NAME, WINDOWS_SHA256_ASSET_NAME))
+        } else {
+            None
+        }
+    }
+
     async fn has_dotnet_sdk_8(&self) -> Result<bool> {
-        let mut command = Command::new("dotnet");
+        Ok(self
+            .dotnet_sdk_8_version(Path::new("dotnet"), None)
+            .await?
+            .is_some())
+    }
+
+    async fn dotnet_sdk_8_version(
+        &self,
+        dotnet_program: &Path,
+        dotnet_root: Option<&Path>,
+    ) -> Result<Option<String>> {
+        let mut command = Command::new(dotnet_program);
         command.arg("--list-sdks");
+        if let Some(dotnet_root) = dotnet_root {
+            Self::apply_dotnet_root_env(&mut command, dotnet_root)?;
+        }
         Self::apply_windows_flags(&mut command);
 
         let output = match command.output().await {
             Ok(output) => output,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(None),
         };
 
         if !output.status.success() {
-            return Ok(false);
+            return Ok(None);
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout
-            .lines()
-            .any(|line| line.trim_start().starts_with("8.")))
+        Ok(Self::first_dotnet_sdk_8_version(&stdout))
+    }
+
+    fn first_dotnet_sdk_8_version(output: &str) -> Option<String> {
+        output.lines().find_map(|line| {
+            let version = line.split_whitespace().next()?.trim();
+            let major = version.split('.').next()?.parse::<u32>().ok()?;
+            (major >= 8).then(|| version.to_string())
+        })
     }
 
     async fn detect_global_mlvscan(&self) -> Result<Option<PathBuf>> {
@@ -327,14 +436,30 @@ impl SecurityScannerService {
         Ok(path)
     }
 
-    async fn install_with_dotnet_tool(&self) -> Result<ResolvedScannerExecutable> {
+    async fn install_with_system_dotnet_tool(&self) -> Result<ResolvedScannerExecutable> {
+        self.install_with_dotnet_tool_command(
+            Path::new("dotnet"),
+            None,
+            "managedDotnetTool",
+            "dotnet",
+        )
+        .await
+    }
+
+    async fn install_with_dotnet_tool_command(
+        &self,
+        dotnet_program: &Path,
+        dotnet_root: Option<&Path>,
+        install_method: &str,
+        display_name: &str,
+    ) -> Result<ResolvedScannerExecutable> {
         let install_dir = self.dotnet_tool_install_dir()?;
         fs::create_dir_all(&install_dir)
             .await
             .context("Failed to create dotnet tool installation directory")?;
 
-        let executable_path = install_dir.join("mlvscan.exe");
-        let mut command = Command::new("dotnet");
+        let executable_path = self.dotnet_tool_executable_path()?;
+        let mut command = Command::new(dotnet_program);
         command.arg("tool");
         if executable_path.exists() {
             command.arg("update");
@@ -344,18 +469,21 @@ impl SecurityScannerService {
         command.arg(NUGET_PACKAGE_NAME);
         command.arg("--tool-path");
         command.arg(&install_dir);
+        if let Some(dotnet_root) = dotnet_root {
+            Self::apply_dotnet_root_env(&mut command, dotnet_root)?;
+        }
         Self::apply_windows_flags(&mut command);
 
-        let output = command
-            .output()
-            .await
-            .context("Failed to execute dotnet tool installation for MLVScan")?;
+        let output = command.output().await.with_context(|| {
+            format!("Failed to execute {display_name} tool installation for MLVScan")
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(anyhow::anyhow!(
-                "dotnet tool setup failed: {}{}{}",
+                "{} tool setup failed: {}{}{}",
+                display_name,
                 stdout.trim(),
                 if stdout.trim().is_empty() || stderr.trim().is_empty() {
                     ""
@@ -368,38 +496,141 @@ impl SecurityScannerService {
 
         if !executable_path.exists() {
             return Err(anyhow::anyhow!(
-                "dotnet tool reported success but mlvscan.exe was not found"
+                "dotnet tool reported success but {} was not found",
+                Self::scanner_executable_name()
             ));
         }
 
         Ok(ResolvedScannerExecutable {
             path: executable_path,
-            install_method: "managedDotnetTool".to_string(),
+            install_method: install_method.to_string(),
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn install_with_managed_dotnet_sdk(&self) -> Result<ResolvedScannerExecutable> {
+        let dotnet_program = self.ensure_managed_dotnet_sdk().await?;
+        let dotnet_root = self.managed_dotnet_sdk_dir()?;
+        self.install_with_dotnet_tool_command(
+            &dotnet_program,
+            Some(&dotnet_root),
+            "managedDotnetSdkTool",
+            "managed dotnet",
+        )
+        .await
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn install_with_managed_dotnet_sdk(&self) -> Result<ResolvedScannerExecutable> {
+        Err(anyhow::anyhow!(
+            "Managed .NET SDK bootstrap is only supported on Linux"
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn ensure_managed_dotnet_sdk(&self) -> Result<PathBuf> {
+        let install_dir = self.managed_dotnet_sdk_dir()?;
+        let dotnet_program = self.managed_dotnet_executable_path()?;
+        if dotnet_program.exists()
+            && self
+                .dotnet_sdk_8_version(&dotnet_program, Some(&install_dir))
+                .await?
+                .is_some()
+        {
+            return Ok(dotnet_program);
+        }
+
+        fs::create_dir_all(&install_dir)
+            .await
+            .context("Failed to create managed .NET SDK directory")?;
+
+        let temp_root = self
+            .tool_root_dir()?
+            .join("tmp")
+            .join(format!("dotnet-sdk-install-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root)
+            .await
+            .context("Failed to create managed .NET SDK staging directory")?;
+        let script_path = temp_root.join("dotnet-install.sh");
+        let script = self
+            .download_asset(DOTNET_INSTALL_SCRIPT_URL)
+            .await
+            .context("Failed to download the .NET install script")?;
+        fs::write(&script_path, script)
+            .await
+            .context("Failed to stage the .NET install script")?;
+
+        let mut command = Command::new("bash");
+        command
+            .arg(&script_path)
+            .arg("--channel")
+            .arg(MANAGED_DOTNET_SDK_CHANNEL)
+            .arg("--install-dir")
+            .arg(&install_dir)
+            .arg("--no-path");
+
+        let output = command
+            .output()
+            .await
+            .context("Failed to execute the .NET install script")?;
+        let _ = fs::remove_dir_all(&temp_root).await;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Managed .NET SDK install failed: {}{}{}",
+                stdout.trim(),
+                if stdout.trim().is_empty() || stderr.trim().is_empty() {
+                    ""
+                } else {
+                    "\n"
+                },
+                stderr.trim()
+            ));
+        }
+
+        let version = self
+            .dotnet_sdk_8_version(&dotnet_program, Some(&install_dir))
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Managed .NET SDK install completed but no SDK 8 or newer was detected"
+                )
+            })?;
+        log::info!(
+            "Installed managed .NET SDK {} for MLVScan at {}",
+            version,
+            install_dir.display()
+        );
+
+        Ok(dotnet_program)
     }
 
     async fn install_with_binary_release(&self) -> Result<ResolvedScannerExecutable> {
         let release = self.fetch_latest_release().await?;
+        let (zip_asset_name, checksum_asset_name) = Self::binary_release_asset_names().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No standalone MLVScan.DevCLI binary release is configured for this platform. Install .NET SDK 8 and use the MLVScan.DevCLI dotnet tool."
+            )
+        })?;
         let zip_asset = release
             .assets
             .iter()
-            .find(|asset| asset.name.eq_ignore_ascii_case(WINDOWS_ZIP_ASSET_NAME))
+            .find(|asset| asset.name.eq_ignore_ascii_case(zip_asset_name))
             .cloned()
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Latest MLVScan release does not contain {}",
-                    WINDOWS_ZIP_ASSET_NAME
-                )
+                anyhow::anyhow!("Latest MLVScan release does not contain {}", zip_asset_name)
             })?;
         let checksum_asset = release
             .assets
             .iter()
-            .find(|asset| asset.name.eq_ignore_ascii_case(WINDOWS_SHA256_ASSET_NAME))
+            .find(|asset| asset.name.eq_ignore_ascii_case(checksum_asset_name))
             .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Latest MLVScan release does not contain {}",
-                    WINDOWS_SHA256_ASSET_NAME
+                    checksum_asset_name
                 )
             })?;
 
@@ -452,7 +683,12 @@ impl SecurityScannerService {
         let staged_executable = self
             .find_scanner_executable(&staged_dir)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Scanner archive did not contain mlvscan.exe"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Scanner archive did not contain {}",
+                    Self::scanner_executable_name()
+                )
+            })?;
         self.read_cli_info(&staged_executable)
             .await
             .context("Failed to validate extracted scanner binary")?;
@@ -472,7 +708,7 @@ impl SecurityScannerService {
             .context("Failed to move scanner into its installation directory")?;
         let _ = fs::remove_dir_all(&temp_root).await;
 
-        let installed_executable = install_dir.join("mlvscan.exe");
+        let installed_executable = self.binary_install_executable_path()?;
         if !installed_executable.exists() {
             return Err(anyhow::anyhow!(
                 "Scanner install completed but executable was not found"
@@ -531,6 +767,7 @@ impl SecurityScannerService {
     async fn read_cli_info(&self, executable_path: &Path) -> Result<CliInfo> {
         let mut command = Command::new(executable_path);
         command.args(["info", "--format", "json"]);
+        self.apply_managed_dotnet_env_if_available(&mut command)?;
         Self::apply_windows_flags(&mut command);
 
         let output = command
@@ -560,6 +797,7 @@ impl SecurityScannerService {
         let mut command = Command::new(executable_path);
         command.arg(assembly_path);
         command.args(["--format", "schema"]);
+        self.apply_managed_dotnet_env_if_available(&mut command)?;
         Self::apply_windows_flags(&mut command);
 
         let output = command
@@ -603,37 +841,50 @@ impl SecurityScannerService {
         archive_path: &Path,
         kind: ArchiveKind,
     ) -> Result<Vec<SecurityScanFileReport>> {
-        let temp_root = std::env::temp_dir().join(format!("mlvscan-scan-{}", Uuid::new_v4()));
-        fs::create_dir_all(&temp_root)
+        self.scan_archive_in_temp_parent(executable_path, archive_path, kind, &std::env::temp_dir())
             .await
-            .context("Failed to create archive scan temp directory")?;
+    }
 
-        let extract_result = match kind {
+    async fn scan_archive_in_temp_parent(
+        &self,
+        executable_path: &Path,
+        archive_path: &Path,
+        kind: ArchiveKind,
+        temp_parent: &Path,
+    ) -> Result<Vec<SecurityScanFileReport>> {
+        // TempDir removes the extraction tree when this scope exits, including every error
+        // path below.  Keeping the guard alive throughout scanning closes the former leaks on
+        // collection, execution, and output-parsing failures.
+        let temp_root = tempfile::Builder::new()
+            .prefix("mlvscan-scan-")
+            .tempdir_in(temp_parent)
+            .context("Failed to create archive scan temp directory")?;
+        let temp_root_path = temp_root.path();
+
+        match kind {
             ArchiveKind::Zip => {
-                self.extract_zip_to_directory(archive_path, &temp_root)
+                self.extract_zip_to_directory(archive_path, temp_root_path)
                     .await
             }
             ArchiveKind::Rar => {
-                self.extract_rar_to_directory(archive_path, &temp_root)
+                self.extract_rar_to_directory(archive_path, temp_root_path)
                     .await
             }
-            ArchiveKind::SevenZ => self.extract_7z_to_directory(archive_path, &temp_root).await,
+            ArchiveKind::SevenZ => {
+                self.extract_7z_to_directory(archive_path, temp_root_path)
+                    .await
+            }
             ArchiveKind::TarGz => {
-                self.extract_tar_gz_to_directory(archive_path, &temp_root)
+                self.extract_tar_gz_to_directory(archive_path, temp_root_path)
                     .await
             }
-        };
+        }?;
 
-        if let Err(error) = extract_result {
-            let _ = fs::remove_dir_all(&temp_root).await;
-            return Err(error);
-        }
-
-        let dlls = self.collect_dll_files(&temp_root).await?;
+        let dlls = self.collect_dll_files(temp_root_path).await?;
         let mut reports = Vec::new();
         for dll in dlls {
             let relative = dll
-                .strip_prefix(&temp_root)
+                .strip_prefix(temp_root_path)
                 .unwrap_or(&dll)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -643,19 +894,22 @@ impl SecurityScannerService {
             );
         }
 
-        let _ = fs::remove_dir_all(&temp_root).await;
         Ok(reports)
     }
 
     async fn extract_zip_to_directory(&self, archive_path: &Path, target_dir: &Path) -> Result<()> {
         let file = File::open(archive_path).context("Failed to open ZIP archive")?;
         let mut archive = ZipArchive::new(file).context("Failed to read ZIP archive")?;
+        let mut budget = ArchiveBudget::default();
 
         for index in 0..archive.len() {
             let mut entry = archive
                 .by_index(index)
                 .context("Failed to read ZIP entry")?;
             let relative_path = entry.name().to_string();
+            budget
+                .account(&relative_path, entry.size())
+                .context("ZIP archive exceeds scanner extraction limits")?;
             let enclosed_path = entry.enclosed_name().ok_or_else(|| {
                 anyhow::anyhow!("ZIP entry contains an unsafe path: {}", relative_path)
             })?;
@@ -673,13 +927,11 @@ impl SecurityScannerService {
                     .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
 
-            let mut buffer = Vec::new();
-            entry
-                .read_to_end(&mut buffer)
-                .context("Failed to read ZIP entry contents")?;
-            std::fs::write(&output_path, buffer).with_context(|| {
-                format!("Failed to write extracted file {}", output_path.display())
-            })?;
+            budget
+                .copy_entry_to_path(&relative_path, &mut entry, &output_path)
+                .with_context(|| {
+                    format!("Failed to write extracted file {}", output_path.display())
+                })?;
         }
 
         Ok(())
@@ -693,10 +945,14 @@ impl SecurityScannerService {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid archive extraction path"))?;
 
+        let mut budget = ArchiveBudget::default();
         while let Some(header) = archive.read_header().context("Failed to read RAR header")? {
             let entry = header.entry();
             let is_directory = entry.is_directory();
             validate_rar_entry_path(&entry.filename)?;
+            budget
+                .account(&entry.filename.to_string_lossy(), entry.unpacked_size)
+                .context("RAR archive exceeds scanner extraction limits")?;
 
             if is_directory {
                 archive = header
@@ -716,6 +972,7 @@ impl SecurityScannerService {
         let archive_path = archive_path.to_path_buf();
         let target_dir = target_dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
+            let mut budget = ArchiveBudget::default();
             sevenz_rust::decompress_file_with_extract_fn(
                 &archive_path,
                 &target_dir,
@@ -723,6 +980,9 @@ impl SecurityScannerService {
                     if entry.name().is_empty() && entry.is_directory() {
                         return Ok(true);
                     }
+                    budget
+                        .account(entry.name(), entry.size())
+                        .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
                     let relative_path = safe_archive_relative_path(entry.name())
                         .map_err(sevenz_rust::Error::other)?;
                     let output_path = target_dir.join(relative_path);
@@ -733,9 +993,9 @@ impl SecurityScannerService {
                         if let Some(parent) = output_path.parent() {
                             std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
                         }
-                        let mut output =
-                            File::create(&output_path).map_err(sevenz_rust::Error::io)?;
-                        std::io::copy(reader, &mut output).map_err(sevenz_rust::Error::io)?;
+                        budget
+                            .copy_entry_to_path(entry.name(), reader, &output_path)
+                            .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
                     }
 
                     Ok(true)
@@ -757,11 +1017,19 @@ impl SecurityScannerService {
             let file = File::open(&archive_path).context("Failed to open tar.gz archive")?;
             let decoder = GzDecoder::new(file);
             let mut archive = tar::Archive::new(decoder);
+            let mut budget = ArchiveBudget::default();
 
             for entry in archive.entries().context("Failed to read tar.gz archive")? {
                 let mut entry = entry.context("Failed to read tar.gz entry")?;
                 let entry_path = entry.path().context("Failed to read tar.gz entry path")?;
                 let entry_name = entry_path.to_string_lossy().replace('\\', "/");
+                let expanded_size = entry
+                    .header()
+                    .size()
+                    .context("Failed to read tar.gz entry size")?;
+                budget
+                    .account(&entry_name, expanded_size)
+                    .context("tar.gz archive exceeds scanner extraction limits")?;
                 let relative_path = safe_archive_relative_path(&entry_name)
                     .map_err(|error| anyhow::anyhow!(error))?;
                 let output_path = target_dir.join(relative_path);
@@ -777,9 +1045,11 @@ impl SecurityScannerService {
                             format!("Failed to create directory {}", parent.display())
                         })?;
                     }
-                    entry.unpack(&output_path).with_context(|| {
-                        format!("Failed to extract tar.gz file {}", output_path.display())
-                    })?;
+                    budget
+                        .copy_entry_to_path(&entry_name, &mut entry, &output_path)
+                        .with_context(|| {
+                            format!("Failed to extract tar.gz file {}", output_path.display())
+                        })?;
                 }
             }
 
@@ -841,7 +1111,7 @@ impl SecurityScannerService {
                     .file_name()
                     .and_then(|value| value.to_str())
                     .unwrap_or_default();
-                if file_name.eq_ignore_ascii_case("mlvscan.exe") {
+                if file_name.eq_ignore_ascii_case(Self::scanner_executable_name()) {
                     return Ok(Some(path));
                 }
             }
@@ -1008,6 +1278,10 @@ impl SecurityScannerService {
     }
 
     fn unavailable_report(error: String, settings: &Settings) -> SecurityScanReport {
+        let message = format!(
+            "Security scanning is enabled but unavailable: {error}. Installation remains blocked until scanning succeeds or security scanning is disabled in settings."
+        );
+
         SecurityScanReport {
             summary: SecurityScanSummary {
                 state: SecurityScanState::Unavailable,
@@ -1019,15 +1293,15 @@ impl SecurityScannerService {
                 scanned_at: Some(Utc::now()),
                 scanner_version: None,
                 schema_version: None,
-                status_message: Some(error.clone()),
+                status_message: Some(message.clone()),
             },
             policy: SecurityScanPolicy {
                 enabled: settings.enable_security_scanner.unwrap_or(true),
                 requires_confirmation: false,
-                blocked: false,
+                blocked: true,
                 prompt_on_high_findings: settings.prompt_on_high_scans.unwrap_or(true),
                 block_critical_findings: settings.block_critical_scans.unwrap_or(true),
-                status_message: Some(error),
+                status_message: Some(message),
             },
             files: Vec::new(),
         }
@@ -1331,6 +1605,28 @@ impl SecurityScannerService {
 
     #[cfg(not(target_os = "windows"))]
     fn apply_windows_flags(_command: &mut Command) {}
+
+    fn apply_managed_dotnet_env_if_available(&self, command: &mut Command) -> Result<()> {
+        if cfg!(target_os = "linux") {
+            let dotnet_root = self.managed_dotnet_sdk_dir()?;
+            if self.managed_dotnet_executable_path()?.exists() {
+                Self::apply_dotnet_root_env(command, &dotnet_root)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_dotnet_root_env(command: &mut Command, dotnet_root: &Path) -> Result<()> {
+        command.env("DOTNET_ROOT", dotnet_root);
+
+        let mut paths = vec![dotnet_root.to_path_buf()];
+        if let Some(existing_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing_path));
+        }
+        let joined_path = std::env::join_paths(paths).context("Failed to build .NET PATH")?;
+        command.env("PATH", joined_path);
+        Ok(())
+    }
 }
 
 impl Default for SecurityScannerService {
@@ -1477,10 +1773,34 @@ mod tests {
     use super::*;
     use crate::types::Platform;
     use serde_json::json;
+    use serial_test::serial;
     use std::io::Write;
     use tempfile::tempdir;
     use zip::write::FileOptions;
     use zip::ZipWriter;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn test_cli_info() -> CliInfo {
         CliInfo {
@@ -1494,6 +1814,7 @@ mod tests {
             default_download_dir: "C:/mods".to_string(),
             depot_downloader_path: None,
             steam_username: None,
+            depot_downloader_remembered_session: Some(false),
             max_concurrent_downloads: 1,
             platform: Platform::Windows,
             language: "en-US".to_string(),
@@ -1521,6 +1842,7 @@ mod tests {
             app_update: None,
             experience_mode: None,
             show_advanced_game_tools: None,
+            window_close_behavior: None,
             setup_guide_completed: None,
         }
     }
@@ -1543,6 +1865,331 @@ mod tests {
         archive.start_file(entry_name, FileOptions::default())?;
         archive.write_all(contents)?;
         archive.finish()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn live_scan_opted_in() -> bool {
+        std::env::var("SIMM_MLVSCAN_LIVE_SCAN")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn run_dotnet_command(
+        dotnet_program: &Path,
+        dotnet_root: Option<&Path>,
+        args: Vec<String>,
+        description: &str,
+    ) -> Result<()> {
+        let mut command = Command::new(dotnet_program);
+        command.args(&args);
+        if let Some(dotnet_root) = dotnet_root {
+            SecurityScannerService::apply_dotnet_root_env(&mut command, dotnet_root)?;
+        }
+
+        let output = command.output().await.with_context(|| {
+            format!(
+                "Failed to run {} while {description}",
+                dotnet_program.display()
+            )
+        })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = [stdout.as_str(), stderr.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let command = std::iter::once(dotnet_program.to_string_lossy().to_string())
+            .chain(args)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        Err(anyhow::anyhow!(
+            "Command `{}` failed while {} (code {:?}).{}{}",
+            command,
+            description,
+            output.status.code(),
+            if detail.is_empty() { "" } else { "\n" },
+            detail
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn build_live_scan_fixture(
+        temp_root: &Path,
+        dotnet_program: &Path,
+        dotnet_root: Option<&Path>,
+    ) -> Result<PathBuf> {
+        let project_dir = temp_root.join("SimmMlvScanFixture");
+        let project_dir_str = project_dir.to_string_lossy().to_string();
+
+        run_dotnet_command(
+            dotnet_program,
+            dotnet_root,
+            vec![
+                "new".to_string(),
+                "classlib".to_string(),
+                "--framework".to_string(),
+                "net8.0".to_string(),
+                "--name".to_string(),
+                "SimmMlvScanFixture".to_string(),
+                "--output".to_string(),
+                project_dir_str.clone(),
+            ],
+            "creating the MLVScan live scan fixture",
+        )
+        .await?;
+
+        run_dotnet_command(
+            dotnet_program,
+            dotnet_root,
+            vec![
+                "build".to_string(),
+                project_dir_str,
+                "--configuration".to_string(),
+                "Release".to_string(),
+                "--nologo".to_string(),
+            ],
+            "building the MLVScan live scan fixture",
+        )
+        .await?;
+
+        let dll_path = project_dir
+            .join("bin")
+            .join("Release")
+            .join("net8.0")
+            .join("SimmMlvScanFixture.dll");
+        if !dll_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Dotnet build completed but fixture DLL was not found at {}",
+                dll_path.display()
+            ));
+        }
+
+        Ok(dll_path)
+    }
+
+    #[test]
+    fn scanner_executable_name_matches_host() {
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                SecurityScannerService::scanner_executable_name(),
+                "mlvscan.exe"
+            );
+        } else {
+            assert_eq!(SecurityScannerService::scanner_executable_name(), "mlvscan");
+        }
+    }
+
+    #[test]
+    fn binary_release_fallback_is_windows_only() {
+        assert_eq!(
+            SecurityScannerService::binary_release_supported_on_host(),
+            cfg!(target_os = "windows")
+        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                SecurityScannerService::binary_release_asset_names(),
+                Some((WINDOWS_ZIP_ASSET_NAME, WINDOWS_SHA256_ASSET_NAME))
+            );
+        } else {
+            assert_eq!(SecurityScannerService::binary_release_asset_names(), None);
+        }
+    }
+
+    #[test]
+    fn dotnet_sdk_detection_accepts_sdk_8_or_newer() {
+        assert_eq!(
+            SecurityScannerService::first_dotnet_sdk_8_version(
+                "7.0.410 [/usr/lib/dotnet/sdk]\n8.0.100 [/usr/lib/dotnet/sdk]\n"
+            ),
+            Some("8.0.100".to_string())
+        );
+        assert_eq!(
+            SecurityScannerService::first_dotnet_sdk_8_version("9.0.200 [/opt/dotnet/sdk]\n"),
+            Some("9.0.200".to_string())
+        );
+        assert_eq!(
+            SecurityScannerService::first_dotnet_sdk_8_version("7.0.410 [/sdk]\n"),
+            None
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn managed_dotnet_paths_live_under_scanner_tool_root() -> Result<()> {
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", temp.path().to_string_lossy().as_ref());
+        let service = SecurityScannerService::new();
+
+        assert_eq!(
+            service.managed_dotnet_sdk_dir()?,
+            temp.path()
+                .join("tools")
+                .join("mlvscan-security-scanner")
+                .join("dotnet-sdk-8")
+        );
+        assert_eq!(
+            service.managed_dotnet_executable_path()?,
+            service.managed_dotnet_sdk_dir()?.join("dotnet")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resolve_executable_detects_managed_dotnet_tool_host_executable() -> Result<()> {
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", temp.path().to_string_lossy().as_ref());
+        let service = SecurityScannerService::new();
+        let executable_path = service.dotnet_tool_executable_path()?;
+        let parent = executable_path.parent().expect("tool executable parent");
+        fs::create_dir_all(parent).await?;
+        fs::write(&executable_path, b"scanner").await?;
+
+        let resolved = service
+            .resolve_executable()
+            .await?
+            .expect("managed dotnet tool executable should resolve");
+
+        assert_eq!(resolved.path, executable_path);
+        assert_eq!(resolved.install_method, "managedDotnetTool");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial]
+    async fn resolve_executable_reports_private_sdk_tool_when_managed_dotnet_exists() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", temp.path().to_string_lossy().as_ref());
+        let service = SecurityScannerService::new();
+
+        let executable_path = service.dotnet_tool_executable_path()?;
+        fs::create_dir_all(executable_path.parent().expect("tool executable parent")).await?;
+        fs::write(&executable_path, b"scanner").await?;
+
+        let dotnet_path = service.managed_dotnet_executable_path()?;
+        fs::create_dir_all(dotnet_path.parent().expect("dotnet executable parent")).await?;
+        fs::write(&dotnet_path, b"dotnet").await?;
+
+        let resolved = service
+            .resolve_executable()
+            .await?
+            .expect("managed dotnet sdk tool executable should resolve");
+
+        assert_eq!(resolved.path, executable_path);
+        assert_eq!(resolved.install_method, "managedDotnetSdkTool");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial]
+    #[ignore = "Downloads or updates MLVScan.DevCLI and bootstraps a private .NET SDK 8 on Linux when needed"]
+    async fn live_linux_install_latest_uses_dotnet_tool_or_private_sdk() -> Result<()> {
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", temp.path().to_string_lossy().as_ref());
+        let service = SecurityScannerService::new();
+        let settings = test_settings();
+
+        let status = service.install_latest(&settings).await?;
+        let executable_path = service.dotnet_tool_executable_path()?;
+
+        assert!(status.installed);
+        assert!(
+            matches!(
+                status.install_method.as_deref(),
+                Some("managedDotnetTool") | Some("managedDotnetSdkTool")
+            ),
+            "unexpected install method: {:?}",
+            status.install_method
+        );
+        assert_eq!(
+            status.executable_path.as_deref(),
+            Some(executable_path.to_string_lossy().as_ref())
+        );
+        assert!(executable_path.exists());
+        assert!(status.installed_version.is_some());
+        assert!(status.schema_version.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial]
+    #[ignore = "Opt-in live smoke that installs MLVScan and scans a real .NET assembly when SIMM_MLVSCAN_LIVE_SCAN=1"]
+    async fn live_linux_scan_executes_against_real_dotnet_assembly() -> Result<()> {
+        if !live_scan_opted_in() {
+            eprintln!(
+                "Skipping MLVScan live scan smoke: set SIMM_MLVSCAN_LIVE_SCAN=1 to install/run MLVScan against a real .NET assembly."
+            );
+            return Ok(());
+        }
+
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", temp.path().to_string_lossy().as_ref());
+        let service = SecurityScannerService::new();
+        let settings = test_settings();
+
+        let dll_path = match std::env::var("SIMM_MLVSCAN_LIVE_SCAN_DLL") {
+            Ok(path) if !path.trim().is_empty() => {
+                let configured = PathBuf::from(path);
+                if !configured.exists() {
+                    return Err(anyhow::anyhow!(
+                        "SIMM_MLVSCAN_LIVE_SCAN_DLL does not exist: {}",
+                        configured.display()
+                    ));
+                }
+                configured
+            }
+            _ => {
+                let status = service.install_latest(&settings).await?;
+                assert!(status.installed);
+                let managed_dotnet = service.managed_dotnet_executable_path()?;
+                if managed_dotnet.exists() {
+                    let managed_root = service.managed_dotnet_sdk_dir()?;
+                    build_live_scan_fixture(temp.path(), &managed_dotnet, Some(&managed_root))
+                        .await?
+                } else {
+                    build_live_scan_fixture(temp.path(), Path::new("dotnet"), None).await?
+                }
+            }
+        };
+
+        let report = service.scan_artifact(&dll_path, &settings).await?;
+
+        assert!(
+            matches!(
+                report.summary.state,
+                SecurityScanState::Verified | SecurityScanState::Review
+            ),
+            "expected MLVScan to execute a real scan, got {:?}: {:?}",
+            report.summary.state,
+            report.summary.status_message
+        );
+        assert!(
+            !report.files.is_empty(),
+            "expected at least one scanned file report"
+        );
+        assert!(
+            report.summary.scanner_version.is_some(),
+            "expected scanner version metadata from MLVScan"
+        );
+        assert!(
+            report.summary.schema_version.is_some(),
+            "expected schema version metadata from MLVScan"
+        );
+
         Ok(())
     }
 
@@ -1761,6 +2408,27 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_report_blocks_when_configured_scanner_errors() {
+        let report = SecurityScannerService::unavailable_report(
+            "scanner executable exited before producing a report".to_string(),
+            &test_settings(),
+        );
+
+        assert_eq!(report.summary.state, SecurityScanState::Unavailable);
+        assert!(!report.summary.verified);
+        assert!(report.policy.enabled);
+        assert!(report.policy.blocked);
+        assert!(!report.policy.requires_confirmation);
+        assert!(report
+            .policy
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains(
+                "Installation remains blocked until scanning succeeds or security scanning is disabled in settings."
+            )));
+    }
+
+    #[test]
     fn archive_kind_falls_back_to_zip_signature_when_path_has_no_extension() -> Result<()> {
         let temp = tempdir()?;
         let archive_path = temp.path().join("downloaded-artifact");
@@ -1798,6 +2466,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extract_zip_to_directory_preserves_safe_nested_dll() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("nested-dll.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+        write_zip_with_file(
+            &archive_path,
+            "Runtime/IL2CPP/Mods/Nested.dll",
+            b"fake assembly bytes",
+        )?;
+
+        let service = SecurityScannerService::new();
+        service
+            .extract_zip_to_directory(&archive_path, &target_dir)
+            .await?;
+        let dlls = service.collect_dll_files(&target_dir).await?;
+
+        assert_eq!(
+            dlls,
+            vec![target_dir.join("Runtime/IL2CPP/Mods/Nested.dll")]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_zip_to_directory_rejects_excessive_path_depth() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("deep.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+        let deep_name = (0..=crate::services::fomod::MAX_ARCHIVE_PATH_DEPTH)
+            .map(|index| format!("level-{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        write_zip_with_file(&archive_path, &deep_name, b"unsafe")?;
+
+        let service = SecurityScannerService::new();
+        let error = service
+            .extract_zip_to_directory(&archive_path, &target_dir)
+            .await
+            .expect_err("deep scanner archive entry must fail closed");
+
+        assert!(error.to_string().contains("scanner extraction limits"));
+        assert!(!target_dir.join(&deep_name).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn extract_zip_to_directory_rejects_traversal_paths() -> Result<()> {
         let temp = tempdir()?;
         let archive_path = temp.path().join("scanner.zip");
@@ -1815,6 +2531,62 @@ mod tests {
         assert!(err.to_string().contains("unsafe path"));
         assert!(!temp.path().join("escape.txt").exists());
         assert!(!target_dir.join("escape.txt").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_archive_cleans_extracted_tree_when_scanner_execution_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("scanner.zip");
+        let temp_parent = temp.path().join("scan-temp-parent");
+        std::fs::create_dir_all(&temp_parent)?;
+        write_zip_with_file(&archive_path, "RootMod.dll", b"fake assembly bytes")?;
+
+        let service = SecurityScannerService::new();
+        let error = service
+            .scan_archive_in_temp_parent(
+                Path::new("definitely-not-an-mlvscan-executable"),
+                &archive_path,
+                ArchiveKind::Zip,
+                &temp_parent,
+            )
+            .await
+            .expect_err("a missing scanner executable should fail the scan");
+
+        assert!(error.to_string().contains("Failed to scan"));
+        assert!(
+            std::fs::read_dir(&temp_parent)?.next().is_none(),
+            "temporary extraction tree should be removed after scanner execution failure"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_archive_cleans_extracted_tree_when_extraction_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("unsafe-scanner.zip");
+        let temp_parent = temp.path().join("scan-temp-parent");
+        std::fs::create_dir_all(&temp_parent)?;
+        write_zip_with_file(&archive_path, "../escape.dll", b"unsafe")?;
+
+        let service = SecurityScannerService::new();
+        let error = service
+            .scan_archive_in_temp_parent(
+                Path::new("not-used-when-extraction-fails"),
+                &archive_path,
+                ArchiveKind::Zip,
+                &temp_parent,
+            )
+            .await
+            .expect_err("unsafe archive entry should fail extraction");
+
+        assert!(error.to_string().contains("unsafe path"));
+        assert!(
+            std::fs::read_dir(&temp_parent)?.next().is_none(),
+            "temporary extraction tree should be removed after extraction failure"
+        );
 
         Ok(())
     }
