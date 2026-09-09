@@ -105,6 +105,12 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
         ("createUpdaterArtifacts", "enables updater artifacts"),
         ("ConvertFrom-Json -AsHashtable", "uses hashtable JSON mutation"),
         ("target/release/bundle/nsis", "collects NSIS bundle output"),
+        ("  build-windows:", "defines a Windows release build"),
+        ("  build-linux:", "defines a Linux release build"),
+        (
+            "      - build-windows\n      - build-linux",
+            "waits for both platform builds before publication",
+        ),
         ("*.exe", "collects setup executable"),
         (".sig", "checks installer signatures"),
         ("generate-updater-manifest.ps1", "generates an updater manifest"),
@@ -141,8 +147,25 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
             if needle not in text:
                 issues.append(f"{workflow} does not show that it {description}.")
     if workflow.name == "publish-release.yml":
-        if "-Channel Stable" not in text:
-            issues.append(f"{workflow} does not generate an explicitly Stable manifest.")
+        for needle, description in [
+            ("on:\n  push:", "runs automatically for the stable branch"),
+            ("      - master", "targets the master branch for automatic publication"),
+            ("paths-ignore:", "excludes updater-feed-only commits from publication"),
+            ('      - "updater/**"', "ignores updater-feed-only commits"),
+            (
+                "\n  group: publish-stable-${{ github.repository }}\n",
+                "serializes complete Stable release runs",
+            ),
+            ("Verify release signing configuration", "checks release signing secrets before building"),
+            ("WINDOWS_CERTIFICATE_PASSWORD", "requires the Windows signing certificate password"),
+            ("Create or verify release tag", "creates or verifies the version-derived release tag"),
+            ("git tag --annotate", "creates an explicit annotated release tag"),
+            ("git rev-list -n 1 $tag", "verifies an existing tag against the release commit"),
+            ("--verify-tag", "requires the release tag to exist before draft creation"),
+            ("-Channel Stable", "generates an explicitly Stable manifest"),
+        ]:
+            if needle not in text:
+                issues.append(f"{workflow} does not show that it {description}.")
         if (
             "group: publish-stable-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}"
             not in text
@@ -151,6 +174,7 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
                 f"{workflow} does not serialize Stable publication for the resolved release tag."
             )
     draft_index = text.find("Create or update draft")
+    tag_index = text.find("Create or verify release tag")
     manifest_index = text.find("Generate stable updater manifest")
     if workflow.name == "publish-beta-release.yml":
         manifest_index = text.find("Generate beta updater manifest")
@@ -162,15 +186,19 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
         remote_verify_index = text.find("Verify committed beta updater feed")
         final_verify_index = text.find("Verify final beta draft assets and publish")
     publish_index = text.find("gh release edit", final_verify_index)
-    if min(
+    required_indexes = [
         draft_index,
         manifest_index,
         commit_index,
         remote_verify_index,
         final_verify_index,
         publish_index,
-    ) < 0 or not (
-        draft_index
+    ]
+    if workflow.name == "publish-release.yml":
+        required_indexes.append(tag_index)
+    if min(required_indexes) < 0 or not (
+        (workflow.name != "publish-release.yml" or tag_index < draft_index)
+        and draft_index
         < manifest_index
         < final_verify_index
         < publish_index

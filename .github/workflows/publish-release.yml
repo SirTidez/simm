@@ -1,10 +1,19 @@
 name: Publish Release
 
 on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "updater/**"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: publish-stable-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   validate:
@@ -20,6 +29,27 @@ jobs:
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify release signing configuration
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
+        shell: pwsh
+        run: |
+          $required = [ordered]@{
+            WINDOWS_CERTIFICATE = $env:WINDOWS_CERTIFICATE
+            WINDOWS_CERTIFICATE_PASSWORD = $env:WINDOWS_CERTIFICATE_PASSWORD
+            TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY
+            SIMM_UPDATER_PUBKEY = $env:SIMM_UPDATER_PUBKEY
+          }
+          $missing = @($required.GetEnumerator() | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_.Value)
+          } | ForEach-Object { $_.Key })
+          if ($missing.Count -gt 0) {
+            throw "Stable release signing is not configured. Add these GitHub Actions repository secrets before merging a version release: $($missing -join ', ')."
+          }
 
       - name: Verify release version metadata
         shell: pwsh
@@ -373,6 +403,43 @@ jobs:
             throw 'Stable release artifact validation failed.'
           }
 
+      - name: Create or verify release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $tag = '${{ needs.build-windows.outputs.tag }}'
+          if ($tag -cne "v$version") {
+            throw "Resolved release tag '$tag' does not match application version '$version'."
+          }
+
+          $remoteTag = git ls-remote --tags origin "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to inspect release tag '$tag' on origin."
+          }
+
+          if ($remoteTag) {
+            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to fetch existing release tag '$tag'."
+            }
+            $tagCommit = (git rev-list -n 1 $tag).Trim()
+            if ($tagCommit -cne $env:GITHUB_SHA) {
+              throw "Release tag '$tag' already points to '$tagCommit', not this release commit '$env:GITHUB_SHA'. Bump the application version before publishing another release."
+            }
+            Write-Host "Using existing release tag '$tag' at '$tagCommit'."
+          } else {
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag --annotate $tag $env:GITHUB_SHA --message "SIMM $version"
+            git push origin "refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to create release tag '$tag'."
+            }
+            Write-Host "Created release tag '$tag' at '$env:GITHUB_SHA'."
+          }
+
       - name: Create or update draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -392,7 +459,7 @@ jobs:
             }
             gh release upload $tag @assetPaths --clobber
           } else {
-            gh release create $tag @assetPaths --title $tag --generate-notes --draft --target $env:GITHUB_SHA
+            gh release create $tag @assetPaths --title $tag --generate-notes --draft --verify-tag
           }
 
       - name: Generate stable updater manifest
