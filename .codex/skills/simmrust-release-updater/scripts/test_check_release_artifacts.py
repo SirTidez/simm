@@ -88,6 +88,28 @@ class ReleaseArtifactChecks(unittest.TestCase):
         )
         self.assertTrue(any("full prerelease SemVer" in issue for issue in no_prerelease))
 
+    def test_beta_feed_can_fall_back_to_the_current_stable_release(self) -> None:
+        fallback = release_check.check_manifest_data(
+            manifest("0.8.6"),
+            "beta-fixture",
+            "beta",
+            "0.8.6",
+            "0.8.6",
+            allow_stable_fallback=True,
+        )
+        self.assertEqual(fallback, [])
+
+        stale = release_check.check_manifest_data(
+            manifest("0.8.5"),
+            "beta-fixture",
+            "beta",
+            "0.8.5",
+            "0.8.6",
+            allow_stable_fallback=True,
+        )
+        self.assertTrue(any("full prerelease SemVer" in issue for issue in stale))
+        self.assertTrue(any("is not newer than Stable" in issue for issue in stale))
+
     def test_manifest_rejects_missing_platform_and_stale_url(self) -> None:
         data = manifest("0.8.7-beta.1")
         platforms = data["platforms"]

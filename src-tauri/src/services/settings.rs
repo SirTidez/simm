@@ -1011,11 +1011,13 @@ impl SettingsService {
             (serde_json::Value::Object(base_map), serde_json::Value::Object(updates_map)) => {
                 let mut merged = base_map.clone();
                 for (key, value) in updates_map {
-                    if value.is_object() && merged.get(key).and_then(|v| v.as_object()).is_some() {
-                        merged[key] = Self::merge_json(&merged[key], value);
-                    } else {
-                        merged[key] = value.clone();
-                    }
+                    let merged_value = match merged.get(key) {
+                        Some(existing) if value.is_object() && existing.is_object() => {
+                            Self::merge_json(existing, value)
+                        }
+                        _ => value.clone(),
+                    };
+                    merged.insert(key.clone(), merged_value);
                 }
                 serde_json::Value::Object(merged)
             }
@@ -1396,6 +1398,36 @@ mod tests {
             hex::encode(nonce),
             hex::encode(ciphertext)
         ))
+    }
+
+    #[test]
+    fn merge_json_adds_missing_top_level_and_nested_keys_without_panicking() {
+        let base = serde_json::json!({
+            "theme": "dark",
+            "appUpdate": {
+                "channel": "stable"
+            }
+        });
+        let updates = serde_json::json!({
+            "newSetting": true,
+            "appUpdate": {
+                "byChannel": {
+                    "stable": {
+                        "skippedVersionNormalized": "0.8.7"
+                    }
+                }
+            }
+        });
+
+        let merged = SettingsService::merge_json(&base, &updates);
+
+        assert_eq!(merged["theme"], "dark");
+        assert_eq!(merged["newSetting"], true);
+        assert_eq!(merged["appUpdate"]["channel"], "stable");
+        assert_eq!(
+            merged["appUpdate"]["byChannel"]["stable"]["skippedVersionNormalized"],
+            "0.8.7"
+        );
     }
 
     #[tokio::test]

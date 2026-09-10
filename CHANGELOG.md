@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.7]
+
+- Restored the Profile Library import control so exported profile JSON files can be imported without crowding the existing profile apply and launch actions.
+- Ignored license-only archive and FOMOD mappings during mod installation so packages such as Bars Graphics can install their actual Mods and UserLibs payloads without treating license text as game content.
+- Prevented partial or forward-compatible settings updates from panicking when they introduce a key that is not already present in the current settings snapshot.
+- Updated the Vite and Vitest path aliases for native configuration loading, removing the recurring `__dirname` compatibility warning.
+- Simplified installed game-version detection to read only Unity's authoritative `globalgamemanagers` file instead of probing unrelated metadata, assemblies, and executable versions.
+- Kept the Beta updater feed on the latest Stable release when no newer prerelease exists, including automatic feed synchronization after Stable publication.
+
 ## [0.8.6]
 
 - Hardened Windows release delivery with required Authenticode signing and signer verification, Microsoft signature validation before running the downloaded VC++ redistributable, removal of the obsolete .NET 6 installer prerequisite now that DepotDownloader ships a self-contained Windows executable, draft-first GitHub publication, committed updater-feed freshness checks, release-contract regression tests, and Windows-native Rust CI coverage.

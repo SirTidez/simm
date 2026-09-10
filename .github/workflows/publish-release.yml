@@ -603,6 +603,49 @@ jobs:
             throw 'Stable updater manifest is missing the Linux updater signature.'
           }
 
+      - name: Synchronize beta updater fallback
+        shell: pwsh
+        run: |
+          $stableManifestPath = 'updater/stable/latest.json'
+          $betaManifestPath = 'updater/beta/latest-beta.json'
+          $stableManifest = Get-Content $stableManifestPath -Raw | ConvertFrom-Json
+          $replaceBetaFeed = $true
+
+          if (Test-Path -LiteralPath $betaManifestPath -PathType Leaf) {
+            $betaManifest = Get-Content $betaManifestPath -Raw | ConvertFrom-Json
+            $stableMatch = [regex]::Match([string]$stableManifest.version, '^(\d+)\.(\d+)\.(\d+)(?:-|$)')
+            $betaMatch = [regex]::Match([string]$betaManifest.version, '^(\d+)\.(\d+)\.(\d+)(?:-|$)')
+            if (-not $stableMatch.Success -or -not $betaMatch.Success) {
+              throw 'Unable to compare Stable and Beta updater manifest versions.'
+            }
+
+            $stableCore = [version]::new(
+              [int]$stableMatch.Groups[1].Value,
+              [int]$stableMatch.Groups[2].Value,
+              [int]$stableMatch.Groups[3].Value
+            )
+            $betaCore = [version]::new(
+              [int]$betaMatch.Groups[1].Value,
+              [int]$betaMatch.Groups[2].Value,
+              [int]$betaMatch.Groups[3].Value
+            )
+            $replaceBetaFeed = -not (
+              ([string]$betaManifest.version).Contains('-') -and $betaCore -gt $stableCore
+            )
+          }
+
+          if ($replaceBetaFeed) {
+            Copy-Item -LiteralPath $stableManifestPath -Destination $betaManifestPath -Force
+            Write-Host "Beta updater feed now falls back to Stable $($stableManifest.version)."
+          } else {
+            Write-Host "Preserving newer Beta updater feed $($betaManifest.version)."
+          }
+
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Updater feeds are invalid after synchronizing the Stable fallback.'
+          }
+
       - name: Upload stable updater manifest to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -670,18 +713,18 @@ jobs:
           }
           gh release edit $tag --draft=false --latest
 
-      - name: Commit stable updater manifest
+      - name: Commit updater manifests
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add updater/stable/latest.json
+          git add updater/stable/latest.json updater/beta/latest-beta.json
           if (git diff --cached --quiet) {
             Write-Host 'No manifest changes to commit.'
             exit 0
           }
 
-          git commit -m "chore(release): update stable updater manifest for ${{ needs.build-windows.outputs.version }}"
+          git commit -m "chore(release): update updater manifests for ${{ needs.build-windows.outputs.version }}"
           $branch = '${{ github.event.repository.default_branch }}'
           git fetch origin $branch
           git rebase "origin/$branch"
@@ -702,4 +745,15 @@ jobs:
           $manifest = $json | ConvertFrom-Json
           if ($manifest.version -cne $version -or -not $manifest.platforms.'windows-x86_64' -or -not $manifest.platforms.'linux-x86_64') {
             throw "The default-branch Stable updater feed is stale or incomplete for '$version'."
+          }
+
+          $expectedBeta = Get-Content 'updater/beta/latest-beta.json' -Raw | ConvertFrom-Json
+          $encodedBeta = gh api "repos/$env:GITHUB_REPOSITORY/contents/updater/beta/latest-beta.json?ref=$branch" --jq .content
+          if ($LASTEXITCODE -ne 0 -or -not $encodedBeta) {
+            throw 'The committed Beta updater feed is not readable from the default branch.'
+          }
+          $betaJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($encodedBeta -replace '\s', '')))
+          $betaManifest = $betaJson | ConvertFrom-Json
+          if ($betaManifest.version -cne $expectedBeta.version -or -not $betaManifest.platforms.'windows-x86_64' -or -not $betaManifest.platforms.'linux-x86_64') {
+            throw "The default-branch Beta updater feed does not match the validated '$($expectedBeta.version)' fallback or prerelease."
           }
