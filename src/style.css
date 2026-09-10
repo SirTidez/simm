@@ -12056,6 +12056,17 @@ body {
   font-weight: 700;
 }
 
+.profiles-workspace__library-actions {
+  display: flex;
+  padding: 0.15rem;
+}
+
+.profiles-workspace__library-actions .btn {
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+}
+
 .profiles-workspace__runtime-tabs,
 .profiles-workspace__toolbar {
   display: flex;

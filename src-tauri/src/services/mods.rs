@@ -7892,11 +7892,20 @@ exit 1
         None
     }
 
-    fn is_ignored_thunderstore_package_entry(file_name: &str) -> bool {
+    fn is_license_metadata_entry(file_name: &str) -> bool {
         matches!(
             file_name.to_ascii_lowercase().as_str(),
-            "manifest.json" | "readme.md" | "changelog.md" | "license" | "license.md" | "icon.png"
+            "license" | "licenses" | "license.md" | "license.txt"
         )
+    }
+
+    fn is_ignored_archive_package_entry(file_name: &str, is_thunderstore_package: bool) -> bool {
+        Self::is_license_metadata_entry(file_name)
+            || (is_thunderstore_package
+                && matches!(
+                    file_name.to_ascii_lowercase().as_str(),
+                    "manifest.json" | "readme.md" | "changelog.md" | "icon.png"
+                ))
     }
 
     async fn copy_loose_archive_payload_to_bucket(
@@ -8119,9 +8128,10 @@ exit 1
                             ) {
                                 continue;
                             }
-                            if is_thunderstore_package
-                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
-                            {
+                            if Self::is_ignored_archive_package_entry(
+                                runtime_file_name,
+                                is_thunderstore_package,
+                            ) {
                                 continue;
                             }
 
@@ -8162,9 +8172,10 @@ exit 1
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
-                } else if !is_thunderstore_package
-                    || !Self::is_ignored_thunderstore_package_entry(file_name)
-                {
+                } else if !Self::is_ignored_archive_package_entry(
+                    file_name,
+                    is_thunderstore_package,
+                ) {
                     self.copy_loose_archive_payload_to_bucket(
                         &entry_path,
                         file_name,
@@ -8187,9 +8198,7 @@ exit 1
                     fs::copy(&entry_path, &dest_path).await?;
                     installed_files.push(file_name.to_string());
                 }
-            } else if !is_thunderstore_package
-                || !Self::is_ignored_thunderstore_package_entry(file_name)
-            {
+            } else if !Self::is_ignored_archive_package_entry(file_name, is_thunderstore_package) {
                 self.copy_loose_archive_payload_to_bucket(
                     &entry_path,
                     file_name,
@@ -8344,9 +8353,10 @@ exit 1
                             ) {
                                 continue;
                             }
-                            if is_thunderstore_package
-                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
-                            {
+                            if Self::is_ignored_archive_package_entry(
+                                runtime_file_name,
+                                is_thunderstore_package,
+                            ) {
                                 continue;
                             }
 
@@ -8386,9 +8396,10 @@ exit 1
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
-                } else if !is_thunderstore_package
-                    || !Self::is_ignored_thunderstore_package_entry(file_name)
-                {
+                } else if !Self::is_ignored_archive_package_entry(
+                    file_name,
+                    is_thunderstore_package,
+                ) {
                     self.copy_loose_archive_payload_to_mods(
                         &entry_path,
                         file_name,
@@ -8410,9 +8421,7 @@ exit 1
                     fs::copy(&entry_path, &dest_path).await?;
                     installed_files.push(file_name.to_string());
                 }
-            } else if !is_thunderstore_package
-                || !Self::is_ignored_thunderstore_package_entry(file_name)
-            {
+            } else if !Self::is_ignored_archive_package_entry(file_name, is_thunderstore_package) {
                 self.copy_loose_archive_payload_to_mods(
                     &entry_path,
                     file_name,
@@ -8564,9 +8573,10 @@ exit 1
                             ) {
                                 continue;
                             }
-                            if is_thunderstore_package
-                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
-                            {
+                            if Self::is_ignored_archive_package_entry(
+                                runtime_file_name,
+                                is_thunderstore_package,
+                            ) {
                                 continue;
                             }
 
@@ -8605,9 +8615,10 @@ exit 1
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
-                } else if !is_thunderstore_package
-                    || !Self::is_ignored_thunderstore_package_entry(file_name)
-                {
+                } else if !Self::is_ignored_archive_package_entry(
+                    file_name,
+                    is_thunderstore_package,
+                ) {
                     self.copy_loose_archive_payload_to_mods(
                         &entry_path,
                         file_name,
@@ -8628,9 +8639,7 @@ exit 1
                     fs::copy(&entry_path, &dest_path).await?;
                     installed_files.push(file_name.to_string());
                 }
-            } else if !is_thunderstore_package
-                || !Self::is_ignored_thunderstore_package_entry(file_name)
-            {
+            } else if !Self::is_ignored_archive_package_entry(file_name, is_thunderstore_package) {
                 self.copy_loose_archive_payload_to_mods(
                     &entry_path,
                     file_name,
@@ -8812,9 +8821,10 @@ exit 1
                             ) {
                                 continue;
                             }
-                            if is_thunderstore_package
-                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
-                            {
+                            if Self::is_ignored_archive_package_entry(
+                                runtime_file_name,
+                                is_thunderstore_package,
+                            ) {
                                 continue;
                             }
 
@@ -8853,9 +8863,10 @@ exit 1
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
-                } else if !is_thunderstore_package
-                    || !Self::is_ignored_thunderstore_package_entry(file_name)
-                {
+                } else if !Self::is_ignored_archive_package_entry(
+                    file_name,
+                    is_thunderstore_package,
+                ) {
                     self.copy_loose_archive_payload_to_mods(
                         &entry_path,
                         file_name,
@@ -8876,9 +8887,7 @@ exit 1
                     fs::copy(&entry_path, &dest_path).await?;
                     installed_files.push(file_name.to_string());
                 }
-            } else if !is_thunderstore_package
-                || !Self::is_ignored_thunderstore_package_entry(file_name)
-            {
+            } else if !Self::is_ignored_archive_package_entry(file_name, is_thunderstore_package) {
                 self.copy_loose_archive_payload_to_mods(
                     &entry_path,
                     file_name,
@@ -8916,6 +8925,12 @@ exit 1
         let mut installed_files = Vec::new();
         let mut copied_any = false;
         for entry in &entries {
+            let normalized_source = Self::normalize_fomod_path_value(&entry.source);
+            let source_root = normalized_source.split('/').next().unwrap_or("");
+            if Self::is_license_metadata_entry(source_root) {
+                continue;
+            }
+
             if let (Some(target_runtime), Some(entry_runtime)) = (runtime, entry.runtime.as_deref())
             {
                 if !entry_runtime.eq_ignore_ascii_case(target_runtime) {
@@ -9306,6 +9321,9 @@ exit 1
                 let meta = entry.metadata().await?;
 
                 if meta.is_dir() {
+                    if Self::is_license_metadata_entry(&file_name) {
+                        continue;
+                    }
                     if file_name == "mods"
                         || file_name == "plugins"
                         || file_name == "userlibs"
@@ -15297,6 +15315,83 @@ mod tests {
         assert_eq!(installed_files, vec!["Renamed.dll".to_string()]);
         assert!(mods_dir.join("Renamed.dll").exists());
         assert!(!mods_dir.join("Original.dll").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn try_extract_fomod_content_ignores_license_folder_mappings() -> Result<()> {
+        let temp = tempdir()?;
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+
+        let content_root = temp.path().join("content");
+        fs::create_dir_all(content_root.join("fomod")).await?;
+        fs::create_dir_all(content_root.join("Mods")).await?;
+        fs::create_dir_all(content_root.join("UserLibs")).await?;
+        fs::create_dir_all(content_root.join("LICENSES")).await?;
+        fs::write(content_root.join("Mods").join("BarsGraphics.dll"), b"mod").await?;
+        fs::write(content_root.join("UserLibs").join("bGUI.dll"), b"userlib").await?;
+        fs::write(
+            content_root.join("LICENSES").join("bGUI-MIT.txt"),
+            b"license",
+        )
+        .await?;
+        fs::write(
+            content_root.join("fomod").join("moduleconfig.xml"),
+            r#"
+<config>
+  <moduleName>Bars Graphics</moduleName>
+  <installSteps order="Explicit">
+    <installStep name="Install Bars Graphics">
+      <optionalFileGroups order="Explicit">
+        <group name="Schedule I MelonLoader files" type="SelectAll">
+          <plugins order="Explicit">
+            <plugin name="Bars Graphics">
+              <files>
+                <folder source="Mods" destination="Mods" />
+                <folder source="UserLibs" destination="UserLibs" />
+                <folder source="LICENSES" destination="BarsGraphics-LICENSES" />
+              </files>
+              <typeDescriptor>
+                <type name="Required" />
+              </typeDescriptor>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+        )
+        .await?;
+
+        let mods_dir = temp.path().join("mods");
+        let plugins_dir = temp.path().join("plugins");
+        let userlibs_dir = temp.path().join("userlibs");
+        let userdata_dir = temp.path().join("userdata");
+        for directory in [&mods_dir, &plugins_dir, &userlibs_dir, &userdata_dir] {
+            fs::create_dir_all(directory).await?;
+        }
+
+        service
+            .try_extract_fomod_content(
+                &content_root,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                None,
+            )
+            .await?
+            .expect("installable mappings should still materialize files");
+
+        assert_eq!(fs::read(mods_dir.join("BarsGraphics.dll")).await?, b"mod");
+        assert_eq!(fs::read(userlibs_dir.join("bGUI.dll")).await?, b"userlib");
+        assert!(!mods_dir.join("BarsGraphics-LICENSES").exists());
+        assert!(!plugins_dir.join("BarsGraphics-LICENSES").exists());
+        assert!(!userlibs_dir.join("BarsGraphics-LICENSES").exists());
+        assert!(!userdata_dir.join("BarsGraphics-LICENSES").exists());
 
         Ok(())
     }

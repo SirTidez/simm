@@ -475,18 +475,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
         eyebrow="Profiles"
         title="Profiles"
         description="Switch, capture, import, and export runtime-locked mod sets."
-      >
-        <SimmButton
-          type="button"
-          variant="secondary"
-          className="btn btn-secondary"
-          onClick={() => void runAction('import', importProfile)}
-          disabled={busyAction !== null}
-        >
-          <Icon name="upload" />
-          Import JSON
-        </SimmButton>
-      </WorkspacePageHeader>
+      />
 
       {error && <div className="profiles-workspace__alert profiles-workspace__alert--error" role="alert">{error}</div>}
       {notice && <div className="profiles-workspace__alert profiles-workspace__alert--success" role="status">{notice}</div>}
@@ -496,6 +485,18 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
           <div className="profiles-workspace__library-header">
             <span className="workspace-eyebrow">Profile Library</span>
             <small>IL2CPP and Mono</small>
+          </div>
+          <div className="profiles-workspace__library-actions">
+            <SimmButton
+              type="button"
+              variant="secondary"
+              className="btn btn-secondary"
+              onClick={() => void runAction('import', importProfile)}
+              disabled={busyAction !== null}
+            >
+              <Icon name={busyAction === 'import' ? 'spinner' : 'upload'} />
+              Import JSON
+            </SimmButton>
           </div>
           <div className="profiles-workspace__profile-list" role="list" aria-label="Profiles">
             {profilesLoading ? (

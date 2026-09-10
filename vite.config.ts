@@ -39,7 +39,7 @@ export default defineConfig(({ mode }) => {
     base: './',
     resolve: {
       alias: {
-        '@': resolve(__dirname, './src'),
+        '@': resolve(import.meta.dirname, './src'),
       },
     },
     define: {

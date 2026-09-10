@@ -176,6 +176,9 @@ describe('ProfilesWorkspace', () => {
       name: 'Custom Mono',
       isDefault: false,
     });
+    apiMocks.readModProfileFile.mockResolvedValue(profiles[1].manifest);
+    apiMocks.importModProfileToLibrary.mockResolvedValue(profiles[1]);
+    dialogMocks.open.mockResolvedValue('C:/tmp/import-profile.json');
     dialogMocks.save.mockResolvedValue('C:/tmp/profile.json');
   });
 
@@ -280,6 +283,28 @@ describe('ProfilesWorkspace', () => {
       });
     });
     expect(apiMocks.saveModProfileFile).toHaveBeenCalledWith(profiles[0].manifest, 'C:/tmp/profile.json');
+  });
+
+  it('keeps profile import visible in the library without crowding the apply toolbar', async () => {
+    render(<ProfilesWorkspace />);
+
+    const library = screen.getByRole('complementary', { name: /profile library/i });
+    const toolbar = document.querySelector('.profiles-workspace__toolbar');
+    const importButton = within(library).getByRole('button', { name: /Import JSON/i });
+
+    expect(toolbar).not.toContainElement(importButton);
+    fireEvent.click(importButton);
+
+    await waitFor(() => {
+      expect(dialogMocks.open).toHaveBeenCalledWith({
+        title: 'Choose SIMM profile JSON',
+        multiple: false,
+        filters: [{ name: 'SIMM profile', extensions: ['json'] }],
+      });
+    });
+    expect(apiMocks.readModProfileFile).toHaveBeenCalledWith('C:/tmp/import-profile.json');
+    expect(apiMocks.importModProfileToLibrary).toHaveBeenCalledWith(profiles[1].manifest);
+    expect(await screen.findByText('Imported Default Mono.')).toBeTruthy();
   });
 
   it('applies a profile before launching the selected environment', async () => {
