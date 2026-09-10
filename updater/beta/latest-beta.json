@@ -1,15 +1,15 @@
 {
-  "version": "0.8.6",
-  "notes": "## What's Changed\n* fix(nexus): preserve distinct Main files by @ifBars in https://github.com/SirTidez/simm/pull/20\n* Add Linux support and improve Steam authentication UI by @SirTidez in https://github.com/SirTidez/simm/pull/22\n* feat: add environment profile sharing by @ifBars in https://github.com/SirTidez/simm/pull/21\n* 0.8.6 - Profiles, cross-platform runtime, telemetry, and release hardening by @SirTidez in https://github.com/SirTidez/simm/pull/24\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.5-beta...v0.8.6",
-  "pub_date": "2026-09-09T06:21:36.9649436+00:00",
+  "version": "0.8.7",
+  "notes": "## What's Changed\n* Restore profile import and harden runtime handling by @SirTidez in https://github.com/SirTidez/simm/pull/29\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.6...v0.8.7",
+  "pub_date": "2026-09-10T00:55:30.6552078+00:00",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.6/SIMM_0.8.6_Setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cldReWdYNmJiWlcxV04wZUl5V2dOY25hK2N5VUtwTEltYmFmeHRiUVFiVW9oajlzR2JQMHJ0emIxckNLcm9IS2hFWUtpOGtIdEwvNkdYcGpsdGlPbkFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4OTM0Nzc2CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguNl94NjQtc2V0dXAuZXhlCk9MMUNoVnk0OWNvUXdIa2dhVU43SFFDZzdSWWhJTDM1cDBHNlIrTnJzdERpYjh0MkdwSlRLZld3b2k3VWpWa0tVM1FrS0t5T2F1RjN2enNoQk5kNUN3PT0K"
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.7/SIMM_0.8.7_Setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmVHVWtYRWxBd0FpNHhDK3V5UUlzSEo0dFY4c2FiblpNbXZ6SlMxNFJHWEdCMEl1Qm1JdjBodVNaZVk0MEFpK1FrRWp1Q1h2ak41b0dkQ1VTbndLWmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDAxNjg3CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguN194NjQtc2V0dXAuZXhlClJpQ0o0UGFNdkZtVjU5Q2g4MFJBTkMwRGpiZkx6bFR4clBmM2R2dEt0V0I2aWw3ZVpLVWxiNzhPR0lNYVRyNXZSK01lT2JYNGI2ZzRPQjV1T3N5OUNBPT0K"
     },
     "linux-x86_64": {
-      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.6/SIMM_0.8.6_x86_64.AppImage",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5clcvOHYyQkEyQUE3d2ZjYjU5QW1TMlVmL0J0WHNVSjkyMzV1T0trYmlkTm1Mblg2cG0xcmRBci9uK2lwNTVSanhQRjFDaDJXM1gyMDNIS0xQeW1nUUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4OTM0MzY3CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguNl9hbWQ2NC5BcHBJbWFnZQpKZjI0K01OSEtONFFBbWdxcHlaYTZXMHNBOEV2T0VqMEdrNmJFVmNlQ1p5TXo4Z0xDc0k3RStDMko4dFNMMVU0aEhyVmdEaTJLL2NYc3ZhWFdrWkREZz09Cg=="
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.7/SIMM_0.8.7_x86_64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmZxSzVJM3VoalcvWFNXa3Frc2ZxTVZHRitsRUc3MS8wSG5TNTJBSnYxblFkYlIrTFF2enNsMG42NG5ZY2Q2SW1MNmk5QlhFaUpoeTROMy9QdlJ6SUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDAxMzM4CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguN19hbWQ2NC5BcHBJbWFnZQoycWEwVkl5V3V3bnhpeDVIUVJ1N24xZk5OUWRTYXQvY2IyenRpeUFqS3h0Q01mVmJ4UkZUc0I1bE9LaTllN1BtcWtHY1A3YklxazhSd0tkN0RseE1Cdz09Cg=="
     }
   }
 }
