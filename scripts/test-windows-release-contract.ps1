@@ -81,7 +81,7 @@ foreach ($relativeWorkflowPath in $workflowPaths) {
 }
 
 $manualWorkflowPath = Join-Path $repoRoot '.github\workflows\windows-exe.yml'
-$manualWorkflow = Get-Content -LiteralPath $manualWorkflowPath -Raw
+$manualWorkflow = (Get-Content -LiteralPath $manualWorkflowPath -Raw) -replace "`r`n", "`n"
 $manualRequirements = [ordered]@{
   'name: Build Release Artifacts' = 'describe both target builds'
   '  build-windows:' = 'define a Windows artifact build'

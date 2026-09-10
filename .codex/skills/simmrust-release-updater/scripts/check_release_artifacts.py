@@ -181,6 +181,14 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
             ("git rev-list -n 1 $tag", "verifies an existing tag against the release commit"),
             ("--verify-tag", "requires the release tag to exist before draft creation"),
             ("-Channel Stable", "generates an explicitly Stable manifest"),
+            (
+                "Synchronize beta updater fallback",
+                "keeps Beta users on Stable when no newer prerelease exists",
+            ),
+            (
+                "git add updater/stable/latest.json updater/beta/latest-beta.json",
+                "commits both validated updater feeds after publication",
+            ),
         ]:
             if needle not in text:
                 issues.append(f"{workflow} does not show that it {description}.")
@@ -215,7 +223,7 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
     manifest_index = text.find("Generate stable updater manifest")
     if workflow.name == "publish-beta-release.yml":
         manifest_index = text.find("Generate beta updater manifest")
-    commit_index = text.find("Commit stable updater manifest")
+    commit_index = text.find("Commit updater manifests")
     remote_verify_index = text.find("Verify committed stable updater feed")
     final_verify_index = text.find("Verify final stable draft assets and publish")
     if workflow.name == "publish-beta-release.yml":
@@ -340,6 +348,7 @@ def check_version_identity(
     channel: str,
     package_version: str,
     minimum_version: str | None = None,
+    allow_stable_fallback: bool = False,
 ) -> tuple[SemVer | None, list[str]]:
     issues: list[str] = []
     try:
@@ -358,14 +367,20 @@ def check_version_identity(
         )
     if channel == "stable" and version.prerelease:
         issues.append(f"{label} Stable manifest must not use a prerelease version.")
-    if channel == "beta" and not version.prerelease:
+    stable_fallback = False
+    if channel == "beta" and allow_stable_fallback and not version.prerelease and minimum_version:
+        try:
+            stable_fallback = version.compare_precedence(SemVer.parse(minimum_version)) == 0
+        except ValueError:
+            pass
+    if channel == "beta" and not version.prerelease and not stable_fallback:
         issues.append(f"{label} Beta manifest must use a full prerelease SemVer identity.")
     if channel == "beta" and not minimum_version:
         issues.append(f"{label} Beta identity requires the current Stable version.")
     if minimum_version:
         try:
             minimum = SemVer.parse(minimum_version)
-            if version.compare_precedence(minimum) <= 0:
+            if version.compare_precedence(minimum) <= 0 and not stable_fallback:
                 issues.append(
                     f"{label} version '{version.raw}' is not newer than Stable "
                     f"'{minimum.raw}'."
@@ -382,12 +397,18 @@ def check_manifest_data(
     package_version: str,
     minimum_version: str | None = None,
     artifact_dir: Path | None = None,
+    allow_stable_fallback: bool = False,
 ) -> list[str]:
     if not isinstance(data, dict):
         return [f"{label} must contain a JSON object."]
     version_raw = str(data.get("version", "")).strip()
     version, issues = check_version_identity(
-        version_raw, label, channel, package_version, minimum_version
+        version_raw,
+        label,
+        channel,
+        package_version,
+        minimum_version,
+        allow_stable_fallback,
     )
     if version is None:
         return issues
@@ -441,6 +462,7 @@ def check_manifest(
     package_version: str,
     minimum_version: str | None = None,
     artifact_dir: Path | None = None,
+    allow_stable_fallback: bool = False,
 ) -> list[str]:
     path = repo / manifest
     if not path.exists():
@@ -456,6 +478,7 @@ def check_manifest(
         package_version,
         minimum_version,
         artifact_dir,
+        allow_stable_fallback,
     )
 
 
@@ -596,6 +619,7 @@ def main(argv: list[str] | None = None) -> int:
                 "beta",
                 beta_expected,
                 stable_version,
+                allow_stable_fallback=True,
             )
         )
         generator = repo / "scripts" / "generate-updater-manifest.ps1"
