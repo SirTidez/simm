@@ -8222,6 +8222,22 @@ body {
   flex-wrap: wrap;
 }
 
+.mods-overlay--library .workspace-collection__primary-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  flex: 1 1 25rem;
+  width: 100%;
+  max-width: 26.4rem;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.mods-overlay--library .workspace-collection__primary-tabs > .workspace-collection__rail-button {
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+}
+
 .workspace-collection__rail-group--inline .workspace-collection__rail-button {
   width: auto;
   flex: 0 0 auto;
@@ -8271,6 +8287,10 @@ body {
   justify-content: center;
   border-color: transparent;
   background: transparent;
+}
+
+.mods-overlay--library .workspace-collection__primary-tabs > .workspace-collection__rail-button {
+  min-width: 0;
 }
 
 .mods-overlay--library .workspace-collection__rail-group--inline:first-child .workspace-collection__rail-button--active,
@@ -8379,6 +8399,13 @@ body {
   align-items: center;
   gap: 0.55rem;
   flex-wrap: wrap;
+}
+
+.mods-overlay--library .workspace-collection__toolbar {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding-right: 0.5rem;
 }
 
 .profile-workspace__layout {
