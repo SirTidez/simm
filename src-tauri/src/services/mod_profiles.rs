@@ -1005,7 +1005,12 @@ fn build_managed_mod_items(
                 source_url: entry.and_then(|entry| entry.source_url.clone()),
                 runtime: Some(environment.runtime.clone()),
                 storage_id: Some(storage_id),
-                nexus_file_id: entry.and_then(|entry| parse_nexus_file_id(entry.tags.as_deref())),
+                nexus_file_id: entry.and_then(|entry| {
+                    entry
+                        .nexus_file_id
+                        .clone()
+                        .or_else(|| parse_nexus_file_id(entry.tags.as_deref()))
+                }),
                 manual_reason: None,
             }
             .into()
@@ -1311,7 +1316,12 @@ fn installed_storage_id(
                         library
                             .iter()
                             .find(|entry| library_entry_storage_id_matches(entry, &storage_id))
-                            .and_then(|entry| parse_nexus_file_id(entry.tags.as_deref()))
+                            .and_then(|entry| {
+                                entry
+                                    .nexus_file_id
+                                    .clone()
+                                    .or_else(|| parse_nexus_file_id(entry.tags.as_deref()))
+                            })
                     });
                 if installed_file_id.as_deref() != Some(expected_file_id) {
                     return None;
@@ -1774,7 +1784,12 @@ fn library_entry_installed_in_environment_for_runtime(
 
 fn library_entry_nexus_file_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
     item.nexus_file_id.as_deref().is_none_or(|expected| {
-        parse_nexus_file_id(entry.tags.as_deref()).as_deref() == Some(expected)
+        entry
+            .nexus_file_id
+            .clone()
+            .or_else(|| parse_nexus_file_id(entry.tags.as_deref()))
+            .as_deref()
+            == Some(expected)
     })
 }
 
@@ -2060,6 +2075,7 @@ mod tests {
             attached_userdata: Vec::new(),
             source: Some(ModSource::Thunderstore),
             source_id: Some(source_id.to_string()),
+            nexus_file_id: None,
             source_version: Some("1.0.0".to_string()),
             source_url: None,
             summary: None,

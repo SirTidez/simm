@@ -452,6 +452,66 @@ pub struct NexusModFileDependencies {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NexusModsPage {
+    pub mods: Vec<serde_json::Value>,
+    pub total_count: u64,
+    pub offset: u32,
+    pub count: u32,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionsPage {
+    pub collections: Vec<serde_json::Value>,
+    pub total_count: u64,
+    pub offset: u32,
+    pub count: u32,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionModFile {
+    pub collection_revision_mod_id: String,
+    pub mod_id: Option<u32>,
+    pub file_id: u32,
+    pub game_id: Option<u32>,
+    pub mod_name: String,
+    pub file_name: String,
+    pub version: String,
+    pub optional: bool,
+    pub update_policy: Option<String>,
+    pub size_in_bytes: Option<u64>,
+    pub uri: Option<String>,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionExternalResource {
+    pub id: String,
+    pub name: String,
+    pub optional: bool,
+    pub resource_type: String,
+    pub resource_url: Option<String>,
+    pub version: Option<String>,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionRevisionPlan {
+    pub slug: String,
+    pub revision_id: String,
+    pub revision_number: u32,
+    pub total_size: Option<u64>,
+    pub mod_files: Vec<NexusCollectionModFile>,
+    pub external_resources: Vec<NexusCollectionExternalResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CustomThemeDefinition {
     pub id: String,
     pub name: String,
@@ -1077,6 +1137,7 @@ pub struct ModLibraryEntry {
     pub attached_userdata: Vec<String>,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
+    pub nexus_file_id: Option<String>,
     pub source_version: Option<String>,
     pub source_url: Option<String>,
     pub summary: Option<String>,
@@ -1427,6 +1488,7 @@ mod tests {
             attached_userdata: vec!["Profile/save.dat".to_string()],
             source: Some(ModSource::Github),
             source_id: Some("owner/repo".to_string()),
+            nexus_file_id: None,
             source_version: Some("v1.0.0".to_string()),
             source_url: Some("https://example.com".to_string()),
             summary: Some("Example summary".to_string()),

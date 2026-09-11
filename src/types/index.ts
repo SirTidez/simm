@@ -635,11 +635,89 @@ export interface NexusMod {
   uploaded_time: string;
   updated_time: string;
   category_id: number;
+  category_name?: string;
   contains_adult_content: boolean;
   status: string;
+  direct_download_enabled?: boolean;
+  supports_vortex?: boolean;
+  tags?: string[];
   endorsement_count: number;
   unique_downloads: number;
   mod_downloads: number;
+}
+
+export interface NexusModsPage {
+  mods: NexusMod[];
+  totalCount: number;
+  offset: number;
+  count: number;
+  hasMore: boolean;
+}
+
+export interface NexusCollection {
+  id: number;
+  slug: string;
+  name: string;
+  summary: string;
+  category_name?: string;
+  curator_name: string;
+  curator_member_id?: number;
+  curator_avatar_url?: string;
+  tile_image_url?: string;
+  tile_image_alt?: string;
+  endorsements: number;
+  total_downloads: number;
+  overall_rating?: number;
+  overall_rating_count?: number;
+  first_published_at?: string;
+  updated_at?: string;
+  revision_number?: number;
+  revision_updated_at?: string;
+  mod_count: number;
+  file_size?: number;
+  contains_adult_content: boolean;
+}
+
+export interface NexusCollectionsPage {
+  collections: NexusCollection[];
+  totalCount: number;
+  offset: number;
+  count: number;
+  hasMore: boolean;
+}
+
+export interface NexusCollectionModFile {
+  collectionRevisionModId: string;
+  modId?: number;
+  fileId: number;
+  gameId?: number;
+  modName: string;
+  fileName: string;
+  version: string;
+  optional: boolean;
+  updatePolicy?: string;
+  sizeInBytes?: number;
+  uri?: string;
+  available: boolean;
+}
+
+export interface NexusCollectionExternalResource {
+  id: string;
+  name: string;
+  optional: boolean;
+  resourceType: string;
+  resourceUrl?: string;
+  version?: string;
+  author?: string;
+}
+
+export interface NexusCollectionRevisionPlan {
+  slug: string;
+  revisionId: string;
+  revisionNumber: number;
+  totalSize?: number;
+  modFiles: NexusCollectionModFile[];
+  externalResources: NexusCollectionExternalResource[];
 }
 
 export interface NexusModFile {
@@ -653,6 +731,10 @@ export interface NexusModFile {
   file_name: string;
   uploaded_timestamp: number;
   mod_version: string;
+  description?: string;
+  detected_file_extension?: string;
+  total_downloads?: number;
+  unique_downloads?: number;
 }
 
 export interface NexusDependencyCandidate {
@@ -683,6 +765,7 @@ export interface ModLibraryEntry {
   attachedUserData?: string[];
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceId?: string;
+  nexusFileId?: string;
   sourceVersion?: string;
   sourceUrl?: string;
   summary?: string;

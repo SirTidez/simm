@@ -19,6 +19,9 @@ use winreg::RegKey;
 
 static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+static NEXUS_OAUTH_REFRESH_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+static NEXUS_OAUTH_LISTENER: Lazy<AsyncMutex<Option<tokio::task::JoinHandle<()>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 const DEFAULT_NEXUS_OAUTH_CLIENT_ID: &str = "simm";
 const NEXUS_V1_API_BASE: &str = "https://api.nexusmods.com/v1";
 const NXM_PROTOCOL: &str = "nxm";
@@ -57,15 +60,23 @@ fn classify_oauth_refresh_failure(
     if status == reqwest::StatusCode::BAD_REQUEST
         && error_code.eq_ignore_ascii_case("invalid_grant")
     {
-        return OAuthRefreshFailure::ReconnectRequired(nexus_warn(
-            "Stored Nexus login could not be refreshed because Nexus rejected the saved refresh token. This usually means the previous login expired, was revoked, or was replaced. Reconnect Nexus if downloads stop working.",
-        ));
+        return OAuthRefreshFailure::ReconnectRequired(
+            "Stored Nexus login could not be refreshed because Nexus rejected the saved refresh token. This usually means the previous login expired, was revoked, or was replaced. Reconnect Nexus if downloads stop working."
+                .to_string(),
+        );
     }
 
     OAuthRefreshFailure::Error(nexus_error(format!(
         "OAuth token refresh failed ({}): {}",
         status, value
     )))
+}
+
+fn session_uses_replaced_refresh_token(session: &Value, attempted_refresh_token: &str) -> bool {
+    session
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .is_some_and(|latest| latest != attempted_refresh_token)
 }
 
 async fn cleanup_temp_archive(path: &std::path::Path) {
@@ -226,7 +237,7 @@ fn oauth_redirect_uri(prefer_localhost: bool) -> String {
     if prefer_localhost {
         env_or_default(
             "NEXUS_OAUTH_REDIRECT_URI_LOCALHOST",
-            "http://127.0.0.1:8089/callback",
+            "http://localhost:8089/callback",
         )
     } else {
         env_or_default("NEXUS_OAUTH_REDIRECT_URI", "simm://oauth/nexus/callback")
@@ -1040,13 +1051,72 @@ async fn get_nexus_mods_service() -> Result<Arc<NexusModsService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn spawn_localhost_oauth_listener(db: Arc<SqlitePool>) {
-    tauri::async_runtime::spawn(async move {
-        let listener = match TcpListener::bind("127.0.0.1:8089").await {
-            Ok(listener) => listener,
-            Err(_) => return,
-        };
+fn loopback_listener_address(redirect_uri: &str) -> Result<(String, u16), String> {
+    let parsed = reqwest::Url::parse(redirect_uri)
+        .map_err(|error| nexus_error(format!("Invalid Nexus localhost redirect URI: {}", error)))?;
+    if parsed.scheme() != "http" {
+        return Err(nexus_error(
+            "Nexus localhost redirect URI must use the http scheme",
+        ));
+    }
 
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| nexus_error("Nexus localhost redirect URI is missing a host"))?;
+    if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Err(nexus_error(
+            "Nexus localhost redirect URI must use a loopback host",
+        ));
+    }
+
+    let port = parsed
+        .port()
+        .ok_or_else(|| nexus_error("Nexus localhost redirect URI is missing a port"))?;
+    Ok((host.to_string(), port))
+}
+
+fn build_loopback_callback_url(redirect_uri: &str, request_target: &str) -> Result<String, String> {
+    if !request_target.starts_with('/') {
+        return Err(nexus_error("Invalid Nexus OAuth callback request target"));
+    }
+
+    let mut callback = reqwest::Url::parse(redirect_uri)
+        .map_err(|error| nexus_error(format!("Invalid Nexus localhost redirect URI: {}", error)))?;
+    let target_without_fragment = request_target.split('#').next().unwrap_or(request_target);
+    let (path, query) = target_without_fragment
+        .split_once('?')
+        .map(|(path, query)| (path, Some(query)))
+        .unwrap_or((target_without_fragment, None));
+    callback.set_path(path);
+    callback.set_query(query.filter(|value| !value.is_empty()));
+    callback.set_fragment(None);
+    Ok(callback.to_string())
+}
+
+async fn start_localhost_oauth_listener(
+    db: Arc<SqlitePool>,
+    redirect_uri: String,
+) -> Result<(), String> {
+    let (host, port) = loopback_listener_address(&redirect_uri)?;
+    let mut active_listener = NEXUS_OAUTH_LISTENER.lock().await;
+    if let Some(previous) = active_listener.take() {
+        previous.abort();
+        let _ = previous.await;
+    }
+
+    // Bind before opening the browser. A callback flow that cannot receive its
+    // redirect must fail visibly here instead of leaving the browser on
+    // ERR_CONNECTION_REFUSED and the app waiting until timeout.
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|error| {
+            nexus_error(format!(
+                "Failed to start the Nexus login callback listener at {}: {}",
+                redirect_uri, error
+            ))
+        })?;
+
+    let listener_task = tokio::spawn(async move {
         let accepted = tokio::time::timeout(Duration::from_secs(600), listener.accept()).await;
         let (mut socket, _) = match accepted {
             Ok(Ok(pair)) => pair,
@@ -1068,7 +1138,7 @@ async fn spawn_localhost_oauth_listener(db: Arc<SqlitePool>) {
         if let Some(first_line) = request.lines().next() {
             let parts: Vec<&str> = first_line.split_whitespace().collect();
             if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("GET") {
-                callback_url = Some(format!("http://127.0.0.1:8089{}", parts[1]));
+                callback_url = build_loopback_callback_url(&redirect_uri, parts[1]).ok();
             }
         }
 
@@ -1090,11 +1160,18 @@ async fn spawn_localhost_oauth_listener(db: Arc<SqlitePool>) {
             }
         }
     });
+
+    *active_listener = Some(listener_task);
+    Ok(())
 }
 
 async fn refresh_nexus_oauth_token_if_needed_inner(
     db: Arc<SqlitePool>,
 ) -> Result<Option<Value>, String> {
+    // Nexus rotates refresh tokens. Serialize the read-refresh-write sequence so
+    // simultaneous status checks cannot reuse one token and then clear the fresh
+    // session written by the first successful request.
+    let _refresh_guard = NEXUS_OAUTH_REFRESH_LOCK.lock().await;
     let settings = SettingsService::new(db.clone())
         .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
     let mut session = match settings
@@ -1126,6 +1203,12 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
     let token = match oauth_refresh_token_local(&client_id, &refresh_token, &scope).await {
         Ok(token) => token,
         Err(OAuthRefreshFailure::ReconnectRequired(message)) => {
+            if let Ok(Some(latest_session)) = settings.get_nexus_oauth_session().await {
+                if session_uses_replaced_refresh_token(&latest_session, &refresh_token) {
+                    return Ok(Some(latest_session));
+                }
+            }
+            let message = nexus_warn(message);
             if let Err(error) = settings.clear_nexus_oauth_session().await {
                 error_with_location(&format!(
                     "Failed to clear revoked Nexus OAuth session after refresh rejection: {}",
@@ -1890,7 +1973,7 @@ pub async fn begin_nexus_oauth_login(
         })?;
 
     if use_localhost {
-        spawn_localhost_oauth_listener(db.inner().clone()).await;
+        start_localhost_oauth_listener(db.inner().clone(), redirect_uri.clone()).await?;
     }
     #[allow(deprecated)]
     app.shell().open(authorize_url.clone(), None).map_err(|e| {
@@ -1917,7 +2000,7 @@ pub async fn complete_nexus_oauth_callback(
 
     let callback = match callback_url.filter(|u| !u.trim().is_empty()) {
         Some(url) => url,
-        None => settings
+        None => match settings
             .get_nexus_oauth_last_callback_url()
             .await
             .map_err(|e| {
@@ -1925,8 +2008,10 @@ pub async fn complete_nexus_oauth_callback(
                     "Failed to read saved Nexus OAuth callback URL: {}",
                     e
                 ))
-            })?
-            .ok_or_else(|| nexus_warn("No OAuth callback URL available yet"))?,
+            })? {
+            Some(url) => url,
+            None => return Ok(json!({ "success": false, "pending": true })),
+        },
     };
 
     let pending = settings
@@ -2288,6 +2373,62 @@ pub async fn search_nexus_mods_mods(
         .search_mods(&game_id, &query)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn browse_nexus_mods_page(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    query: String,
+    sort: String,
+    offset: u32,
+    count: u32,
+) -> Result<crate::types::NexusModsPage, String> {
+    let _ = db;
+    let service = get_nexus_mods_service().await?;
+    service
+        .browse_mods_page(&game_id, &query, &sort, offset, count)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn browse_nexus_collections_page(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    query: String,
+    sort: String,
+    offset: u32,
+    count: u32,
+) -> Result<crate::types::NexusCollectionsPage, String> {
+    let _ = db;
+    let service = get_nexus_mods_service().await?;
+    service
+        .browse_collections_page(&game_id, &query, &sort, offset, count)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_nexus_collection_revision_plan(
+    db: State<'_, Arc<SqlitePool>>,
+    slug: String,
+    revision_number: u32,
+) -> Result<crate::types::NexusCollectionRevisionPlan, String> {
+    let _ = db;
+    let slug = slug.trim();
+    if slug.is_empty() {
+        return Err("Collection slug is required".to_string());
+    }
+    if revision_number == 0 {
+        return Err("Collection revision must be greater than zero".to_string());
+    }
+
+    let service = get_nexus_mods_service().await?;
+    service
+        .get_collection_revision_plan(slug, revision_number)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3060,10 +3201,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::linux_desktop_id_looks_like_simm;
     use super::{
-        classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
-        derive_account_summary, nexus_temp_archive_path, pending_nxm_matches,
-        should_clear_pending_after_manual_completion, store_manual_nxm_archive_after_security_gate,
+        build_loopback_callback_url, classify_oauth_refresh_failure, decode_jwt_payload,
+        derive_account_flags, derive_account_summary, loopback_listener_address,
+        nexus_temp_archive_path, now_epoch_seconds, pending_nxm_matches,
+        session_uses_replaced_refresh_token, should_clear_pending_after_manual_completion,
+        start_localhost_oauth_listener, store_manual_nxm_archive_after_security_gate,
         ManualNxmArchiveStoreResult, OAuthRefreshFailure, ParsedNxmUrl, PendingNexusManualDownload,
+        NEXUS_OAUTH_LISTENER,
     };
     #[cfg(not(target_os = "windows"))]
     use super::{cleanup_nxm_runtime_registration, ensure_nxm_runtime_registration};
@@ -3074,6 +3218,7 @@ mod tests {
     use crate::services::settings::SettingsService;
     use serde_json::json;
     use serial_test::serial;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn build_test_jwt(payload: serde_json::Value) -> String {
         use base64::Engine as _;
@@ -3179,6 +3324,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn localhost_callback_keeps_the_exact_redirect_origin_for_token_exchange() {
+        let callback = build_loopback_callback_url(
+            "http://localhost:8089/callback",
+            "/callback?code=authorized&state=expected",
+        )
+        .expect("loopback callback URL should be reconstructed");
+
+        assert_eq!(
+            callback,
+            "http://localhost:8089/callback?code=authorized&state=expected"
+        );
+        assert_eq!(
+            loopback_listener_address("http://localhost:8089/callback")
+                .expect("localhost callback should be accepted"),
+            ("localhost".to_string(), 8089)
+        );
+        assert!(loopback_listener_address("https://localhost:8089/callback").is_err());
+        assert!(loopback_listener_address("http://example.com:8089/callback").is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn localhost_callback_listener_accepts_and_persists_the_browser_redirect(
+    ) -> anyhow::Result<()> {
+        let (_temp, _guard, pool) =
+            crate::test_helpers::init_test_pool_with_temp_data_dir().await?;
+        let probe = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = probe.local_addr()?.port();
+        drop(probe);
+        let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
+
+        start_localhost_oauth_listener(pool.clone(), redirect_uri.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        stream
+            .write_all(
+                b"GET /callback?code=authorized&state=expected HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        assert!(String::from_utf8_lossy(&response).contains("200 OK"));
+
+        let settings = SettingsService::new(pool)?;
+        let callback = settings
+            .get_nexus_oauth_last_callback_url()
+            .await?
+            .expect("listener should persist the callback URL");
+        assert_eq!(
+            callback,
+            format!("{}?code=authorized&state=expected", redirect_uri)
+        );
+
+        if let Some(listener) = NEXUS_OAUTH_LISTENER.lock().await.take() {
+            listener.abort();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_refresh_rejection_does_not_clear_a_newer_rotated_session() {
+        let latest_session = json!({
+            "refreshToken": "rotated-refresh-token",
+            "accessToken": "new-access-token",
+            "expiresAt": now_epoch_seconds() + 3600,
+        });
+
+        assert!(session_uses_replaced_refresh_token(
+            &latest_session,
+            "attempted-old-token",
+        ));
+        assert!(!session_uses_replaced_refresh_token(
+            &latest_session,
+            "rotated-refresh-token",
+        ));
     }
 
     #[test]

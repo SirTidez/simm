@@ -53,6 +53,11 @@ import type {
   GameSaveRestorePreview,
   GameSaveRestoreResult,
   NexusModFileDependencies,
+  NexusMod,
+  NexusModsPage,
+  NexusCollection,
+  NexusCollectionsPage,
+  NexusCollectionRevisionPlan,
 } from '../types';
 
 export interface LogWatchSession {
@@ -1076,7 +1081,8 @@ export class ApiService {
 
   static async completeNexusOAuthCallback(callbackUrl?: string): Promise<{
     success: boolean;
-    status: {
+    pending?: boolean;
+    status?: {
       connected: boolean;
       expiresAt?: number;
       account?: {
@@ -1184,7 +1190,98 @@ export class ApiService {
     return { mods: this.transformNexusMods(mods) };
   }
 
-  private static transformNexusMods(mods: any[]): any[] {
+  static async browseNexusModsPage(
+    gameId: string,
+    query: string,
+    sort: 'relevance' | 'updated' | 'popularity' | 'newest',
+    offset: number,
+    count: number,
+  ): Promise<NexusModsPage> {
+    const page = await invoke<{
+      mods: any[];
+      totalCount: number;
+      offset: number;
+      count: number;
+      hasMore: boolean;
+    }>('browse_nexus_mods_page', { gameId, query, sort, offset, count });
+
+    return {
+      ...page,
+      mods: this.transformNexusMods(page.mods),
+    };
+  }
+
+  static async browseNexusCollectionsPage(
+    gameId: string,
+    query: string,
+    sort: 'relevance' | 'updated' | 'popularity' | 'newest',
+    offset: number,
+    count: number,
+  ): Promise<NexusCollectionsPage> {
+    const page = await invoke<{
+      collections: any[];
+      totalCount: number;
+      offset: number;
+      count: number;
+      hasMore: boolean;
+    }>('browse_nexus_collections_page', { gameId, query, sort, offset, count });
+
+    return {
+      ...page,
+      collections: this.transformNexusCollections(page.collections),
+    };
+  }
+
+  static async getNexusCollectionRevisionPlan(
+    slug: string,
+    revisionNumber: number,
+  ): Promise<NexusCollectionRevisionPlan> {
+    return invoke<NexusCollectionRevisionPlan>('get_nexus_collection_revision_plan', {
+      slug,
+      revisionNumber,
+    });
+  }
+
+  private static transformNexusCollections(collections: any[]): NexusCollection[] {
+    return collections.map((collection: any) => {
+      const revision = collection.latestPublishedRevision ?? collection.latest_published_revision ?? {};
+      const curator = collection.user ?? {};
+      const tileImage = collection.tileImage ?? collection.tile_image ?? {};
+      const rawFileSize = revision.fileSize ?? revision.file_size;
+      const fileSize = Number(rawFileSize);
+
+      return {
+        id: Number(collection.id),
+        slug: collection.slug ?? '',
+        name: collection.name ?? 'Untitled collection',
+        summary: collection.summary ?? '',
+        category_name: collection.category?.name ?? collection.categoryName ?? collection.category_name,
+        curator_name: curator.name ?? collection.curatorName ?? collection.curator_name ?? 'Unknown curator',
+        curator_member_id: curator.memberId ?? curator.member_id,
+        curator_avatar_url: curator.avatar ?? collection.curatorAvatarUrl ?? collection.curator_avatar_url,
+        tile_image_url:
+          tileImage.thumbnailUrl ??
+          tileImage.thumbnail_url ??
+          tileImage.url ??
+          collection.tileImageUrl ??
+          collection.tile_image_url,
+        tile_image_alt: tileImage.altText ?? tileImage.alt_text,
+        endorsements: collection.endorsements ?? 0,
+        total_downloads: collection.totalDownloads ?? collection.total_downloads ?? 0,
+        overall_rating: collection.overallRating ?? collection.overall_rating,
+        overall_rating_count: collection.overallRatingCount ?? collection.overall_rating_count,
+        first_published_at: collection.firstPublishedAt ?? collection.first_published_at,
+        updated_at: collection.updatedAt ?? collection.updated_at,
+        revision_number: revision.revisionNumber ?? revision.revision_number,
+        revision_updated_at: revision.updatedAt ?? revision.updated_at,
+        mod_count: revision.modCount ?? revision.mod_count ?? 0,
+        file_size: Number.isFinite(fileSize) ? fileSize : undefined,
+        contains_adult_content: revision.adultContent ?? revision.adult_content ?? false,
+      };
+    });
+  }
+
+  private static transformNexusMods(mods: any[]): NexusMod[] {
     return mods.map((mod: any) => {
       const originalAuthor =
         mod.originalAuthor ?? mod.original_author ?? mod.author;
@@ -1202,14 +1299,15 @@ export class ApiService {
       return {
         mod_id: mod.modId ?? mod.mod_id,
         name: mod.name,
-        summary: mod.summary,
+        summary: mod.summary ?? '',
+        description: mod.description ?? '',
         picture_url: mod.pictureUrl ?? mod.picture_url,
         thumbnail_url: mod.thumbnailUrl ?? mod.thumbnail_url,
         endorsement_count: mod.endorsements ?? mod.endorsement_count,
         mod_downloads: mod.downloads ?? mod.mod_downloads,
         unique_downloads:
-          mod.downloads ?? mod.unique_downloads ?? mod.mod_downloads,
-        version: mod.version,
+          mod.uniqueDownloads ?? mod.unique_downloads ?? mod.downloads ?? mod.mod_downloads ?? 0,
+        version: mod.version ?? '',
         author: uploaderName || originalAuthor || "Unknown",
         uploader: uploaderName,
         uploader_member_id: uploaderMemberId,
@@ -1218,6 +1316,17 @@ export class ApiService {
         created_at: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
         updated_time: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
         uploaded_time: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
+        category_id: mod.categoryId ?? mod.category_id ?? 0,
+        category_name: mod.category ?? mod.categoryName ?? mod.category_name,
+        contains_adult_content:
+          mod.adultContent ?? mod.contains_adult_content ?? false,
+        status: mod.status ?? 'published',
+        direct_download_enabled:
+          mod.directDownloadEnabled ?? mod.direct_download_enabled,
+        supports_vortex: mod.supportsVortex ?? mod.supports_vortex,
+        tags: Array.isArray(mod.tags)
+          ? mod.tags.map((tag: any) => typeof tag === 'string' ? tag : tag?.name).filter(Boolean)
+          : [],
       };
     });
   }

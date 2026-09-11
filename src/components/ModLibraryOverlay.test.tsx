@@ -19,6 +19,7 @@ import { ModLibraryStoreProvider } from "../stores/modLibraryStore";
 const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
   getEnvironments: vi.fn(),
+  extractGameVersion: vi.fn(),
   getS1APILatestRelease: vi.fn(),
   getMLVScanLatestRelease: vi.fn(),
   getS1APIReleases: vi.fn(),
@@ -28,6 +29,9 @@ const apiMocks = vi.hoisted(() => ({
   searchThunderstore: vi.fn(),
   searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
+  browseNexusModsPage: vi.fn(),
+  browseNexusCollectionsPage: vi.fn(),
+  getNexusCollectionRevisionPlan: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   getNexusModsModFiles: vi.fn(),
   getNexusModFileDependencies: vi.fn(),
@@ -43,6 +47,7 @@ const apiMocks = vi.hoisted(() => ({
   getModSecurityScanReport: vi.fn(),
   storeModArchive: vi.fn(),
   refreshThunderstorePackageCache: vi.fn(),
+  saveModProfile: vi.fn(),
 }));
 
 vi.mock("../services/api", () => ({
@@ -226,6 +231,7 @@ describe("ModLibraryOverlay", () => {
   beforeEach(() => {
     apiMocks.getModLibrary.mockReset();
     apiMocks.getEnvironments.mockReset();
+    apiMocks.extractGameVersion.mockReset();
     apiMocks.getS1APILatestRelease.mockReset();
     apiMocks.getMLVScanLatestRelease.mockReset();
     apiMocks.getS1APIReleases.mockReset();
@@ -235,6 +241,9 @@ describe("ModLibraryOverlay", () => {
     apiMocks.searchThunderstore.mockReset();
     apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
+    apiMocks.browseNexusModsPage.mockReset();
+    apiMocks.browseNexusCollectionsPage.mockReset();
+    apiMocks.getNexusCollectionRevisionPlan.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.getNexusModsModFiles.mockReset();
     apiMocks.getNexusModFileDependencies.mockReset();
@@ -250,6 +259,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.storeModArchive.mockReset();
     apiMocks.refreshThunderstorePackageCache.mockReset();
+    apiMocks.saveModProfile.mockReset();
     eventMocks.onProgress.mockReset();
     eventMocks.onComplete.mockReset();
     eventMocks.onError.mockReset();
@@ -268,6 +278,10 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
     apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
     apiMocks.getEnvironments.mockResolvedValue([]);
+    apiMocks.extractGameVersion.mockResolvedValue({
+      version: "",
+      source: "unknown",
+    });
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.deleteDownloadedMod.mockResolvedValue({ deleted: true, removedFrom: [] });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
@@ -305,6 +319,27 @@ describe("ModLibraryOverlay", () => {
       },
     );
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
+    apiMocks.browseNexusModsPage.mockResolvedValue({
+      mods: [],
+      totalCount: 0,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [],
+      totalCount: 0,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: "empty-collection",
+      revisionId: "empty-revision",
+      revisionNumber: 1,
+      modFiles: [],
+      externalResources: [],
+    });
     apiMocks.getNexusOAuthStatus.mockResolvedValue({
       connected: true,
       account: {
@@ -357,6 +392,16 @@ describe("ModLibraryOverlay", () => {
         rateLimitedResponses: 0,
       },
     });
+    apiMocks.saveModProfile.mockImplementation(async (request) => ({
+      id: request.profileId || "profile-test",
+      name: request.name,
+      runtime: request.runtime,
+      isDefault: false,
+      activeEnvironmentIds: [],
+      manifest: request.manifest,
+      createdAt: "2026-09-10T00:00:00Z",
+      updatedAt: "2026-09-10T00:00:00Z",
+    }));
     [
       eventMocks.onProgress,
       eventMocks.onComplete,
@@ -416,8 +461,9 @@ describe("ModLibraryOverlay", () => {
       download_url: "https://example.com/s1api.zip",
     });
 
-    renderLibraryOverlay();
-
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "thunderstore" },
+    });
     expect(await screen.findByText("S1API")).toBeTruthy();
 
     await waitFor(() => {
@@ -443,7 +489,9 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
-    renderLibraryOverlay({ libraryTab: "discover" });
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "thunderstore" },
+    });
 
     const steamNetworkLibButtons = await screen.findAllByRole("button", {
       name: /SteamNetworkLib/i,
@@ -540,7 +588,9 @@ describe("ModLibraryOverlay", () => {
       storageId: "mlvscan-new",
     });
 
-    renderLibraryOverlay();
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "thunderstore" },
+    });
 
     fireEvent.click(await screen.findByRole("button", { name: /MLVScan/i }));
 
@@ -693,6 +743,7 @@ describe("ModLibraryOverlay", () => {
     const thirdHandler = vi.fn();
     const baseNavigationState: ModLibraryNavigationState = {
       libraryTab: "discover",
+      searchSource: "thunderstore",
     };
 
     const { rerender } = renderLibraryOverlay({
@@ -908,7 +959,7 @@ describe("ModLibraryOverlay", () => {
         uploaded_timestamp: number;
       }>
     >();
-    apiMocks.searchNexusMods.mockImplementation(async (_gameId, query) => {
+    apiMocks.browseNexusModsPage.mockImplementation(async (_gameId, query) => {
       if (String(query).toLowerCase().includes("warehouse")) {
         return {
           mods: [
@@ -930,6 +981,10 @@ describe("ModLibraryOverlay", () => {
               mod_downloads: 120,
             },
           ],
+          totalCount: 1,
+          offset: 0,
+          count: 50,
+          hasMore: false,
         };
       }
 
@@ -953,6 +1008,10 @@ describe("ModLibraryOverlay", () => {
             mod_downloads: 250,
           },
         ],
+        totalCount: 1,
+        offset: 0,
+        count: 50,
+        hasMore: false,
       };
     });
     apiMocks.getNexusModsModFiles
@@ -1056,6 +1115,550 @@ describe("ModLibraryOverlay", () => {
         1629,
       );
     });
+  });
+
+  it("loads additional Nexus catalog pages without replacing current results", async () => {
+    const makeNexusMod = (modId: number, name: string) => ({
+      mod_id: modId,
+      name,
+      summary: `${name} summary`,
+      description: `${name} description`,
+      version: "1.0.0",
+      author: "CatalogAuthor",
+      uploaded_time: "2026-09-01T00:00:00Z",
+      updated_time: "2026-09-02T00:00:00Z",
+      category_id: 0,
+      category_name: "Gameplay",
+      contains_adult_content: false,
+      status: "published",
+      endorsement_count: 1,
+      unique_downloads: 10,
+      mod_downloads: 10,
+    });
+    apiMocks.browseNexusModsPage
+      .mockResolvedValueOnce({
+        mods: [makeNexusMod(1, "Catalog One")],
+        totalCount: 2,
+        offset: 0,
+        count: 50,
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        mods: [makeNexusMod(2, "Catalog Two")],
+        totalCount: 2,
+        offset: 1,
+        count: 50,
+        hasMore: false,
+      });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+
+    expect(await screen.findByText("Catalog One")).toBeTruthy();
+    expect(screen.getByText("Showing 1 of 2 Nexus Mods")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Catalog Two")).toBeTruthy();
+    expect(screen.getByText("Showing 2 of 2 Nexus Mods")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    expect(apiMocks.browseNexusModsPage).toHaveBeenNthCalledWith(
+      2,
+      "schedule1",
+      "",
+      "updated",
+      1,
+      50,
+    );
+  });
+
+  it("browses and searches Nexus Collections from the approved discover switcher", async () => {
+    const collection = {
+      id: 19,
+      slug: "quality-of-life",
+      name: "Quality of Life",
+      summary: "A curated set of improvements.",
+      category_name: "Gameplay",
+      curator_name: "Curator",
+      endorsements: 42,
+      total_downloads: 500,
+      overall_rating: 4.7,
+      overall_rating_count: 12,
+      updated_at: "2026-09-09T00:00:00Z",
+      revision_number: 3,
+      revision_updated_at: "2026-09-08T00:00:00Z",
+      mod_count: 8,
+      file_size: 2048,
+      contains_adult_content: false,
+    };
+    apiMocks.browseNexusCollectionsPage
+      .mockResolvedValueOnce({
+        collections: [collection],
+        totalCount: 120,
+        offset: 0,
+        count: 50,
+        hasMore: false,
+      })
+      .mockResolvedValueOnce({
+        collections: [{ ...collection, id: 20, slug: "quality-search", name: "Quality Search" }],
+        totalCount: 1,
+        offset: 0,
+        count: 50,
+        hasMore: false,
+      });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: "quality-of-life",
+      revisionId: "revision-3",
+      revisionNumber: 3,
+      totalSize: 2048,
+      modFiles: [],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+
+    const primaryTabs = screen.getByRole("button", { name: "Discover" }).parentElement;
+    expect(primaryTabs?.classList.contains("workspace-collection__primary-tabs")).toBe(true);
+    expect(primaryTabs?.querySelectorAll("button")).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    expect(await screen.findByText("Quality of Life")).toBeTruthy();
+    expect(screen.getByText("Showing 1 of 120 Nexus Collections")).toBeTruthy();
+    expect(apiMocks.browseNexusCollectionsPage).toHaveBeenNthCalledWith(
+      1,
+      "schedule1",
+      "",
+      "updated",
+      0,
+      50,
+    );
+
+    fireEvent.click(screen.getByText("Quality of Life").closest('[role="button"]')!);
+    expect(screen.getByText("Nexus Collection • Curator")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Open Collection on Nexus Mods" })).toHaveAttribute(
+      "href",
+      "https://next.nexusmods.com/schedule1/collections/quality-of-life",
+    );
+    expect(apiMocks.getNexusCollectionRevisionPlan).toHaveBeenCalledWith(
+      "quality-of-life",
+      3,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Search Nexus Collections..."), {
+      target: { value: "quality" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("Quality Search")).toBeTruthy();
+    expect(apiMocks.browseNexusCollectionsPage).toHaveBeenNthCalledWith(
+      2,
+      "schedule1",
+      "quality",
+      "updated",
+      0,
+      50,
+    );
+  });
+
+  it("continues Premium collection downloads while conflicts queue and creates a profile from the choices", async () => {
+    const collection = {
+      id: 21,
+      slug: "profiled-collection",
+      name: "Profiled Collection",
+      summary: "Two exact files.",
+      curator_name: "Curator",
+      endorsements: 2,
+      total_downloads: 10,
+      revision_number: 2,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    const existing = makeEntry({
+      storageId: "existing-42",
+      displayName: "Conflict Mod",
+      source: "nexusmods",
+      sourceId: "42",
+      nexusFileId: "8000",
+      sourceVersion: "1.0.0",
+      installedIn: ["env-mono"],
+      installedInByRuntime: { Mono: ["env-mono"] },
+      storageIdsByRuntime: { Mono: "existing-42" },
+    });
+    const downloaded = makeEntry({
+      storageId: "collection-43",
+      displayName: "Background Mod",
+      source: "nexusmods",
+      sourceId: "43",
+      nexusFileId: "9002",
+      sourceVersion: "2.0.0",
+      storageIdsByRuntime: { Mono: "collection-43" },
+    });
+    let library = { downloaded: [existing] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/game",
+        runtime: "Mono",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-2",
+      revisionNumber: 2,
+      modFiles: [
+        {
+          collectionRevisionModId: "crm-1",
+          modId: 42,
+          fileId: 9001,
+          modName: "Conflict Mod",
+          fileName: "Conflict Mod 2.0",
+          version: "2.0.0",
+          optional: false,
+          available: true,
+        },
+        {
+          collectionRevisionModId: "crm-2",
+          modId: 43,
+          fileId: 9002,
+          modName: "Background Mod",
+          fileName: "Background Mod 2.0",
+          version: "2.0.0",
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    });
+    const backgroundDownload = createDeferred<{
+      success: boolean;
+      storageId: string;
+    }>();
+    apiMocks.downloadNexusModToLibrary.mockReturnValue(
+      backgroundDownload.promise,
+    );
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click(
+      (await screen.findByText("Profiled Collection")).closest(
+        '[role="button"]',
+      )!,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Download 2 required" }),
+    );
+    await waitFor(() => expect(apiMocks.saveModProfile).toHaveBeenCalledTimes(1));
+    const initialRequest = apiMocks.saveModProfile.mock.calls[0][0];
+    expect(initialRequest.profileId).toBeUndefined();
+    expect(initialRequest.manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "42",
+          nexusFileId: "9001",
+          storageId: null,
+        }),
+        expect.objectContaining({
+          sourceId: "43",
+          nexusFileId: "9002",
+          storageId: null,
+        }),
+      ]),
+    );
+    expect(await screen.findByText("Choose which mod to keep")).toBeTruthy();
+    expect(screen.getByText(/Nexus file 9001/)).toBeTruthy();
+    expect(screen.getByText(/Nexus file 8000/)).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+        43,
+        9002,
+        undefined,
+      );
+    });
+    expect(apiMocks.downloadNexusModToLibrary).not.toHaveBeenCalledWith(
+      42,
+      9001,
+      undefined,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Keep current version/i }),
+    );
+    library = { downloaded: [existing, downloaded] };
+    backgroundDownload.resolve({ success: true, storageId: "collection-43" });
+
+    await waitFor(() => expect(apiMocks.saveModProfile).toHaveBeenCalledTimes(2));
+    const profileCalls = apiMocks.saveModProfile.mock.calls;
+    const request = profileCalls[profileCalls.length - 1][0];
+    expect(request.profileId).toBe("profile-test");
+    expect(request.name).toBe("Profiled Collection (Revision 2)");
+    expect(request.manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "42",
+          nexusFileId: "8000",
+          storageId: "existing-42",
+        }),
+        expect.objectContaining({
+          sourceId: "43",
+          nexusFileId: "9002",
+          storageId: "collection-43",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps a partial collection profile when a later Premium file fails", async () => {
+    const collection = {
+      id: 23,
+      slug: "partial-collection",
+      name: "Partial Collection",
+      summary: "One successful file and one failed file.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 3,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    const staged = makeEntry({
+      storageId: "partial-70",
+      displayName: "Successful Mod",
+      source: "nexusmods",
+      sourceId: "70",
+      nexusFileId: "7001",
+      sourceVersion: "1.0.0",
+      storageIdsByRuntime: { Mono: "partial-70" },
+    });
+    let library = { downloaded: [] as ModLibraryEntry[] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/game",
+        runtime: "Mono",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-3",
+      revisionNumber: 3,
+      modFiles: [
+        {
+          collectionRevisionModId: "crm-70",
+          modId: 70,
+          fileId: 7001,
+          modName: "Successful Mod",
+          fileName: "Successful Mod 1.0",
+          version: "1.0.0",
+          optional: false,
+          available: true,
+        },
+        {
+          collectionRevisionModId: "crm-71",
+          modId: 71,
+          fileId: 7101,
+          modName: "Failed Mod",
+          fileName: "Failed Mod 1.0",
+          version: "1.0.0",
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    });
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (modId) => {
+      if (modId === 70) {
+        library = { downloaded: [staged] };
+        return { success: true, storageId: "partial-70" };
+      }
+      throw new Error("simulated download failure");
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click(
+      (await screen.findByText("Partial Collection")).closest(
+        '[role="button"]',
+      )!,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Download 2 required" }),
+    );
+
+    expect(
+      await screen.findByText("Collection Profile Partially Staged"),
+    ).toBeTruthy();
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+      71,
+      7101,
+      undefined,
+    );
+    expect(apiMocks.saveModProfile).toHaveBeenCalledTimes(2);
+    const profileCalls = apiMocks.saveModProfile.mock.calls;
+    const savedPartial = profileCalls[profileCalls.length - 1][0];
+    expect(savedPartial.profileId).toBe("profile-test");
+    expect(savedPartial.manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          nexusFileId: "7001",
+          storageId: "partial-70",
+        }),
+        expect.objectContaining({
+          nexusFileId: "7101",
+          storageId: null,
+          manualReason: "This collection file has not been staged yet.",
+        }),
+      ]),
+    );
+  });
+
+  it("stages the exact next collection file through Nexus for free accounts", async () => {
+    const collection = {
+      id: 22,
+      slug: "manual-collection",
+      name: "Manual Collection",
+      summary: "One exact file.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: {
+        canDirectDownload: false,
+        requiresSiteConfirmation: true,
+      },
+    });
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/game",
+        runtime: "Mono",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-1",
+      revisionNumber: 1,
+      modFiles: [
+        {
+          collectionRevisionModId: "crm-manual",
+          modId: 55,
+          fileId: 5501,
+          modName: "Manual Mod",
+          fileName: "Manual Mod 1.0",
+          version: "1.0.0",
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click(
+      (await screen.findByText("Manual Collection")).closest(
+        '[role="button"]',
+      )!,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Stage next required file",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.saveModProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profileId: undefined,
+          name: "Manual Collection (Revision 1)",
+          manifest: expect.objectContaining({
+            items: [
+              expect.objectContaining({
+                sourceId: "55",
+                nexusFileId: "5501",
+                storageId: null,
+              }),
+            ],
+          }),
+        }),
+      );
+      expect(apiMocks.beginNexusManualDownloadSession).toHaveBeenCalledWith({
+        kind: "library",
+        modId: 55,
+        fileId: 5501,
+        gameId: "schedule1",
+        runtime: undefined,
+      });
+    });
+    expect(apiMocks.downloadNexusModToLibrary).not.toHaveBeenCalled();
   });
 
   it("shows the Thunderstore updated date when package data uses camelCase fields", async () => {

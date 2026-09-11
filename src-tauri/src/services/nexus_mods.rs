@@ -1,5 +1,7 @@
 use crate::types::{
-    NexusDependencyCandidate, NexusDependencyRequirement, NexusModFileDependencies,
+    NexusCollectionExternalResource, NexusCollectionModFile, NexusCollectionRevisionPlan,
+    NexusCollectionsPage, NexusDependencyCandidate, NexusDependencyRequirement,
+    NexusModFileDependencies, NexusModsPage,
 };
 use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
@@ -29,6 +31,8 @@ pub struct NexusModsService {
     game_identity_cache: Arc<RwLock<HashMap<String, CachedValue<(String, String)>>>>,
     games_cache: Arc<RwLock<Option<CachedValue<Vec<Value>>>>>,
     search_cache: Arc<RwLock<HashMap<String, CachedValue<Vec<Value>>>>>,
+    catalog_cache: Arc<RwLock<HashMap<String, CachedValue<NexusModsPage>>>>,
+    collection_catalog_cache: Arc<RwLock<HashMap<String, CachedValue<NexusCollectionsPage>>>>,
     browse_cache: Arc<RwLock<HashMap<String, CachedValue<Vec<Value>>>>>,
     mod_cache: Arc<RwLock<HashMap<String, CachedValue<Value>>>>,
     mod_files_cache: Arc<RwLock<HashMap<String, CachedValue<Vec<Value>>>>>,
@@ -57,6 +61,8 @@ impl NexusModsService {
             game_identity_cache: Arc::new(RwLock::new(HashMap::new())),
             games_cache: Arc::new(RwLock::new(None)),
             search_cache: Arc::new(RwLock::new(HashMap::new())),
+            catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            collection_catalog_cache: Arc::new(RwLock::new(HashMap::new())),
             browse_cache: Arc::new(RwLock::new(HashMap::new())),
             mod_cache: Arc::new(RwLock::new(HashMap::new())),
             mod_files_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -569,14 +575,31 @@ impl NexusModsService {
             "mod_id": mod_node.get("modId"),
             "name": mod_node.get("name"),
             "summary": mod_node.get("summary"),
+            "description": mod_node.get("description"),
             "picture_url": mod_node.get("pictureUrl"),
             "thumbnail_url": mod_node.get("thumbnailUrl"),
             "endorsement_count": mod_node.get("endorsements"),
             "mod_downloads": mod_node.get("downloads"),
+            "unique_downloads": mod_node.get("downloads"),
             "version": mod_node.get("version"),
             "author": author,
+            "original_author": mod_node.get("author"),
+            "uploader": mod_node.get("uploader").and_then(|u| u.get("name")),
+            "uploader_member_id": mod_node.get("uploader").and_then(|u| u.get("memberId")),
+            "category_name": mod_node.get("category"),
+            "contains_adult_content": mod_node.get("adultContent"),
+            "status": mod_node.get("status"),
+            "direct_download_enabled": mod_node.get("directDownloadEnabled"),
+            "supports_vortex": mod_node.get("supportsVortex"),
+            "tags": mod_node.get("tags").and_then(|tags| tags.as_array()).map(|tags| {
+                tags.iter()
+                    .filter_map(|tag| tag.get("name").and_then(|name| name.as_str()))
+                    .collect::<Vec<_>>()
+            }),
             "updated_at": mod_node.get("updatedAt"),
-            "created_at": mod_node.get("createdAt")
+            "updated_time": mod_node.get("updatedAt"),
+            "created_at": mod_node.get("createdAt"),
+            "uploaded_time": mod_node.get("createdAt")
         })
     }
 
@@ -587,11 +610,443 @@ impl NexusModsService {
             "name": file_node.get("name"),
             "version": file_node.get("version"),
             "category_id": file_node.get("categoryId"),
+            "category_name": file_node.get("category"),
             "size": file_node.get("sizeInBytes").or_else(|| file_node.get("size")),
             "is_primary": file_node.get("primary").and_then(|v| v.as_bool()).unwrap_or(false)
                 || file_node.get("primary").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
-            "uri": file_node.get("uri")
+            "uri": file_node.get("uri"),
+            "uploaded_timestamp": file_node.get("date"),
+            "mod_version": file_node.get("version"),
+            "description": file_node.get("description"),
+            "detected_file_extension": file_node.get("detectedFileExtension"),
+            "total_downloads": file_node.get("totalDownloads"),
+            "unique_downloads": file_node.get("uniqueDownloads")
         })
+    }
+
+    fn catalog_sort(sort: &str, has_query: bool) -> Value {
+        match sort {
+            "popularity" => serde_json::json!([{"downloads": {"direction": "DESC"}}]),
+            "newest" => serde_json::json!([{"createdAt": {"direction": "DESC"}}]),
+            "relevance" if has_query => {
+                serde_json::json!([{"relevance": {"direction": "DESC"}}])
+            }
+            _ => serde_json::json!([{"updatedAt": {"direction": "DESC"}}]),
+        }
+    }
+
+    fn collection_catalog_sort(sort: &str, has_query: bool) -> Value {
+        match sort {
+            "popularity" => serde_json::json!([{"downloads": {"direction": "DESC"}}]),
+            "newest" => serde_json::json!([{"createdAt": {"direction": "DESC"}}]),
+            "relevance" if has_query => {
+                serde_json::json!([{"relevance": {"direction": "DESC"}}])
+            }
+            _ => serde_json::json!([{"updatedAt": {"direction": "DESC"}}]),
+        }
+    }
+
+    pub async fn browse_mods_page(
+        &self,
+        game_id: &str,
+        query: &str,
+        sort: &str,
+        offset: u32,
+        count: u32,
+    ) -> Result<NexusModsPage> {
+        let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let trimmed_query = query.trim();
+        let page_size = count.clamp(1, 100);
+        let cache_key = format!(
+            "catalog:{}:{}:{}:{}:{}",
+            domain_name.to_ascii_lowercase(),
+            trimmed_query.to_ascii_lowercase(),
+            sort,
+            offset,
+            page_size
+        );
+        if let Some(cached) =
+            Self::cached_map_get(&self.catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let mut filter = serde_json::json!({
+            "gameDomainName": [{"value": domain_name, "op": "EQUALS"}]
+        });
+        if !trimmed_query.is_empty() {
+            filter["nameStemmed"] = serde_json::json!([{"value": trimmed_query, "op": "MATCHES"}]);
+        }
+
+        let data = self
+            .graphql_request(
+                r#"
+                query BrowseModsPage($filter: ModsFilter, $sort: [ModsSort!], $offset: Int, $count: Int) {
+                    mods(filter: $filter, sort: $sort, offset: $offset, count: $count) {
+                        totalCount
+                        nodesCount
+                        nodes {
+                            modId
+                            name
+                            summary
+                            description
+                            pictureUrl
+                            thumbnailUrl
+                            endorsements
+                            downloads
+                            version
+                            author
+                            adultContent
+                            status
+                            category
+                            directDownloadEnabled
+                            supportsVortex
+                            tags { name }
+                            updatedAt
+                            createdAt
+                            uploader { name memberId }
+                        }
+                    }
+                }
+                "#,
+                serde_json::json!({
+                    "filter": filter,
+                    "sort": Self::catalog_sort(sort, !trimmed_query.is_empty()),
+                    "offset": offset,
+                    "count": page_size
+                }),
+            )
+            .await?;
+
+        let mods_node = data.get("mods").cloned().unwrap_or_default();
+        let total_count = mods_node
+            .get("totalCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mods = mods_node
+            .get("nodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|node| Self::map_mod_node_to_legacy_shape(&node))
+            .collect::<Vec<_>>();
+        let loaded_through = u64::from(offset) + mods.len() as u64;
+        let page = NexusModsPage {
+            mods,
+            total_count,
+            offset,
+            count: page_size,
+            has_more: loaded_through < total_count,
+        };
+        Self::cached_map_set(&self.catalog_cache, cache_key, page.clone()).await;
+        Ok(page)
+    }
+
+    pub async fn browse_collections_page(
+        &self,
+        game_id: &str,
+        query: &str,
+        sort: &str,
+        offset: u32,
+        count: u32,
+    ) -> Result<NexusCollectionsPage> {
+        let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let trimmed_query = query.trim();
+        let page_size = count.clamp(1, 100);
+        let cache_key = format!(
+            "collection-catalog:{}:{}:{}:{}:{}",
+            domain_name.to_ascii_lowercase(),
+            trimmed_query.to_ascii_lowercase(),
+            sort,
+            offset,
+            page_size
+        );
+        if let Some(cached) =
+            Self::cached_map_get(&self.collection_catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.collection_catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let mut filter = serde_json::json!({
+            "gameDomain": [{"value": domain_name, "op": "EQUALS"}],
+            "hasPublishedRevision": [{"value": true, "op": "EQUALS"}]
+        });
+        if !trimmed_query.is_empty() {
+            filter["generalSearch"] =
+                serde_json::json!([{"value": trimmed_query, "op": "WILDCARD"}]);
+        }
+
+        let data = self
+            .graphql_request(
+                r#"
+                query BrowseCollectionsPage($filter: CollectionsSearchFilter, $sort: [CollectionsSearchSort!], $offset: Int, $count: Int) {
+                    collectionsV2(filter: $filter, sort: $sort, offset: $offset, count: $count) {
+                        totalCount
+                        nodesCount
+                        nodes {
+                            id
+                            slug
+                            name
+                            summary
+                            category { name }
+                            overallRating
+                            overallRatingCount
+                            endorsements
+                            totalDownloads
+                            firstPublishedAt
+                            updatedAt
+                            latestPublishedRevision {
+                                adultContent
+                                fileSize
+                                modCount
+                                revisionNumber
+                                updatedAt
+                            }
+                            game { id domainName name }
+                            user { memberId avatar name }
+                            tileImage { url altText thumbnailUrl(size: small) }
+                        }
+                    }
+                }
+                "#,
+                serde_json::json!({
+                    "filter": filter,
+                    "sort": Self::collection_catalog_sort(sort, !trimmed_query.is_empty()),
+                    "offset": offset,
+                    "count": page_size
+                }),
+            )
+            .await?;
+
+        let collections_node = data.get("collectionsV2").cloned().unwrap_or_default();
+        let total_count = collections_node
+            .get("totalCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let collections = collections_node
+            .get("nodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let loaded_through = u64::from(offset) + collections.len() as u64;
+        let page = NexusCollectionsPage {
+            collections,
+            total_count,
+            offset,
+            count: page_size,
+            has_more: loaded_through < total_count,
+        };
+        Self::cached_map_set(&self.collection_catalog_cache, cache_key, page.clone()).await;
+        Ok(page)
+    }
+
+    fn parse_optional_u32(value: Option<&Value>) -> Option<u32> {
+        value
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .or_else(|| {
+                value
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u32>().ok())
+            })
+    }
+
+    fn parse_optional_u64(value: Option<&Value>) -> Option<u64> {
+        value.and_then(Value::as_u64).or_else(|| {
+            value
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse().ok())
+        })
+    }
+
+    fn parse_collection_revision_plan(
+        slug: &str,
+        revision_number: u32,
+        revision: &Value,
+    ) -> NexusCollectionRevisionPlan {
+        let mod_files = revision
+            .get("modFiles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                let file = entry.get("file").filter(|value| !value.is_null());
+                let mod_value = file.and_then(|file| file.get("mod"));
+                let file_id = Self::parse_optional_u32(
+                    entry
+                        .get("fileId")
+                        .or_else(|| file.and_then(|file| file.get("fileId"))),
+                )
+                .unwrap_or_default();
+                NexusCollectionModFile {
+                    collection_revision_mod_id: Self::json_string(entry.get("id")),
+                    mod_id: Self::parse_optional_u32(file.and_then(|file| file.get("modId"))),
+                    file_id,
+                    game_id: Self::parse_optional_u32(entry.get("gameId")),
+                    mod_name: mod_value
+                        .and_then(|value| value.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Unavailable Nexus mod")
+                        .to_string(),
+                    file_name: file
+                        .and_then(|value| value.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Unavailable Nexus file")
+                        .to_string(),
+                    version: file
+                        .and_then(|value| value.get("version"))
+                        .and_then(Value::as_str)
+                        .or_else(|| entry.get("version").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string(),
+                    optional: entry
+                        .get("optional")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    update_policy: entry
+                        .get("updatePolicy")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    size_in_bytes: Self::parse_optional_u64(
+                        file.and_then(|value| value.get("sizeInBytes")),
+                    ),
+                    uri: file
+                        .and_then(|value| value.get("uri"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    available: file.is_some() && file_id > 0,
+                }
+            })
+            .collect();
+
+        let external_resources = revision
+            .get("externalResources")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|entry| NexusCollectionExternalResource {
+                id: Self::json_string(entry.get("id")),
+                name: entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("External resource")
+                    .to_string(),
+                optional: entry
+                    .get("optional")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                resource_type: entry
+                    .get("resourceType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("EXTERNAL")
+                    .to_string(),
+                resource_url: entry
+                    .get("resourceUrl")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                version: entry
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                author: entry
+                    .get("author")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+            .collect();
+
+        NexusCollectionRevisionPlan {
+            slug: slug.to_string(),
+            revision_id: Self::json_string(revision.get("id")),
+            revision_number: Self::parse_optional_u32(revision.get("revisionNumber"))
+                .unwrap_or(revision_number),
+            total_size: Self::parse_optional_u64(revision.get("totalSize")),
+            mod_files,
+            external_resources,
+        }
+    }
+
+    pub async fn get_collection_revision_plan(
+        &self,
+        slug: &str,
+        revision_number: u32,
+    ) -> Result<NexusCollectionRevisionPlan> {
+        let data = self
+            .graphql_request(
+                r#"
+                query CollectionRevisionPlan($slug: String!, $revision: Int!) {
+                    collectionRevision(slug: $slug, revision: $revision, viewAdultContent: true) {
+                        id
+                        revisionNumber
+                        totalSize
+                        modFiles {
+                            id
+                            fileId
+                            gameId
+                            optional
+                            updatePolicy
+                            version
+                            file {
+                                fileId
+                                modId
+                                name
+                                version
+                                sizeInBytes
+                                uri
+                                mod { name }
+                            }
+                        }
+                        externalResources {
+                            id
+                            name
+                            optional
+                            resourceType
+                            resourceUrl
+                            version
+                            author
+                        }
+                    }
+                }
+                "#,
+                serde_json::json!({
+                    "slug": slug,
+                    "revision": revision_number,
+                }),
+            )
+            .await?;
+        let revision = data
+            .get("collectionRevision")
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Nexus collection '{}' revision {} was not found",
+                    slug,
+                    revision_number
+                )
+            })?;
+
+        Ok(Self::parse_collection_revision_plan(
+            slug,
+            revision_number,
+            revision,
+        ))
     }
 
     fn normalize_search_query_variants(query: &str) -> Vec<String> {
@@ -1110,10 +1565,16 @@ impl NexusModsService {
                         name
                         version
                         categoryId
+                        category
                         sizeInBytes
                         size
                         primary
                         uri
+                        date
+                        description
+                        detectedFileExtension
+                        totalDownloads
+                        uniqueDownloads
                     }
                 }
             "#,
@@ -1430,6 +1891,196 @@ mod tests {
             parsed.requirements[0].candidates[0].version_game_scoped_id,
             "420"
         );
+    }
+
+    #[test]
+    fn maps_rich_catalog_metadata_to_frontend_shape() {
+        let mapped = NexusModsService::map_mod_node_to_legacy_shape(&serde_json::json!({
+            "modId": 2573,
+            "name": "No Employee Collisions",
+            "summary": "Stops collisions",
+            "description": "Details",
+            "downloads": 21,
+            "adultContent": false,
+            "status": "published",
+            "category": "Employees",
+            "directDownloadEnabled": false,
+            "supportsVortex": true,
+            "tags": [{"name": "Gameplay"}],
+            "uploader": {"name": "Uploader", "memberId": 42}
+        }));
+
+        assert_eq!(mapped["mod_id"], 2573);
+        assert_eq!(mapped["description"], "Details");
+        assert_eq!(mapped["category_name"], "Employees");
+        assert_eq!(mapped["contains_adult_content"], false);
+        assert_eq!(mapped["supports_vortex"], true);
+        assert_eq!(mapped["tags"], serde_json::json!(["Gameplay"]));
+        assert_eq!(mapped["uploader_member_id"], 42);
+    }
+
+    #[test]
+    fn maps_catalog_sorts_and_defaults_relevance_without_a_query() {
+        assert_eq!(
+            NexusModsService::catalog_sort("popularity", false),
+            serde_json::json!([{"downloads": {"direction": "DESC"}}])
+        );
+        assert_eq!(
+            NexusModsService::catalog_sort("relevance", true),
+            serde_json::json!([{"relevance": {"direction": "DESC"}}])
+        );
+        assert_eq!(
+            NexusModsService::catalog_sort("relevance", false),
+            serde_json::json!([{"updatedAt": {"direction": "DESC"}}])
+        );
+        assert_eq!(
+            NexusModsService::collection_catalog_sort("popularity", false),
+            serde_json::json!([{"downloads": {"direction": "DESC"}}])
+        );
+        assert_eq!(
+            NexusModsService::collection_catalog_sort("relevance", true),
+            serde_json::json!([{"relevance": {"direction": "DESC"}}])
+        );
+        assert_eq!(
+            NexusModsService::collection_catalog_sort("relevance", false),
+            serde_json::json!([{"updatedAt": {"direction": "DESC"}}])
+        );
+    }
+
+    #[test]
+    fn maps_collection_revision_to_exact_staging_plan() {
+        let plan = NexusModsService::parse_collection_revision_plan(
+            "example-collection",
+            4,
+            &serde_json::json!({
+                "id": "revision-4",
+                "revisionNumber": 4,
+                "totalSize": "4096",
+                "modFiles": [
+                    {
+                        "id": "revision-mod-1",
+                        "fileId": 9001,
+                        "gameId": 7381,
+                        "optional": false,
+                        "updatePolicy": "EXACT",
+                        "version": "2.0.0",
+                        "file": {
+                            "fileId": 9001,
+                            "modId": 42,
+                            "name": "Example Mod 2.0",
+                            "version": "2.0.0",
+                            "sizeInBytes": "2048",
+                            "uri": "nxm://schedule1/mods/42/files/9001",
+                            "mod": { "name": "Example Mod" }
+                        }
+                    },
+                    {
+                        "id": "revision-mod-missing",
+                        "fileId": 9002,
+                        "gameId": 7381,
+                        "optional": true,
+                        "version": "1.0.0",
+                        "file": null
+                    }
+                ],
+                "externalResources": [{
+                    "id": "external-1",
+                    "name": "Manual prerequisite",
+                    "optional": false,
+                    "resourceType": "WEBSITE",
+                    "resourceUrl": "https://example.com/prerequisite",
+                    "version": "1.0",
+                    "author": "Example Author"
+                }]
+            }),
+        );
+
+        assert_eq!(plan.slug, "example-collection");
+        assert_eq!(plan.revision_id, "revision-4");
+        assert_eq!(plan.revision_number, 4);
+        assert_eq!(plan.total_size, Some(4096));
+        assert_eq!(plan.mod_files.len(), 2);
+        assert_eq!(plan.mod_files[0].mod_id, Some(42));
+        assert_eq!(plan.mod_files[0].file_id, 9001);
+        assert_eq!(plan.mod_files[0].size_in_bytes, Some(2048));
+        assert!(plan.mod_files[0].available);
+        assert!(!plan.mod_files[1].available);
+        assert!(plan.mod_files[1].optional);
+        assert_eq!(plan.external_resources.len(), 1);
+        assert!(!plan.external_resources[0].optional);
+    }
+
+    #[tokio::test]
+    #[ignore = "Queries live Nexus Mods Schedule I collection metadata"]
+    async fn live_schedule_i_collection_catalog_returns_revision_metadata() -> Result<()> {
+        let service = NexusModsService::new();
+        let page = service
+            .browse_collections_page("schedule1", "", "updated", 0, 2)
+            .await?;
+
+        assert!(page.total_count > 0, "Expected a Nexus collection catalog");
+        assert_eq!(page.collections.len(), 2);
+        assert!(page.collections.iter().all(|entry| {
+            entry.get("slug").and_then(Value::as_str).is_some()
+                && entry.get("latestPublishedRevision").is_some()
+                && entry.get("user").is_some()
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "Queries a live Nexus Mods Schedule I collection revision"]
+    async fn live_schedule_i_collection_revision_returns_exact_file_ids() -> Result<()> {
+        let service = NexusModsService::new();
+        let page = service
+            .browse_collections_page("schedule1", "", "updated", 0, 10)
+            .await?;
+        let collection = page
+            .collections
+            .iter()
+            .find(|entry| {
+                entry
+                    .get("latestPublishedRevision")
+                    .and_then(|revision| revision.get("revisionNumber"))
+                    .and_then(Value::as_u64)
+                    .is_some()
+            })
+            .ok_or_else(|| anyhow::anyhow!("No published Schedule I collection found"))?;
+        let slug = collection
+            .get("slug")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("Collection slug missing"))?;
+        let revision_number = collection["latestPublishedRevision"]["revisionNumber"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| anyhow::anyhow!("Collection revision missing"))?;
+        let plan = service
+            .get_collection_revision_plan(slug, revision_number)
+            .await?;
+
+        assert_eq!(plan.slug, slug);
+        assert_eq!(plan.revision_number, revision_number);
+        assert!(plan.mod_files.iter().all(|file| file.file_id > 0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "Queries live Nexus Mods Schedule I metadata"]
+    async fn live_schedule_i_catalog_page_returns_total_and_rich_metadata() -> Result<()> {
+        let service = NexusModsService::new();
+        let page = service
+            .browse_mods_page("schedule1", "", "updated", 0, 2)
+            .await?;
+
+        assert!(page.total_count > 2, "Expected a paginated Nexus catalog");
+        assert_eq!(page.mods.len(), 2);
+        assert!(page.has_more);
+        assert!(page.mods.iter().all(|entry| {
+            entry.get("mod_id").and_then(Value::as_u64).is_some()
+                && entry.get("status").and_then(Value::as_str).is_some()
+                && entry.get("description").is_some()
+        }));
+        Ok(())
     }
 
     #[tokio::test]

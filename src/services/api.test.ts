@@ -471,6 +471,161 @@ describe('ApiService', () => {
     );
   });
 
+  it('browseNexusModsPage preserves paging and rich catalog metadata', async () => {
+    invokeMock.mockResolvedValueOnce({
+      mods: [
+        {
+          mod_id: 2573,
+          name: 'No Employee Collisions',
+          summary: 'Stops employee collisions.',
+          description: 'Detailed description',
+          mod_downloads: 21,
+          category_name: 'Employees',
+          contains_adult_content: false,
+          status: 'published',
+          direct_download_enabled: false,
+          supports_vortex: true,
+          tags: ['Gameplay'],
+        },
+      ],
+      totalCount: 1228,
+      offset: 0,
+      count: 50,
+      hasMore: true,
+    });
+
+    const result = await ApiService.browseNexusModsPage(
+      'schedule1',
+      'employee',
+      'relevance',
+      0,
+      50,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith('browse_nexus_mods_page', {
+      gameId: 'schedule1',
+      query: 'employee',
+      sort: 'relevance',
+      offset: 0,
+      count: 50,
+    });
+    expect(result).toEqual(expect.objectContaining({
+      totalCount: 1228,
+      hasMore: true,
+    }));
+    expect(result.mods[0]).toEqual(expect.objectContaining({
+      mod_id: 2573,
+      description: 'Detailed description',
+      category_name: 'Employees',
+      supports_vortex: true,
+      tags: ['Gameplay'],
+    }));
+  });
+
+  it('browseNexusCollectionsPage preserves paging and collection metadata', async () => {
+    invokeMock.mockResolvedValueOnce({
+      collections: [
+        {
+          id: 19,
+          slug: 'quality-of-life',
+          name: 'Quality of Life',
+          summary: 'A curated collection.',
+          category: { name: 'Gameplay' },
+          endorsements: 42,
+          totalDownloads: 500,
+          overallRating: 4.7,
+          overallRatingCount: 12,
+          updatedAt: '2026-09-09T00:00:00Z',
+          user: {
+            memberId: 77,
+            name: 'Curator',
+            avatar: 'avatar.png',
+          },
+          tileImage: {
+            url: 'tile.png',
+            altText: 'Collection tile',
+            thumbnailUrl: 'tile-small.png',
+          },
+          latestPublishedRevision: {
+            adultContent: false,
+            fileSize: 2048,
+            modCount: 8,
+            revisionNumber: 3,
+            updatedAt: '2026-09-08T00:00:00Z',
+          },
+        },
+      ],
+      totalCount: 120,
+      offset: 0,
+      count: 50,
+      hasMore: true,
+    });
+
+    const result = await ApiService.browseNexusCollectionsPage(
+      'schedule1',
+      'quality',
+      'relevance',
+      0,
+      50,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith('browse_nexus_collections_page', {
+      gameId: 'schedule1',
+      query: 'quality',
+      sort: 'relevance',
+      offset: 0,
+      count: 50,
+    });
+    expect(result).toEqual(expect.objectContaining({
+      totalCount: 120,
+      hasMore: true,
+    }));
+    expect(result.collections[0]).toEqual(expect.objectContaining({
+      id: 19,
+      slug: 'quality-of-life',
+      category_name: 'Gameplay',
+      curator_name: 'Curator',
+      curator_member_id: 77,
+      tile_image_url: 'tile-small.png',
+      revision_number: 3,
+      mod_count: 8,
+      file_size: 2048,
+      contains_adult_content: false,
+    }));
+  });
+
+  it('gets an exact Nexus collection revision staging plan', async () => {
+    const plan = {
+      slug: 'quality-of-life',
+      revisionId: 'revision-3',
+      revisionNumber: 3,
+      totalSize: 2048,
+      modFiles: [
+        {
+          collectionRevisionModId: 'revision-mod-1',
+          modId: 42,
+          fileId: 9001,
+          gameId: 7381,
+          modName: 'Example Mod',
+          fileName: 'Example Mod 2.0',
+          version: '2.0.0',
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    };
+    invokeMock.mockResolvedValueOnce(plan);
+
+    await expect(
+      ApiService.getNexusCollectionRevisionPlan('quality-of-life', 3),
+    ).resolves.toEqual(plan);
+    expect(invokeMock).toHaveBeenCalledWith(
+      'get_nexus_collection_revision_plan',
+      { slug: 'quality-of-life', revisionNumber: 3 },
+    );
+  });
+
   it('gets published Nexus dependencies for a selected file', async () => {
     const dependencies = {
       sourceVersionId: 'version-1',

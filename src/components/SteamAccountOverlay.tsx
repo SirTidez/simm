@@ -29,6 +29,8 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   const [nexusBusy, setNexusBusy] = useState(false);
   const [nexusError, setNexusError] = useState<string | null>(null);
   const oauthTimeoutRef = useRef<number | null>(null);
+  const oauthPollRef = useRef<number | null>(null);
+  const oauthPollInFlightRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -64,6 +66,10 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       if (oauthTimeoutRef.current) {
         window.clearTimeout(oauthTimeoutRef.current);
         oauthTimeoutRef.current = null;
+      }
+      if (oauthPollRef.current) {
+        window.clearInterval(oauthPollRef.current);
+        oauthPollRef.current = null;
       }
     };
   }, []);
@@ -107,17 +113,61 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     }
   };
 
+  const clearOAuthPolling = () => {
+    if (oauthPollRef.current) {
+      window.clearInterval(oauthPollRef.current);
+      oauthPollRef.current = null;
+    }
+    oauthPollInFlightRef.current = false;
+  };
+
   const startOAuthTimeout = () => {
     clearOAuthTimeout();
     oauthTimeoutRef.current = window.setTimeout(() => {
+      clearOAuthPolling();
       setNexusBusy(false);
       setNexusError('Nexus login timed out. Please try again.');
     }, 120000);
   };
 
+  const pollForLocalOAuthCallback = async () => {
+    if (oauthPollInFlightRef.current) return;
+    oauthPollInFlightRef.current = true;
+
+    try {
+      const result = await ApiService.completeNexusOAuthCallback();
+      if (result.pending) return;
+      if (!result.success) {
+        throw new Error('Failed to complete Nexus OAuth login');
+      }
+
+      clearOAuthPolling();
+      clearOAuthTimeout();
+      await loadNexusStatus();
+      setNexusError(null);
+      setNexusBusy(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login';
+      clearOAuthPolling();
+      clearOAuthTimeout();
+      setNexusBusy(false);
+      setNexusError(message);
+    } finally {
+      oauthPollInFlightRef.current = false;
+    }
+  };
+
+  const startOAuthPolling = () => {
+    clearOAuthPolling();
+    oauthPollRef.current = window.setInterval(() => {
+      void pollForLocalOAuthCallback();
+    }, 500);
+  };
+
   useEffect(() => {
     const handleOAuthResult = async (event: Event) => {
       const detail = (event as CustomEvent<{ success: boolean; error?: string }>).detail;
+      clearOAuthPolling();
       clearOAuthTimeout();
 
       if (detail?.success) {
@@ -146,7 +196,8 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     setNexusBusy(true);
     setNexusError(null);
     try {
-      await ApiService.beginNexusOAuthLogin(false);
+      await ApiService.beginNexusOAuthLogin(true);
+      startOAuthPolling();
       startOAuthTimeout();
     } catch (err) {
       clearOAuthTimeout();
@@ -159,6 +210,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     setNexusBusy(true);
     setNexusError(null);
     try {
+      clearOAuthPolling();
       clearOAuthTimeout();
       await ApiService.logoutNexusOAuth();
       await loadNexusStatus();

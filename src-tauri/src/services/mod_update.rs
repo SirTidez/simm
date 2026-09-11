@@ -2113,6 +2113,7 @@ mod tests {
             attached_userdata: Vec::new(),
             source: Some(ModSource::Thunderstore),
             source_id: Some("ifBars/SteamNetworkLib_Mono".to_string()),
+            nexus_file_id: None,
             source_version: Some("1.2.1".to_string()),
             source_url: Some(
                 "https://thunderstore.io/c/schedule-i/p/ifBars/SteamNetworkLib_Mono/".to_string(),

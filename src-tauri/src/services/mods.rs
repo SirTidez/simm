@@ -5591,7 +5591,23 @@ impl ModsService {
                 version_key = Self::normalize_runtime_suffix_token(&version_key);
             }
 
-            let key = format!("{}::{}::{}", key_name, source_id_key, version_key);
+            let nexus_file_id = if template_meta
+                .source
+                .as_ref()
+                .is_some_and(|source| matches!(source, ModSource::Nexusmods))
+            {
+                Self::nexus_file_id_from_mod_metadata(&template_meta)
+            } else {
+                None
+            };
+
+            let key = format!(
+                "{}::{}::{}::{}",
+                key_name,
+                source_id_key,
+                version_key,
+                nexus_file_id.as_deref().unwrap_or_default()
+            );
             let merged_into_existing = grouped.contains_key(&key);
             let key_for_debug = if merged_into_existing {
                 Some(key.clone())
@@ -5607,6 +5623,7 @@ impl ModsService {
                 attached_userdata: payload_summary.attached_userdata.clone(),
                 source: template_meta.source.clone(),
                 source_id: template_meta.source_id.clone(),
+                nexus_file_id: nexus_file_id.clone(),
                 source_version: template_meta.source_version.clone(),
                 source_url: template_meta.source_url.clone(),
                 summary: template_meta.summary.clone(),
@@ -12739,6 +12756,19 @@ mod tests {
             .join("Mods")
             .join("BetterDealerWalk.dll")
             .exists());
+
+        let library = service.get_mod_library().await?;
+        let nexus_entries = library
+            .downloaded
+            .iter()
+            .filter(|entry| entry.source_id.as_deref() == Some("1984"))
+            .collect::<Vec<_>>();
+        assert_eq!(nexus_entries.len(), 2);
+        let nexus_file_ids = nexus_entries
+            .iter()
+            .filter_map(|entry| entry.nexus_file_id.as_deref())
+            .collect::<HashSet<_>>();
+        assert_eq!(nexus_file_ids, HashSet::from(["1778698736", "1778698776"]));
 
         Ok(())
     }
