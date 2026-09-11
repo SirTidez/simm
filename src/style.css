@@ -894,8 +894,12 @@ body::before {
   position: fixed;
   top: max(clamp(4rem, 8vw, 5rem), 80px);
   left: 50%;
-  translate: -50% 0;
-  transform: none;
+  /* Base UI supplies -50% translation utilities on both axes. Reset their
+   * custom properties before applying SIMM's own placement so production CSS
+   * ordering cannot pull top-aligned dialogs partly outside the viewport. */
+  --tw-translate-x: 0px !important;
+  --tw-translate-y: 0px !important;
+  translate: -50% 0 !important;
 }
 
 .app-dialog {
@@ -945,6 +949,17 @@ body::before {
 
 .app-close-behavior-dialog .app-dialog__option {
   align-items: center;
+}
+
+/* Short blocking decisions stay centered. Long workflow dialogs retain the
+ * shared top alignment so their headers and scroll regions remain predictable. */
+.simm-dialog-content.app-dialog--message,
+.simm-dialog-content.app-dialog--confirm {
+  top: 50% !important;
+  left: 50% !important;
+  --tw-translate-x: 0px !important;
+  --tw-translate-y: 0px !important;
+  translate: -50% -50% !important;
 }
 
 .app-dialog__supplement {
@@ -8469,7 +8484,6 @@ body {
   top: 50dvh !important;
   left: 50vw !important;
   translate: -50% -50% !important;
-  transform: none !important;
   border: 1px solid var(--workspace-stroke);
   background:
     linear-gradient(180deg, rgba(22, 33, 48, 0.98), rgba(14, 22, 34, 0.98)),
@@ -10766,7 +10780,6 @@ body {
   top: 50dvh !important;
   left: 50vw !important;
   translate: -50% -50% !important;
-  transform: none !important;
   border: 1px solid var(--workspace-stroke);
   background:
     linear-gradient(180deg, rgba(22, 33, 48, 0.98), rgba(14, 22, 34, 0.98)),
@@ -13439,7 +13452,7 @@ body {
 .simm-dialog-content.app-dialog {
   width: min(var(--simm-dialog-width, 34rem), calc(100dvw - 2rem));
   max-width: calc(100dvw - 2rem);
-  max-height: calc(100dvh - 2rem);
+  max-height: calc(100dvh - max(clamp(8rem, 16vw, 10rem), 140px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 0;
