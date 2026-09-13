@@ -7,7 +7,7 @@ use crate::services::mods::ModsService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::services::telemetry_upload::TelemetryUploadService;
-use crate::services::thunderstore::ThunderStoreService;
+use crate::services::thunderstore::{shared_thunderstore_service, ThunderStoreService};
 use crate::services::update_check::UpdateCheckService;
 use crate::types::{ModMetadata, ModSource, UpdateCheckResult};
 use once_cell::sync::Lazy;
@@ -149,6 +149,54 @@ fn background_checks_enabled(settings: &crate::types::Settings, manual: bool) ->
     manual || settings.auto_check_updates != Some(false)
 }
 
+async fn refresh_discovery_catalogs(nexus_game_id: &str) {
+    let thunderstore_service = shared_thunderstore_service();
+    let nexus_service = match crate::commands::nexus_mods::get_nexus_mods_service().await {
+        Ok(service) => Some(service),
+        Err(error) => {
+            log::warn!(
+                "[UpdateCheck] Could not initialize Nexus discover cache refresh: {}",
+                error
+            );
+            None
+        }
+    };
+
+    let thunderstore_refresh =
+        thunderstore_service.refresh_community_cache_if_stale("schedule-i", None);
+    let nexus_refresh = async {
+        match nexus_service {
+            Some(service) => service
+                .refresh_latest_mods_cache_if_stale(nexus_game_id, 50)
+                .await
+                .map(|page| page.mods.len()),
+            None => Ok(0),
+        }
+    };
+
+    let (thunderstore_result, nexus_result) = tokio::join!(thunderstore_refresh, nexus_refresh);
+    match thunderstore_result {
+        Ok(packages) => log::debug!(
+            "[UpdateCheck] Thunderstore discover cache ready (packages={})",
+            packages.len()
+        ),
+        Err(error) => log::warn!(
+            "[UpdateCheck] Thunderstore discover cache refresh failed: {:#}",
+            error
+        ),
+    }
+    match nexus_result {
+        Ok(mod_count) => log::debug!(
+            "[UpdateCheck] Nexus discover cache ready (mods={})",
+            mod_count
+        ),
+        Err(error) => log::warn!(
+            "[UpdateCheck] Nexus discover cache refresh failed: {:#}",
+            error
+        ),
+    }
+}
+
 pub async fn run_background_update_checks(
     pool: Arc<SqlitePool>,
     app: AppHandle,
@@ -170,6 +218,7 @@ pub async fn run_background_update_checks(
         .map_err(|error| error.to_string())?;
     let environment_count = environments.len();
     let interval_minutes = settings.update_check_interval.unwrap_or(60).max(1) as i64;
+    let nexus_game_id = normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref());
     let now = chrono::Utc::now();
     let due = environments
         .into_iter()
@@ -182,6 +231,7 @@ pub async fn run_background_update_checks(
         })
         .collect::<Vec<_>>();
     if due.is_empty() {
+        refresh_discovery_catalogs(&nexus_game_id).await;
         log::debug!(
             "[UpdateCheck] Background run found no due environments (loaded={}, elapsed_ms={})",
             environment_count,
@@ -189,11 +239,13 @@ pub async fn run_background_update_checks(
         );
         return Ok(());
     }
-    let results = UpdateCheckService::new(pool.clone())
-        .with_runtime_settings(settings.clone())
-        .check_all_environments(&due)
-        .await
-        .map_err(|error| error.to_string())?;
+    let update_service =
+        UpdateCheckService::new(pool.clone()).with_runtime_settings(settings.clone());
+    let (results, _) = tokio::join!(
+        update_service.check_all_environments(&due),
+        refresh_discovery_catalogs(&nexus_game_id),
+    );
+    let results = results.map_err(|error| error.to_string())?;
     flush_queued_telemetry_uploads(pool.clone()).await;
     for (environment_id, result) in results {
         let result =
@@ -716,10 +768,11 @@ pub async fn check_all_updates(
 
     let update_service =
         UpdateCheckService::new(db.inner().clone()).with_runtime_settings(settings.clone());
-    let mut results = update_service
-        .check_all_environments(&envs_to_check)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (results, _) = tokio::join!(
+        update_service.check_all_environments(&envs_to_check),
+        refresh_discovery_catalogs(&nexus_game_id),
+    );
+    let mut results = results.map_err(|e| e.to_string())?;
     if !envs_to_check.is_empty() {
         flush_queued_telemetry_uploads(db.inner().clone()).await;
     }

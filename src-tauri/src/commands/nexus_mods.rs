@@ -1043,7 +1043,7 @@ pub(crate) fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
     }
 }
 
-async fn get_nexus_mods_service() -> Result<Arc<NexusModsService>, String> {
+pub(crate) async fn get_nexus_mods_service() -> Result<Arc<NexusModsService>, String> {
     let mut service = NEXUS_MODS_SERVICE.lock().await;
     if service.is_none() {
         *service = Some(Arc::new(NexusModsService::new()));
