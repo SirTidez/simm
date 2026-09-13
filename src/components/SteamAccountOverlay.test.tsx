@@ -6,7 +6,6 @@ import { SteamAccountOverlay } from './SteamAccountOverlay';
 const apiMocks = vi.hoisted(() => ({
   getNexusOAuthStatus: vi.fn(),
   beginNexusOAuthLogin: vi.fn(),
-  completeNexusOAuthCallback: vi.fn(),
   logoutNexusOAuth: vi.fn(),
 }));
 
@@ -34,7 +33,6 @@ describe('SteamAccountOverlay', () => {
   beforeEach(() => {
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.beginNexusOAuthLogin.mockReset();
-    apiMocks.completeNexusOAuthCallback.mockReset();
     apiMocks.logoutNexusOAuth.mockReset();
     refreshSettings.mockReset();
 
@@ -47,9 +45,8 @@ describe('SteamAccountOverlay', () => {
     apiMocks.beginNexusOAuthLogin.mockResolvedValue({
       authorizeUrl: 'https://nexusmods.com/oauth/start',
       state: 'state-123',
-      redirectUri: 'http://localhost:8089/callback',
+      redirectUri: 'simm://oauth/nexus/callback',
     });
-    apiMocks.completeNexusOAuthCallback.mockResolvedValue({ success: false, pending: true });
   });
 
   afterEach(() => {
@@ -62,17 +59,13 @@ describe('SteamAccountOverlay', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Login with Nexus' }));
 
     await waitFor(() => {
-      expect(apiMocks.beginNexusOAuthLogin).toHaveBeenCalledWith(true);
+      expect(apiMocks.beginNexusOAuthLogin).toHaveBeenCalledWith(false);
     });
 
     expect(screen.getByRole('button', { name: 'Waiting for Nexus authorization...' })).toBeTruthy();
   });
 
-  it('completes a localhost Nexus callback while the account panel is waiting', async () => {
-    apiMocks.completeNexusOAuthCallback.mockResolvedValue({
-      success: true,
-      status: { connected: true },
-    });
+  it('refreshes the Nexus account after the registered protocol callback completes', async () => {
     apiMocks.getNexusOAuthStatus
       .mockResolvedValueOnce({ connected: false })
       .mockResolvedValue({
@@ -82,10 +75,10 @@ describe('SteamAccountOverlay', () => {
 
     render(<SteamAccountOverlay isOpen={true} onClose={() => {}} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Login with Nexus' }));
+    window.dispatchEvent(new CustomEvent('nexus-oauth-result', {
+      detail: { success: true },
+    }));
 
-    await waitFor(() => {
-      expect(apiMocks.completeNexusOAuthCallback).toHaveBeenCalledWith();
-    }, { timeout: 2000 });
     expect(await screen.findByText('Test Nexus User')).toBeTruthy();
   });
 
