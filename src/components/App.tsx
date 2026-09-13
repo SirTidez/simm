@@ -851,11 +851,13 @@ function AppShellDownloadsDock({
   icon,
   label,
   shellNavCollapsed,
+  onOpenProfile,
 }: {
   badge: number;
   icon: 'download';
   label: string;
   shellNavCollapsed: boolean;
+  onOpenProfile: (profileId: string) => void;
 }) {
   const [downloadsPanelMounted, setDownloadsPanelMounted] = useState(false);
   const [downloadsPanelVisible, setDownloadsPanelVisible] = useState(false);
@@ -971,7 +973,14 @@ function AppShellDownloadsDock({
           onTransitionEnd={handleDownloadsPanelTransitionEnd}
         >
           <Suspense fallback={<WorkspacePanelFallback />}>
-            <DownloadsPanel presentation="popup" onClose={closeDownloadsPanel} />
+            <DownloadsPanel
+              presentation="popup"
+              onClose={closeDownloadsPanel}
+              onOpenProfile={(profileId: string) => {
+                closeDownloadsPanel();
+                onOpenProfile(profileId);
+              }}
+            />
           </Suspense>
         </div>
       )}
@@ -991,6 +1000,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenHome,
   onOpenLibrary,
   onOpenProfiles,
+  onOpenProfile,
   onOpenSaveBackups,
   onShellNavTransitionEnd,
   onToggleShellNavigation,
@@ -1009,6 +1019,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenHome: () => void;
   onOpenLibrary: () => void;
   onOpenProfiles: () => void;
+  onOpenProfile: (profileId: string) => void;
   onOpenSaveBackups: () => void;
   onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
   onToggleShellNavigation: () => void;
@@ -1201,6 +1212,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
         label="Downloads"
         icon="download"
         shellNavCollapsed={shellNavCollapsed}
+        onOpenProfile={onOpenProfile}
       />
     </aside>
   );
@@ -2323,6 +2335,7 @@ function AppContent() {
             }}
             onOpenAccounts={() => pushWorkspace({ view: 'accounts' })}
             onOpenSecurityReport={openSecurityReportWorkspace}
+            onOpenProfile={(profileId: string) => openWorkspace({ view: 'profiles', profileId })}
           />
         );
       case 'securityReport':
@@ -2371,7 +2384,10 @@ function AppContent() {
         return telemetryAvailable ? <TelemetryWorkspace onClose={onCloseHandler} /> : null;
       case 'profiles':
         return (
-          <ProfilesWorkspace preferredEnvironmentId={selectedEnvironmentId} />
+          <ProfilesWorkspace
+            preferredEnvironmentId={selectedEnvironmentId}
+            initialProfileId={workspace.profileId}
+          />
         );
       case 'saveBackups':
         return <SaveBackupsWorkspace onClose={onCloseHandler} />;
@@ -2729,6 +2745,7 @@ function AppContent() {
             onOpenHome={goHome}
             onOpenLibrary={openLibraryWorkspaceFromShell}
             onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
+            onOpenProfile={(profileId) => openWorkspace({ view: 'profiles', profileId })}
             onOpenSaveBackups={() => openWorkspace({ view: 'saveBackups' })}
             onShellNavTransitionEnd={handleShellNavTransitionEnd}
             onToggleShellNavigation={toggleShellNavigation}

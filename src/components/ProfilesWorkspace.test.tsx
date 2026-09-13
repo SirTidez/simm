@@ -247,6 +247,55 @@ describe('ProfilesWorkspace', () => {
     expect(screen.getByLabelText(/target environment/i)).toHaveValue('mono-env');
   });
 
+  it('selects a requested collection profile when opened from Downloads', async () => {
+    const collectionProfile: StoredModProfile = {
+      ...profiles[1],
+      id: 'profile-collection',
+      name: 'Example Collection (Revision 1)',
+      isDefault: false,
+      manifest: {
+        ...profiles[1].manifest,
+        profile: { ...profiles[1].manifest.profile, name: 'Example Collection (Revision 1)' },
+        collection: {
+          slug: 'example',
+          name: 'Example Collection',
+          revisionNumber: 1,
+          sourceUrl: 'https://next.nexusmods.com/schedule1/collections/example',
+          items: [{
+            key: 'item-1',
+            nexusModId: 42,
+            nexusFileId: '100',
+            requestedName: 'Example Mod',
+            requestedAuthor: 'Example Author',
+            requestedVersion: '1.0.0',
+            optional: false,
+            selected: true,
+            sourceChoice: 'nexusmods',
+            status: 'manualRequired',
+            statusMessage: 'Exact Nexus file 100 must be downloaded from Nexus.',
+          }],
+        },
+        items: [{
+          itemType: 'mod',
+          name: 'Example Mod',
+          required: true,
+          enabled: true,
+          source: 'nexusmods',
+          sourceId: '42',
+          sourceVersion: '1.0.0',
+          nexusFileId: '100',
+        }],
+      },
+    };
+    apiMocks.listModProfiles.mockResolvedValue([...profiles, collectionProfile]);
+
+    render(<ProfilesWorkspace initialProfileId="profile-collection" />);
+
+    expect(await screen.findByRole('heading', { name: 'Example Collection (Revision 1)' })).toBeTruthy();
+    expect(screen.getByText(/0 of 1 selected mods ready/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Open Nexus/i })).toBeTruthy();
+  });
+
   it('does not label un-previewed default profile items as unsupported', async () => {
     render(<ProfilesWorkspace />);
 

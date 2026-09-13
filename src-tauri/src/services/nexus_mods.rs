@@ -1,3 +1,4 @@
+use crate::db;
 use crate::types::{
     NexusCollectionExternalResource, NexusCollectionModFile, NexusCollectionRevisionPlan,
     NexusCollectionsPage, NexusDependencyCandidate, NexusDependencyRequirement,
@@ -6,11 +7,16 @@ use crate::types::{
 use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{Mutex as AsyncMutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::{
+    fs,
+    sync::{Mutex as AsyncMutex, RwLock},
+};
 
 const NEXUS_GRAPHQL_ENDPOINT: &str = "https://api.nexusmods.com/v2/graphql";
 const NEXUS_V3_API_BASE: &str = "https://api.nexusmods.com";
@@ -22,6 +28,8 @@ const MOD_FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const GAME_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const GAMES_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const NEXUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DISCOVERY_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const DISCOVERY_CACHE_STALE_FALLBACK_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Clone)]
 pub struct NexusModsService {
@@ -43,6 +51,18 @@ pub struct NexusModsService {
 struct CachedValue<T> {
     loaded_at: Instant,
     value: T,
+}
+
+#[derive(Clone, Copy)]
+enum DiscoveryCachePolicy {
+    AllowStale,
+    RefreshIfOlderThan(Duration),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DiskNexusModsPageCache {
+    saved_at_unix_secs: u64,
+    page: NexusModsPage,
 }
 
 impl NexusModsService {
@@ -120,6 +140,82 @@ impl NexusModsService {
                 value,
             },
         );
+    }
+
+    fn current_unix_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default()
+    }
+
+    fn discovery_cache_age(cache: &DiskNexusModsPageCache) -> Duration {
+        Duration::from_secs(Self::current_unix_secs().saturating_sub(cache.saved_at_unix_secs))
+    }
+
+    fn discovery_cache_is_usable(
+        cache: &DiskNexusModsPageCache,
+        policy: DiscoveryCachePolicy,
+    ) -> bool {
+        let age = Self::discovery_cache_age(cache);
+        match policy {
+            DiscoveryCachePolicy::AllowStale => age < DISCOVERY_CACHE_STALE_FALLBACK_TTL,
+            DiscoveryCachePolicy::RefreshIfOlderThan(max_age) => age < max_age,
+        }
+    }
+
+    fn sanitize_cache_component(value: &str) -> String {
+        let sanitized = value
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        let trimmed = sanitized.trim_matches('-');
+        if trimmed.is_empty() {
+            "schedule1".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn discovery_cache_path(game_id: &str, page_size: u32) -> Result<PathBuf> {
+        Ok(db::get_data_dir()?
+            .join("cache")
+            .join("nexus")
+            .join("discover")
+            .join(format!(
+                "{}-latest-{}.json",
+                Self::sanitize_cache_component(game_id),
+                page_size
+            )))
+    }
+
+    async fn read_discovery_cache(game_id: &str, page_size: u32) -> Option<DiskNexusModsPageCache> {
+        let path = Self::discovery_cache_path(game_id, page_size).ok()?;
+        let content = fs::read_to_string(path).await.ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    async fn write_discovery_cache(
+        game_id: &str,
+        page_size: u32,
+        page: &NexusModsPage,
+    ) -> Result<()> {
+        let path = Self::discovery_cache_path(game_id, page_size)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let cache = DiskNexusModsPageCache {
+            saved_at_unix_secs: Self::current_unix_secs(),
+            page: page.clone(),
+        };
+        fs::write(path, serde_json::to_vec(&cache)?).await?;
+        Ok(())
     }
 
     fn parse_u32_header(headers: &reqwest::header::HeaderMap, names: &[&str]) -> Option<u32> {
@@ -654,9 +750,72 @@ impl NexusModsService {
         offset: u32,
         count: u32,
     ) -> Result<NexusModsPage> {
-        let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        self.browse_mods_page_with_policy(
+            game_id,
+            query,
+            sort,
+            offset,
+            count,
+            DiscoveryCachePolicy::AllowStale,
+        )
+        .await
+    }
+
+    pub async fn refresh_latest_mods_cache_if_stale(
+        &self,
+        game_id: &str,
+        count: u32,
+    ) -> Result<NexusModsPage> {
+        self.browse_mods_page_with_policy(
+            game_id,
+            "",
+            "updated",
+            0,
+            count,
+            DiscoveryCachePolicy::RefreshIfOlderThan(DISCOVERY_CACHE_REFRESH_INTERVAL),
+        )
+        .await
+    }
+
+    async fn browse_mods_page_with_policy(
+        &self,
+        game_id: &str,
+        query: &str,
+        sort: &str,
+        offset: u32,
+        count: u32,
+        discovery_policy: DiscoveryCachePolicy,
+    ) -> Result<NexusModsPage> {
         let trimmed_query = query.trim();
         let page_size = count.clamp(1, 100);
+        let is_latest_page = trimmed_query.is_empty() && sort == "updated" && offset == 0;
+        let disk_cache = if is_latest_page {
+            Self::read_discovery_cache(game_id, page_size).await
+        } else {
+            None
+        };
+        if let Some(cache) = disk_cache.as_ref() {
+            if Self::discovery_cache_is_usable(cache, discovery_policy) {
+                return Ok(cache.page.clone());
+            }
+        }
+
+        let (_resolved_id, domain_name) = match self.resolve_game_by_input(game_id).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                if let Some(cache) = disk_cache.as_ref() {
+                    if Self::discovery_cache_age(cache) < DISCOVERY_CACHE_STALE_FALLBACK_TTL {
+                        log::warn!(
+                            "Using stale Nexus discover cache for {} after game lookup failed: {:#}",
+                            game_id,
+                            error
+                        );
+                        return Ok(cache.page.clone());
+                    }
+                }
+                return Err(error);
+            }
+        };
         let cache_key = format!(
             "catalog:{}:{}:{}:{}:{}",
             domain_name.to_ascii_lowercase(),
@@ -665,15 +824,23 @@ impl NexusModsService {
             offset,
             page_size
         );
-        if let Some(cached) =
-            Self::cached_map_get(&self.catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
-        {
-            return Ok(cached);
+        if !is_latest_page {
+            if let Some(cached) =
+                Self::cached_map_get(&self.catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
+            {
+                return Ok(cached);
+            }
         }
 
         let lock = self.request_lock(&cache_key).await;
         let _guard = lock.lock().await;
-        if let Some(cached) =
+        if is_latest_page {
+            if let Some(cache) = Self::read_discovery_cache(game_id, page_size).await {
+                if Self::discovery_cache_is_usable(&cache, discovery_policy) {
+                    return Ok(cache.page);
+                }
+            }
+        } else if let Some(cached) =
             Self::cached_map_get(&self.catalog_cache, &cache_key, SEARCH_CACHE_TTL).await
         {
             return Ok(cached);
@@ -686,7 +853,7 @@ impl NexusModsService {
             filter["nameStemmed"] = serde_json::json!([{"value": trimmed_query, "op": "MATCHES"}]);
         }
 
-        let data = self
+        let data = match self
             .graphql_request(
                 r#"
                 query BrowseModsPage($filter: ModsFilter, $sort: [ModsSort!], $offset: Int, $count: Int) {
@@ -724,7 +891,23 @@ impl NexusModsService {
                     "count": page_size
                 }),
             )
-            .await?;
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                if let Some(cache) = disk_cache {
+                    if Self::discovery_cache_age(&cache) < DISCOVERY_CACHE_STALE_FALLBACK_TTL {
+                        log::warn!(
+                            "Using stale Nexus discover cache for {} after refresh failed: {:#}",
+                            game_id,
+                            error
+                        );
+                        return Ok(cache.page);
+                    }
+                }
+                return Err(error);
+            }
+        };
 
         let mods_node = data.get("mods").cloned().unwrap_or_default();
         let total_count = mods_node
@@ -748,6 +931,15 @@ impl NexusModsService {
             has_more: loaded_through < total_count,
         };
         Self::cached_map_set(&self.catalog_cache, cache_key, page.clone()).await;
+        if is_latest_page {
+            if let Err(error) = Self::write_discovery_cache(game_id, page_size, &page).await {
+                log::warn!(
+                    "Failed to write Nexus discover cache for {}: {:#}",
+                    game_id,
+                    error
+                );
+            }
+        }
         Ok(page)
     }
 
@@ -905,6 +1097,16 @@ impl NexusModsService {
                         .and_then(Value::as_str)
                         .unwrap_or("Unavailable Nexus mod")
                         .to_string(),
+                    author: mod_value
+                        .and_then(|value| value.get("author"))
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            mod_value
+                                .and_then(|value| value.get("uploader"))
+                                .and_then(|value| value.get("name"))
+                                .and_then(Value::as_str)
+                        })
+                        .map(str::to_string),
                     file_name: file
                         .and_then(|value| value.get("name"))
                         .and_then(Value::as_str)
@@ -1010,7 +1212,7 @@ impl NexusModsService {
                                 version
                                 sizeInBytes
                                 uri
-                                mod { name }
+                                mod { name author uploader { name } }
                             }
                         }
                         externalResources {
@@ -1848,6 +2050,44 @@ mod tests {
     }
 
     #[test]
+    fn discovery_cache_policy_keeps_browsing_immediate_and_refreshes_hourly() {
+        let recent = DiskNexusModsPageCache {
+            saved_at_unix_secs: NexusModsService::current_unix_secs().saturating_sub(30 * 60),
+            page: NexusModsPage {
+                mods: Vec::new(),
+                total_count: 0,
+                offset: 0,
+                count: 50,
+                has_more: false,
+            },
+        };
+        let older = DiskNexusModsPageCache {
+            saved_at_unix_secs: NexusModsService::current_unix_secs().saturating_sub(6 * 60 * 60),
+            page: recent.page.clone(),
+        };
+
+        assert!(NexusModsService::discovery_cache_is_usable(
+            &recent,
+            DiscoveryCachePolicy::RefreshIfOlderThan(Duration::from_secs(60 * 60)),
+        ));
+        assert!(!NexusModsService::discovery_cache_is_usable(
+            &older,
+            DiscoveryCachePolicy::RefreshIfOlderThan(Duration::from_secs(60 * 60)),
+        ));
+        assert!(NexusModsService::discovery_cache_is_usable(
+            &older,
+            DiscoveryCachePolicy::AllowStale,
+        ));
+    }
+
+    #[test]
+    fn discovery_cache_file_names_are_scoped_to_game_and_page_size() {
+        let path =
+            NexusModsService::discovery_cache_path("Schedule 1/Test", 50).expect("cache path");
+        assert!(path.ends_with("schedule-1-test-latest-50.json"));
+    }
+
+    #[test]
     fn parses_materialized_dependency_candidates() {
         let response = serde_json::json!({
             "data": {
@@ -1971,7 +2211,7 @@ mod tests {
                             "version": "2.0.0",
                             "sizeInBytes": "2048",
                             "uri": "nxm://schedule1/mods/42/files/9001",
-                            "mod": { "name": "Example Mod" }
+                            "mod": { "name": "Example Mod", "author": "Example Author" }
                         }
                     },
                     {
@@ -2001,6 +2241,7 @@ mod tests {
         assert_eq!(plan.total_size, Some(4096));
         assert_eq!(plan.mod_files.len(), 2);
         assert_eq!(plan.mod_files[0].mod_id, Some(42));
+        assert_eq!(plan.mod_files[0].author.as_deref(), Some("Example Author"));
         assert_eq!(plan.mod_files[0].file_id, 9001);
         assert_eq!(plan.mod_files[0].size_in_bytes, Some(2048));
         assert!(plan.mod_files[0].available);

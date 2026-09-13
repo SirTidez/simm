@@ -219,6 +219,37 @@ describe('DownloadStatusStore', () => {
     expect(screen.getByTestId('count').textContent).toBe('0');
   });
 
+  it('retains completed collection summaries so they can navigate back to Profiles', async () => {
+    vi.useFakeTimers();
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+    await flushListeners();
+
+    await act(async () => {
+      trackedDownloadHandler?.({
+        id: 'collection:example:1',
+        kind: 'collection',
+        label: 'Example Collection',
+        contextLabel: 'Revision 1 collection profile',
+        status: 'completed',
+        progress: 100,
+        downloadedFiles: 4,
+        totalFiles: 4,
+        profileId: 'profile-collection',
+        persistent: true,
+        startedAt: Date.now() - 1000,
+        finishedAt: Date.now(),
+      });
+      vi.advanceTimersByTime(60_000);
+    });
+
+    expect(screen.getByTestId('count').textContent).toBe('1');
+    expect(screen.getByTestId('labels').textContent).toContain('Example Collection');
+  });
+
   it('sorts active rows ahead of terminal rows', async () => {
     render(
       <DownloadStatusStoreProvider>

@@ -237,6 +237,7 @@ impl ModProfilesService {
                 exported_at: Utc::now().to_rfc3339(),
             },
             items,
+            collection: None,
         })
     }
 
@@ -900,6 +901,7 @@ fn empty_profile_manifest(name: &str, runtime: Runtime) -> ModProfileManifest {
             exported_at: Utc::now().to_rfc3339(),
         },
         items: Vec::new(),
+        collection: None,
     }
 }
 
@@ -2035,6 +2037,7 @@ fn plan_to_manifest(plan: &ModProfileImportPlan) -> ModProfileManifest {
         updated_at: None,
         profile: plan.profile.clone(),
         items: plan.items.iter().map(|item| item.item.clone()).collect(),
+        collection: None,
     }
 }
 
@@ -2137,6 +2140,7 @@ mod tests {
                 exported_at: "2026-05-31T00:00:00Z".to_string(),
             },
             items: vec![profile_item()],
+            collection: None,
         }
     }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 
 import { DownloadsPanel } from './DownloadsPanel';
 
@@ -116,5 +116,29 @@ describe('DownloadsPanel', () => {
 
     expect(screen.getByText('Active and recent downloads will appear here while SIMM is working.')).toBeTruthy();
     expect(screen.queryByText('0')).toBeNull();
+  });
+
+  it('opens a collection profile from its aggregate download row', () => {
+    const onOpenProfile = vi.fn();
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [{
+        id: 'collection:example:1',
+        kind: 'collection',
+        label: 'Example Collection',
+        contextLabel: 'Revision 1 collection profile',
+        status: 'completed',
+        progress: 100,
+        downloadedFiles: 4,
+        totalFiles: 4,
+        profileId: 'profile-collection',
+        persistent: true,
+        startedAt: Date.now() - 1000,
+        finishedAt: Date.now(),
+      }],
+    });
+
+    render(<DownloadsPanel onOpenProfile={onOpenProfile} />);
+    fireEvent.click(screen.getByRole('button', { name: /Example Collection/i }));
+    expect(onOpenProfile).toHaveBeenCalledWith('profile-collection');
   });
 });

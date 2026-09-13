@@ -40,7 +40,7 @@ export interface OneTimeDownloadCredentials {
 
 export type Runtime = 'IL2CPP' | 'Mono' | 'MONO';
 
-export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework';
+export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework' | 'collection';
 
 export interface TrackedDownload {
   id: string;
@@ -59,6 +59,10 @@ export interface TrackedDownload {
   finishedAt?: number | null;
   /** Present for game downloads so late events from an older run can be ignored. */
   operationId?: string;
+  /** Collection downloads open their generated profile when selected. */
+  profileId?: string;
+  /** Collection summaries remain available longer than ordinary completed rows. */
+  persistent?: boolean;
 }
 
 /** Result of `extract_game_version` (Steam entries include reconciled branch/runtime). */
@@ -692,6 +696,7 @@ export interface NexusCollectionModFile {
   fileId: number;
   gameId?: number;
   modName: string;
+  author?: string;
   fileName: string;
   version: string;
   optional: boolean;
@@ -803,6 +808,49 @@ export interface ModProfileManifest {
   updatedAt?: string | null;
   profile: ModProfileInfo;
   items: ModProfileItem[];
+  collection?: ModProfileCollection | null;
+}
+
+export type ModProfileCollectionSourceChoice = 'nexusmods' | 'thunderstore' | 'library';
+export type ModProfileCollectionItemStatus =
+  | 'pending'
+  | 'queued'
+  | 'downloading'
+  | 'ready'
+  | 'manualRequired'
+  | 'runtimeMismatch'
+  | 'error';
+
+export interface ModProfileCollectionThunderstoreMatch {
+  packageUuid: string;
+  versionUuid: string;
+  sourceId: string;
+  packageUrl: string;
+  runtime: 'IL2CPP' | 'Mono';
+}
+
+export interface ModProfileCollectionItem {
+  key: string;
+  nexusModId?: number | null;
+  nexusFileId: string;
+  requestedName: string;
+  requestedAuthor?: string | null;
+  requestedVersion: string;
+  optional: boolean;
+  selected: boolean;
+  sourceChoice: ModProfileCollectionSourceChoice;
+  status: ModProfileCollectionItemStatus;
+  statusMessage?: string | null;
+  thunderstoreMatch?: ModProfileCollectionThunderstoreMatch | null;
+  runtimeMismatch?: boolean;
+}
+
+export interface ModProfileCollection {
+  slug: string;
+  name: string;
+  revisionNumber: number;
+  sourceUrl: string;
+  items: ModProfileCollectionItem[];
 }
 
 export interface ModProfileInfo {

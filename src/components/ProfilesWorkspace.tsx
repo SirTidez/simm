@@ -3,6 +3,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { ApiService } from '../services/api';
+import { updateCollectionProfileFromLibrary } from '../services/collectionProfile';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { getErrorMessage } from '../utils/errors';
 import type {
@@ -11,6 +12,7 @@ import type {
   ModProfileImportPlan,
   ModProfileImportPlanItem,
   ModProfileManifest,
+  ModProfileCollectionItem,
   ModProfileItem,
   Runtime,
   StoredModProfile,
@@ -100,9 +102,20 @@ function planItemStatusClass(item: ModProfileImportPlanItem): string {
 
 interface ProfilesWorkspaceProps {
   preferredEnvironmentId?: string | null;
+  initialProfileId?: string | null;
 }
 
-export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceProps) {
+const collectionStatusLabels: Record<ModProfileCollectionItem['status'], string> = {
+  pending: 'Not selected',
+  queued: 'Queued',
+  downloading: 'Downloading',
+  ready: 'Ready',
+  manualRequired: 'Nexus required',
+  runtimeMismatch: 'Runtime mismatch',
+  error: 'Retry needed',
+};
+
+export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: ProfilesWorkspaceProps) {
   const { environments, loading: environmentsLoading, refreshEnvironments } = useEnvironmentStore();
   const [profiles, setProfiles] = useState<StoredModProfile[]>([]);
   const [profilesLoading, setProfilesLoading] = useState(true);
@@ -134,6 +147,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
       const loaded = await ApiService.listModProfiles();
       setProfiles(loaded);
       setSelectedProfileId((current) => {
+        if (initialProfileId && loaded.some((profile) => profile.id === initialProfileId)) return initialProfileId;
         if (current && loaded.some((profile) => profile.id === current)) return current;
         const preferredRuntime = preferredEnvironment ? runtimeKey(preferredEnvironment.runtime) : selectedRuntime;
         const sameRuntime = loaded.find((profile) =>
@@ -146,10 +160,16 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
     } finally {
       setProfilesLoading(false);
     }
-  }, [preferredEnvironment, selectedRuntime]);
+  }, [initialProfileId, preferredEnvironment, selectedRuntime]);
 
   useEffect(() => {
     void loadProfiles();
+  }, [loadProfiles]);
+
+  useEffect(() => {
+    const handleProfilesUpdated = () => void loadProfiles();
+    window.addEventListener('mod-profiles-updated', handleProfilesUpdated);
+    return () => window.removeEventListener('mod-profiles-updated', handleProfilesUpdated);
   }, [loadProfiles]);
 
   useEffect(() => {
@@ -226,6 +246,10 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
   }, [compatibleEnvironments, environments, selectedProfile, targetEnvironmentId, userChoseTarget]);
 
   const profileItems = selectedProfile?.manifest.items ?? [];
+  const selectedCollection = selectedProfile?.manifest.collection ?? null;
+  const selectedCollectionItems = selectedCollection?.items ?? [];
+  const selectedCollectionReadyCount = selectedCollectionItems.filter((item) => item.selected && item.status === 'ready').length;
+  const selectedCollectionIncludedCount = selectedCollectionItems.filter((item) => item.selected).length;
   const selectedProfileActiveCount = selectedProfile?.activeEnvironmentIds?.length ?? 0;
   const createDraftItems = createDraftManifest?.items ?? [];
   const createSelectedCount = createDraftItems.filter((item, index) =>
@@ -254,6 +278,136 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
       setBusyAction(null);
     }
   }, []);
+
+  const saveCollectionProfile = useCallback(async (profile: StoredModProfile) => {
+    const saved = await ApiService.saveModProfile({
+      profileId: profile.id,
+      name: profile.name,
+      runtime: profile.runtime === 'MONO' ? 'Mono' : profile.runtime,
+      manifest: profile.manifest,
+    });
+    await loadProfiles();
+    setSelectedProfileId(saved.id);
+    return saved;
+  }, [loadProfiles]);
+
+  const setCollectionItemStatus = useCallback(async (
+    profile: StoredModProfile,
+    key: string,
+    status: ModProfileCollectionItem['status'],
+    statusMessage: string,
+  ) => {
+    const collection = profile.manifest.collection;
+    if (!collection) return profile;
+    return saveCollectionProfile({
+      ...profile,
+      manifest: {
+        ...profile.manifest,
+        collection: {
+          ...collection,
+          items: collection.items.map((item) => item.key === key
+            ? { ...item, status, statusMessage }
+            : item),
+        },
+      },
+    });
+  }, [saveCollectionProfile]);
+
+  const downloadCollectionProfileItem = useCallback(async (collectionItem: ModProfileCollectionItem) => {
+    if (!selectedProfile) throw new Error('Choose a collection profile first.');
+    const runtime = selectedProfile.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+
+    if (collectionItem.sourceChoice === 'nexusmods') {
+      if (!collectionItem.nexusModId) {
+        throw new Error('This collection item does not expose a Nexus mod ID.');
+      }
+      await ApiService.beginNexusManualDownloadSession({
+        kind: 'library',
+        modId: collectionItem.nexusModId,
+        fileId: Number(collectionItem.nexusFileId),
+        gameId: 'schedule1',
+        runtime,
+      });
+      await setCollectionItemStatus(
+        selectedProfile,
+        collectionItem.key,
+        'manualRequired',
+        `Nexus opened for exact file ${collectionItem.nexusFileId}. Confirm it on the website; SIMM will attach the returned file to this profile.`,
+      );
+      return `Opened the exact ${collectionItem.requestedName} file on Nexus.`;
+    }
+
+    const match = collectionItem.thunderstoreMatch;
+    if (!match) throw new Error('No exact Thunderstore match is stored for this collection item.');
+    if (collectionItem.runtimeMismatch) {
+      const confirmed = window.confirm(
+        `${collectionItem.requestedName} ${collectionItem.requestedVersion} is an exact name, author, and version match, but it targets ${match.runtime} while this profile targets ${runtime}. Download it anyway?`,
+      );
+      if (!confirmed) return null;
+    }
+
+    let workingProfile = await setCollectionItemStatus(
+      selectedProfile,
+      collectionItem.key,
+      'downloading',
+      `Downloading exact Thunderstore version ${collectionItem.requestedVersion}.`,
+    );
+    let result = await ApiService.downloadThunderstoreToLibrary(
+      match.packageUuid,
+      runtime,
+      undefined,
+      match.versionUuid,
+    );
+    if (!result.success && result.securityScanConfirmationRequired && !result.securityScanBlocked) {
+      const confirmed = window.confirm(
+        `SIMM's security scan found items that require review for ${collectionItem.requestedName}. Continue with this exact Thunderstore file anyway?`,
+      );
+      if (confirmed) {
+        result = await ApiService.downloadThunderstoreToLibrary(
+          match.packageUuid,
+          runtime,
+          true,
+          match.versionUuid,
+        );
+      }
+    }
+    if (!result.success) {
+      await setCollectionItemStatus(
+        workingProfile,
+        collectionItem.key,
+        'error',
+        result.securityScanBlocked
+          ? 'The security policy blocked this file.'
+          : 'Thunderstore did not complete the exact-version download.',
+      );
+      throw new Error(result.securityScanBlocked
+        ? 'The security policy blocked this Thunderstore file.'
+        : 'Thunderstore did not complete the download.');
+    }
+    const library = await ApiService.getModLibrary();
+    workingProfile = updateCollectionProfileFromLibrary(workingProfile, library.downloaded);
+    await saveCollectionProfile(workingProfile);
+    window.dispatchEvent(new CustomEvent('library-updated'));
+    return `${collectionItem.requestedName} ${collectionItem.requestedVersion} is ready in this profile.`;
+  }, [saveCollectionProfile, selectedProfile, setCollectionItemStatus]);
+
+  useEffect(() => {
+    const handleManualDownloadResult = (event: Event) => {
+      const detail = (event as CustomEvent<{ success?: boolean; result?: { fileId?: number }; fileId?: number }>).detail;
+      if (!detail?.success || !selectedProfile?.manifest.collection) return;
+      const returnedFileId = detail.result?.fileId ?? detail.fileId;
+      if (returnedFileId && !selectedProfile.manifest.collection.items.some((item) => item.nexusFileId === String(returnedFileId))) {
+        return;
+      }
+      void (async () => {
+        const library = await ApiService.getModLibrary();
+        const synced = updateCollectionProfileFromLibrary(selectedProfile, library.downloaded);
+        if (synced !== selectedProfile) await saveCollectionProfile(synced);
+      })();
+    };
+    window.addEventListener('nexus-manual-download-result', handleManualDownloadResult);
+    return () => window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult);
+  }, [saveCollectionProfile, selectedProfile]);
 
   const requireSelection = useCallback(() => {
     if (!selectedProfile) {
@@ -603,6 +757,22 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
             </SimmButton>
           </div>
 
+          {selectedCollection && (
+            <div className="profiles-workspace__collection-summary" aria-label="Collection profile status">
+              <div>
+                <span className="workspace-eyebrow">Nexus collection</span>
+                <strong>{selectedCollection.name} · Revision {selectedCollection.revisionNumber}</strong>
+                <small>
+                  {selectedCollectionReadyCount} of {selectedCollectionIncludedCount} selected mods ready. Exact Nexus requirements remain recorded even when Thunderstore supplies the file.
+                </small>
+              </div>
+              <a href={selectedCollection.sourceUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">
+                <Icon name="arrowUpRightFromSquare" />
+                Open collection
+              </a>
+            </div>
+          )}
+
           {plan && (
             <div className="profiles-workspace__summary" aria-label="Apply preview summary">
               <span>Total <strong>{plan.summary.total}</strong></span>
@@ -732,26 +902,60 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
               <span>State</span>
             </div>
             <div className="profiles-workspace__table-body">
-              {selectedProfile ? planRows.map((row, index) => (
-                <div
-                  key={`${itemIdentity(row.item)}-${index}`}
-                  className={`profiles-workspace__table-row profiles-workspace__table-row--${hasPreviewPlan ? planItemStatusClass(row) : 'tracked'}`}
-                  role="row"
-                >
+              {selectedProfile ? planRows.map((row, index) => {
+                const collectionItem = selectedCollectionItems.find((item) => item.nexusFileId === row.item.nexusFileId);
+                const collectionActionBusy = collectionItem ? busyAction === `collection-${collectionItem.key}` : false;
+                return (
+                  <div
+                    key={`${itemIdentity(row.item)}-${index}`}
+                    className={`profiles-workspace__table-row profiles-workspace__table-row--${collectionItem?.status ?? (hasPreviewPlan ? planItemStatusClass(row) : 'tracked')}`}
+                    role="row"
+                  >
                   <span>
                     <strong>{row.item.name}</strong>
-                    <small>{row.item.fileName ?? row.item.sourceId ?? row.item.storageId ?? 'No file identity'}</small>
+                    <small>{collectionItem
+                      ? `${collectionItem.requestedVersion} · Nexus file ${collectionItem.nexusFileId}${collectionItem.requestedAuthor ? ` · ${collectionItem.requestedAuthor}` : ''}`
+                      : row.item.fileName ?? row.item.sourceId ?? row.item.storageId ?? 'No file identity'}</small>
                   </span>
                   <span>
                     <strong>{itemTypeLabel(row.item)}</strong>
-                    <small>{row.item.source ?? 'local'}</small>
+                    <small>{collectionItem
+                      ? collectionItem.sourceChoice === 'library'
+                        ? `Library · ${row.item.source ?? 'existing source'}`
+                        : collectionItem.sourceChoice === 'thunderstore'
+                          ? `Thunderstore${collectionItem.thunderstoreMatch ? ` · ${collectionItem.thunderstoreMatch.runtime}` : ''}`
+                          : 'Nexus website'
+                      : row.item.source ?? 'local'}</small>
                   </span>
-                  <span title={row.message}>
-                    <strong>{row.item.enabled === false ? 'Disabled' : 'Enabled'}</strong>
-                    <small>{hasPreviewPlan ? (statusLabels[row.status] ?? row.status) : 'Tracked'}</small>
+                  <span title={collectionItem?.statusMessage ?? row.message}>
+                    <strong>{collectionItem
+                      ? collectionStatusLabels[collectionItem.status]
+                      : row.item.enabled === false ? 'Disabled' : 'Enabled'}</strong>
+                    <small>{collectionItem?.statusMessage ?? (hasPreviewPlan ? (statusLabels[row.status] ?? row.status) : 'Tracked')}</small>
+                    {collectionItem && collectionItem.selected && collectionItem.status !== 'ready' && (
+                      <SimmButton
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={busyAction !== null}
+                        onClick={() => void runAction(`collection-${collectionItem.key}`, () => downloadCollectionProfileItem(collectionItem))}
+                      >
+                        <Icon name={collectionActionBusy ? 'spinner' : collectionItem.sourceChoice === 'nexusmods' ? 'arrowUpRightFromSquare' : 'download'} />
+                        {collectionActionBusy
+                          ? 'Working…'
+                          : collectionItem.sourceChoice === 'nexusmods'
+                            ? 'Open Nexus'
+                            : collectionItem.runtimeMismatch
+                              ? 'Download anyway'
+                              : collectionItem.status === 'error'
+                                ? 'Retry'
+                                : 'Download'}
+                      </SimmButton>
+                    )}
                   </span>
-                </div>
-              )) : (
+                  </div>
+                );
+              }) : (
                 <div className="profiles-workspace__empty">Choose a profile to inspect its items.</div>
               )}
             </div>

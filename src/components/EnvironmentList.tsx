@@ -293,7 +293,7 @@ interface EnvironmentListProps {
 export type WorkspaceRoute =
   | { view: 'home' }
   | { view: 'environments' }
-  | { view: 'profiles' }
+  | { view: 'profiles'; profileId?: string | null }
   | { view: 'saveBackups' }
   | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
   | { view: 'securityReport' }

@@ -67,6 +67,7 @@ pub enum TrackedDownloadKind {
     Mod,
     Plugin,
     Framework,
+    Collection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,6 +479,7 @@ pub struct NexusCollectionModFile {
     pub file_id: u32,
     pub game_id: Option<u32>,
     pub mod_name: String,
+    pub author: Option<String>,
     pub file_name: String,
     pub version: String,
     pub optional: bool,
@@ -1186,6 +1188,48 @@ pub struct ModProfileManifest {
     pub profile: ModProfileInfo,
     #[serde(default)]
     pub items: Vec<ModProfileItem>,
+    #[serde(default)]
+    pub collection: Option<ModProfileCollection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCollection {
+    pub slug: String,
+    pub name: String,
+    pub revision_number: u32,
+    pub source_url: String,
+    #[serde(default)]
+    pub items: Vec<ModProfileCollectionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCollectionItem {
+    pub key: String,
+    pub nexus_mod_id: Option<u32>,
+    pub nexus_file_id: String,
+    pub requested_name: String,
+    pub requested_author: Option<String>,
+    pub requested_version: String,
+    pub optional: bool,
+    pub selected: bool,
+    pub source_choice: String,
+    pub status: String,
+    pub status_message: Option<String>,
+    pub thunderstore_match: Option<ModProfileCollectionThunderstoreMatch>,
+    #[serde(default)]
+    pub runtime_mismatch: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCollectionThunderstoreMatch {
+    pub package_uuid: String,
+    pub version_uuid: String,
+    pub source_id: String,
+    pub package_url: String,
+    pub runtime: Runtime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

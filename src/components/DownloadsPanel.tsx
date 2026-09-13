@@ -38,6 +38,8 @@ function kindIcon(kind: TrackedDownload['kind']): IconName {
       return 'plug';
     case 'framework':
       return 'cubes';
+    case 'collection':
+      return 'layerGroup';
     default:
       return 'file';
   }
@@ -57,6 +59,7 @@ function isIndeterminate(download: TrackedDownload) {
 interface DownloadsPanelProps {
   presentation?: 'panel' | 'popup';
   onClose?: () => void;
+  onOpenProfile?: (profileId: string) => void;
 }
 
 function progressText(download: TrackedDownload) {
@@ -84,7 +87,10 @@ function getProgressValue(download: TrackedDownload) {
   return Math.min(100, Math.max(0, download.progress));
 }
 
-function renderDownloadRow(download: TrackedDownload) {
+function renderDownloadRow(
+  download: TrackedDownload,
+  onOpenProfile?: (profileId: string) => void,
+) {
   const recentRow = !isActiveStatus(download.status);
   const localIcon = resolveImageSource(download.iconCachePath);
   const remoteIcon = resolveImageSource(download.iconUrl);
@@ -92,7 +98,20 @@ function renderDownloadRow(download: TrackedDownload) {
   const indeterminate = isIndeterminate(download);
 
   return (
-    <article className={`downloads-panel__row downloads-panel__row--${download.status} ${recentRow ? 'downloads-panel__row--recent' : 'downloads-panel__row--active'}`} key={download.id}>
+    <article
+      className={`downloads-panel__row downloads-panel__row--${download.status} ${recentRow ? 'downloads-panel__row--recent' : 'downloads-panel__row--active'} ${download.profileId ? 'downloads-panel__row--actionable' : ''}`}
+      key={download.id}
+      role={download.profileId ? 'button' : undefined}
+      tabIndex={download.profileId ? 0 : undefined}
+      onClick={download.profileId ? () => onOpenProfile?.(download.profileId!) : undefined}
+      onKeyDown={download.profileId ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpenProfile?.(download.profileId!);
+        }
+      } : undefined}
+      title={download.profileId ? 'Open the collection profile' : undefined}
+    >
       <div className="downloads-panel__row-main">
         <div className="downloads-panel__identity">
           {iconSource ? (
@@ -144,7 +163,7 @@ function renderDownloadRow(download: TrackedDownload) {
   );
 }
 
-export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPanelProps = {}) {
+export function DownloadsPanel({ presentation = 'panel', onClose, onOpenProfile }: DownloadsPanelProps = {}) {
   const { downloads } = useDownloadStatusStore();
 
   const { activeDownloads, recentDownloads } = useMemo(() => {
@@ -199,7 +218,7 @@ export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPan
             <div className="downloads-panel__section">
               <div className="downloads-panel__section-header">Active</div>
               <div className="downloads-panel__list">
-                {activeDownloads.map(renderDownloadRow)}
+                {activeDownloads.map((download) => renderDownloadRow(download, onOpenProfile))}
               </div>
             </div>
           )}
@@ -208,7 +227,7 @@ export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPan
             <div className="downloads-panel__section">
               <div className="downloads-panel__section-header">Recent</div>
               <div className="downloads-panel__list">
-                {visibleRecentDownloads.map(renderDownloadRow)}
+                {visibleRecentDownloads.map((download) => renderDownloadRow(download, onOpenProfile))}
               </div>
             </div>
           )}

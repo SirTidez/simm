@@ -5,6 +5,7 @@ import { createAsyncListenerScope, onComplete, onError, onProgress, onTrackedDow
 
 interface DownloadStatusStoreContextValue {
   downloads: TrackedDownload[];
+  publishDownload: (download: TrackedDownload) => void;
 }
 
 const DownloadStatusStoreContext = createContext<DownloadStatusStoreContextValue | null>(null);
@@ -74,7 +75,7 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
       }
     }
 
-    if (isTerminal(normalizedDownload.status)) {
+    if (isTerminal(normalizedDownload.status) && !normalizedDownload.persistent) {
       const existingTimer = removalTimersRef.current.get(normalizedDownload.id);
       if (existingTimer) {
         window.clearTimeout(existingTimer);
@@ -281,7 +282,7 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
   }, [downloadsById]);
 
   return (
-    <DownloadStatusStoreContext.Provider value={{ downloads }}>
+    <DownloadStatusStoreContext.Provider value={{ downloads, publishDownload: updateDownload }}>
       {children}
     </DownloadStatusStoreContext.Provider>
   );
@@ -293,4 +294,9 @@ export function useDownloadStatusStore() {
     throw new Error('useDownloadStatusStore must be used within DownloadStatusStoreProvider');
   }
   return context;
+}
+
+/** For reusable workspaces that can be rendered in isolation (for example component tests). */
+export function useOptionalDownloadStatusStore() {
+  return useContext(DownloadStatusStoreContext);
 }
