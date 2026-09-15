@@ -239,7 +239,9 @@ describe('ProfilesWorkspace', () => {
     });
     render(<ProfilesWorkspace />);
     await screen.findByRole('button', { name: /Default IL2CPP/i });
-    fireEvent.click(screen.getByRole('button', { name: /Apply & Launch/i }));
+    const applyAndLaunchButton = screen.getByRole('button', { name: /Apply & Launch/i });
+    await waitFor(() => expect(applyAndLaunchButton).not.toBeDisabled());
+    fireEvent.click(applyAndLaunchButton);
     await waitFor(() => expect(apiMocks.launchGame).toHaveBeenCalledWith('il2cpp-env', 'steam'));
     expect(screen.queryByRole('alert')).toBeNull();
   });
@@ -931,7 +933,9 @@ describe('ProfilesWorkspace', () => {
     render(<ProfilesWorkspace />);
 
     await screen.findByRole('button', { name: /Default IL2CPP/i });
-    fireEvent.click(screen.getByRole('button', { name: /Apply & Launch/i }));
+    const applyAndLaunchButton = screen.getByRole('button', { name: /Apply & Launch/i });
+    await waitFor(() => expect(applyAndLaunchButton).not.toBeDisabled());
+    fireEvent.click(applyAndLaunchButton);
 
     await waitFor(() => {
       expect(apiMocks.applyModProfile).toHaveBeenCalledWith('profile-il2cpp', 'il2cpp-env');

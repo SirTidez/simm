@@ -20,7 +20,6 @@
 .claude-dev-helper/open-files.json
 .session-summary.md
 CLAUDE.md
-bun.lock
 TEST_PLAN.md
 .serena/project.yml
 /test-results
