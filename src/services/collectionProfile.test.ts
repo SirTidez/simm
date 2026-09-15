@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { ModLibraryEntry, NexusCollectionModFile } from '../types';
+import type { ModLibraryEntry, NexusCollectionModFile, NexusModFile } from '../types';
 import {
   findCollectionThunderstoreMatches,
   findExactCollectionLibraryEntry,
+  inferNexusFileRuntime,
   normalizeCollectionIdentity,
   normalizeCollectionVersion,
+  resolveCollectionNexusFileForRuntime,
   selectCollectionThunderstoreMatch,
 } from './collectionProfile';
 
@@ -19,6 +21,21 @@ const file: NexusCollectionModFile = {
   optional: false,
   available: true,
 };
+
+function nexusFile(fileId: number, fileName: string, version: string): NexusModFile {
+  return {
+    file_id: fileId,
+    name: fileName,
+    version,
+    category_id: 1,
+    category_name: 'MAIN',
+    is_primary: true,
+    size: 1024,
+    file_name: fileName,
+    uploaded_timestamp: fileId,
+    mod_version: version,
+  };
+}
 
 describe('collection profile matching', () => {
   it('normalizes identity punctuation but keeps exact version semantics', () => {
@@ -83,5 +100,45 @@ describe('collection profile matching', () => {
       filesByRuntime: {},
     } satisfies ModLibraryEntry;
     expect(findExactCollectionLibraryEntry(file, [entry], 'IL2CPP')).toBe(entry);
+  });
+
+  it('resolves a separate runtime file only at the collection-requested version', () => {
+    const runtimeFile = {
+      ...file,
+      fileId: 7588,
+      fileName: 'BetterCounterOfferUI IL2CPP',
+      modName: 'Better Counter-Offer UI',
+      version: '3.4.1',
+    };
+    const files = [
+      nexusFile(7588, 'BetterCounterOfferUI IL2CPP', '3.4.1'),
+      nexusFile(7589, 'BetterCounterOffer MONO', '3.4.1'),
+      nexusFile(9000, 'BetterCounterOffer MONO', '3.5.0'),
+    ];
+
+    expect(resolveCollectionNexusFileForRuntime(runtimeFile, files, 'IL2CPP')).toMatchObject({
+      fileId: 7588,
+      isCollectionFile: true,
+    });
+    expect(resolveCollectionNexusFileForRuntime(runtimeFile, files, 'Mono')).toMatchObject({
+      fileId: 7589,
+      version: '3.4.1',
+      isCollectionFile: false,
+    });
+  });
+
+  it('reports no runtime resolution instead of substituting another version', () => {
+    const runtimeFile = {
+      ...file,
+      fileName: 'Example Mod IL2CPP',
+      version: '1.2.3',
+    };
+    const files = [
+      nexusFile(100, 'Example Mod IL2CPP', '1.2.3'),
+      nexusFile(101, 'Example Mod Mono', '1.2.4'),
+    ];
+
+    expect(resolveCollectionNexusFileForRuntime(runtimeFile, files, 'Mono')).toBeNull();
+    expect(inferNexusFileRuntime('Example Mod il2 cpp build')).toBe('IL2CPP');
   });
 });

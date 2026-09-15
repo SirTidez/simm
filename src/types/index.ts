@@ -832,10 +832,14 @@ export interface ModProfileCollectionThunderstoreMatch {
 export interface ModProfileCollectionItem {
   key: string;
   nexusModId?: number | null;
+  /** Original file pinned by the Nexus collection revision. */
+  collectionFileId?: string | null;
+  /** Runtime-specific exact-version file SIMM resolves for this profile. */
   nexusFileId: string;
   requestedName: string;
   requestedAuthor?: string | null;
   requestedVersion: string;
+  requestedSizeInBytes?: number | null;
   optional: boolean;
   selected: boolean;
   sourceChoice: ModProfileCollectionSourceChoice;
@@ -896,6 +900,12 @@ export interface ModProfileImportPlanItem {
   message: string;
 }
 
+export interface ModProfileRemovalPlanItem {
+  item: ModProfileItem;
+  recoverable: boolean;
+  message: string;
+}
+
 export interface ModProfileImportSummary {
   total: number;
   alreadyInstalled: number;
@@ -910,6 +920,7 @@ export interface ModProfileImportPlan {
   profile: ModProfileInfo;
   targetEnvironmentId?: string | null;
   items: ModProfileImportPlanItem[];
+  removals: ModProfileRemovalPlanItem[];
   summary: ModProfileImportSummary;
 }
 
@@ -921,6 +932,7 @@ export interface ModProfileApplyRequest {
 export interface ModProfileApplyResult {
   plan: ModProfileImportPlan;
   installed: number;
+  removed: number;
   skipped: number;
   unresolved: number;
   messages: string[];

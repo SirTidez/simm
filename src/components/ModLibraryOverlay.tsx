@@ -9,7 +9,13 @@ import {
   type ReactNode,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Dialog } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -71,6 +77,8 @@ import {
   collectionFileKey,
   findCollectionThunderstoreMatches,
   findExactCollectionLibraryEntry,
+  inferNexusFileRuntime as inferCollectionNexusFileRuntime,
+  resolveCollectionNexusFileForRuntime,
   resolveCollectionStorageId,
   selectCollectionThunderstoreMatch,
   updateCollectionProfileFromLibrary,
@@ -1540,6 +1548,15 @@ interface RuntimePromptState {
 
 type CollectionConflictChoice = "collection" | "existing" | "cancel";
 type CollectionSourceChoice = "nexusmods" | "thunderstore";
+type CollectionProfileRuntime = "IL2CPP" | "Mono";
+type CollectionRuntimePreviewTone = "danger" | "muted" | "source" | "success" | "warning";
+
+interface CollectionRuntimePreviewItem {
+  file: NexusCollectionModFile;
+  resolutionKey: string;
+  statusLabel: string;
+  tone: CollectionRuntimePreviewTone;
+}
 
 interface CollectionMatchState {
   loading: boolean;
@@ -1711,6 +1728,18 @@ export function ModLibraryOverlay({
   const [collectionOptionalSelections, setCollectionOptionalSelections] = useState<
     Record<string, boolean>
   >({});
+  const [collectionRuntimePreview, setCollectionRuntimePreview] = useState<
+    CollectionProfileRuntime | null
+  >(null);
+  const [collectionNexusFileCatalogs, setCollectionNexusFileCatalogs] = useState<
+    Map<number, NexusModFile[]>
+  >(new Map());
+  const [collectionNexusCatalogLoading, setCollectionNexusCatalogLoading] = useState<Set<number>>(
+    new Set(),
+  );
+  const [collectionNexusCatalogErrors, setCollectionNexusCatalogErrors] = useState<Map<number, string>>(
+    new Map(),
+  );
   const [applyCollectionSourceToAll, setApplyCollectionSourceToAll] = useState(false);
   const [nexusModsFiles, setNexusModsFiles] = useState<
     Map<number, NexusModFile[]>
@@ -1840,6 +1869,9 @@ export function ModLibraryOverlay({
   const collectionProfileRuntimesRef = useRef<Array<"IL2CPP" | "Mono">>([]);
   const activeCollectionProfileKeyRef = useRef<string | null>(null);
   const collectionProfileBuildKeyRef = useRef<string | null>(null);
+  const collectionNexusFileCatalogsRef = useRef(new Map<number, NexusModFile[]>());
+  const collectionNexusCatalogRequestsRef = useRef(new Map<number, Promise<NexusModFile[]>>());
+  const collectionNexusCatalogGenerationRef = useRef(0);
   const lastHandledFocusRequestIdRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
   const navigationChangeHandlerRef = useRef(onNavigationStateChange);
@@ -7098,7 +7130,67 @@ export function ModLibraryOverlay({
     setCollectionConflict(next);
   }, [collectionConflict, collectionConflictQueue]);
 
+  const loadCollectionNexusRuntimeCatalogs = useCallback(async (
+    files: NexusCollectionModFile[],
+  ): Promise<Map<number, NexusModFile[]>> => {
+    const generation = collectionNexusCatalogGenerationRef.current;
+    const modIds = Array.from(new Set(files.flatMap((file) =>
+      file.modId && inferCollectionNexusFileRuntime(file.fileName, file.modName)
+        ? [file.modId]
+        : [],
+    )));
+    const missingIds = modIds.filter((modId) => !collectionNexusFileCatalogsRef.current.has(modId));
+    if (missingIds.length === 0) return collectionNexusFileCatalogsRef.current;
+
+    setCollectionNexusCatalogLoading((current) => new Set([...current, ...missingIds]));
+    const results = await Promise.all(missingIds.map(async (modId) => {
+      let request = collectionNexusCatalogRequestsRef.current.get(modId);
+      if (!request) {
+        request = ApiService.getNexusModsModFiles('schedule1', modId);
+        collectionNexusCatalogRequestsRef.current.set(modId, request);
+      }
+      try {
+        return { modId, files: await request, error: null as string | null };
+      } catch (error) {
+        return {
+          modId,
+          files: [] as NexusModFile[],
+          error: error instanceof Error ? error.message : 'Nexus file lookup failed.',
+        };
+      } finally {
+        collectionNexusCatalogRequestsRef.current.delete(modId);
+      }
+    }));
+    if (generation !== collectionNexusCatalogGenerationRef.current) {
+      return collectionNexusFileCatalogsRef.current;
+    }
+
+    const nextCatalogs = new Map(collectionNexusFileCatalogsRef.current);
+    for (const result of results) {
+      nextCatalogs.set(result.modId, result.files);
+    }
+    collectionNexusFileCatalogsRef.current = nextCatalogs;
+    setCollectionNexusFileCatalogs(nextCatalogs);
+    setCollectionNexusCatalogErrors((current) => {
+      const next = new Map(current);
+      for (const result of results) {
+        if (result.error) next.set(result.modId, result.error);
+        else next.delete(result.modId);
+      }
+      return next;
+    });
+    setCollectionNexusCatalogLoading((current) => {
+      const next = new Set(current);
+      for (const modId of missingIds) next.delete(modId);
+      return next;
+    });
+    return nextCatalogs;
+  }, []);
+
   useEffect(() => {
+    collectionNexusCatalogGenerationRef.current += 1;
+    collectionNexusFileCatalogsRef.current = new Map();
+    collectionNexusCatalogRequestsRef.current.clear();
     activeCollectionProfileKeyRef.current = nexusCollectionPlanState.key;
     setCollectionFileDecisions({});
     collectionFileDecisionsRef.current = {};
@@ -7113,8 +7205,17 @@ export function ModLibraryOverlay({
     setCollectionMatchStates({});
     setCollectionSourceChoices({});
     setCollectionOptionalSelections({});
+    setCollectionRuntimePreview(null);
+    setCollectionNexusFileCatalogs(new Map());
+    setCollectionNexusCatalogLoading(new Set());
+    setCollectionNexusCatalogErrors(new Map());
     setApplyCollectionSourceToAll(false);
   }, [nexusCollectionPlanState.key]);
+
+  useEffect(() => {
+    if (!selectedCollectionPlan || !nexusCollectionAccess?.canDirectDownload) return;
+    void loadCollectionNexusRuntimeCatalogs(selectedCollectionPlan.modFiles);
+  }, [loadCollectionNexusRuntimeCatalogs, nexusCollectionAccess?.canDirectDownload, selectedCollectionPlan]);
 
   useEffect(() => {
     if (!selectedCollectionPlan || nexusCollectionAccess?.canDirectDownload) return;
@@ -7206,6 +7307,22 @@ export function ModLibraryOverlay({
     () => selectedCollectionPlan?.modFiles.filter((file) => !file.optional) || [],
     [selectedCollectionPlan],
   );
+  const optionalCollectionFiles = useMemo(
+    () => selectedCollectionPlan?.modFiles.filter((file) => file.optional) || [],
+    [selectedCollectionPlan],
+  );
+  const selectedOptionalCollectionCount = useMemo(
+    () => optionalCollectionFiles.filter((file) =>
+      Boolean(collectionOptionalSelections[collectionFileKey(file)]),
+    ).length,
+    [collectionOptionalSelections, optionalCollectionFiles],
+  );
+  const selectedCollectionFiles = useMemo(
+    () => selectedCollectionPlan?.modFiles.filter((file) =>
+      !file.optional || Boolean(collectionOptionalSelections[collectionFileKey(file)]),
+    ) || [],
+    [collectionOptionalSelections, selectedCollectionPlan],
+  );
   const stagedRequiredCollectionFiles = useMemo(
     () =>
       requiredCollectionFiles.filter((file) =>
@@ -7213,9 +7330,9 @@ export function ModLibraryOverlay({
       ),
     [getStagedCollectionEntry, requiredCollectionFiles],
   );
-  const missingRequiredCollectionFiles = useMemo(
+  const missingSelectedCollectionFiles = useMemo(
     () =>
-      requiredCollectionFiles.filter(
+      selectedCollectionFiles.filter(
         (file) => {
           const keepingExisting =
             collectionFileDecisions[getCollectionFileDecisionKey(file)] ===
@@ -7233,7 +7350,7 @@ export function ModLibraryOverlay({
       getCollectionConflictingEntries,
       getCollectionFileDecisionKey,
       getStagedCollectionEntry,
-      requiredCollectionFiles,
+      selectedCollectionFiles,
     ],
   );
   const keptExistingCollectionFiles = useMemo(
@@ -7257,6 +7374,13 @@ export function ModLibraryOverlay({
       ),
     [requiredCollectionFiles],
   );
+  const unavailableSelectedCollectionFiles = useMemo(
+    () =>
+      selectedCollectionFiles.filter(
+        (file) => !file.available || file.modId === undefined,
+      ),
+    [selectedCollectionFiles],
+  );
   const requiredExternalCollectionResources = useMemo(
     () =>
       selectedCollectionPlan?.externalResources.filter(
@@ -7269,10 +7393,134 @@ export function ModLibraryOverlay({
     (downloading?.startsWith("collection-manual-") ?? false);
   const collectionMatchesLoading = Object.values(collectionMatchStates).some((state) => state.loading);
   const collectionReadyForProfile =
-    requiredCollectionFiles.length > 0 &&
-    missingRequiredCollectionFiles.length === 0 &&
-    unavailableRequiredCollectionFiles.length === 0 &&
+    selectedCollectionFiles.length > 0 &&
+    missingSelectedCollectionFiles.length === 0 &&
+    unavailableSelectedCollectionFiles.length === 0 &&
     requiredExternalCollectionResources.length === 0;
+  const collectionRuntimePreviewByRuntime = useMemo<
+    Record<CollectionProfileRuntime, CollectionRuntimePreviewItem[]>
+  >(() => {
+    const entries = library?.downloaded ?? [];
+    const buildPreview = (
+      runtime: CollectionProfileRuntime,
+    ): CollectionRuntimePreviewItem[] =>
+      (selectedCollectionPlan?.modFiles ?? []).map((file) => {
+        const key = collectionFileKey(file);
+        const selected = !file.optional || Boolean(collectionOptionalSelections[key]);
+        if (!selected) {
+          return {
+            file,
+            resolutionKey: "optional-off",
+            statusLabel: "Optional off",
+            tone: "muted",
+          };
+        }
+        if (!file.available || !file.modId) {
+          return {
+            file,
+            resolutionKey: "unavailable",
+            statusLabel: "Unavailable",
+            tone: "danger",
+          };
+        }
+
+        const reusableEntry = findExactCollectionLibraryEntry(file, entries, runtime);
+        if (reusableEntry) {
+          return {
+            file,
+            resolutionKey: `library:${reusableEntry.source}:${resolveCollectionStorageId(reusableEntry, runtime)}`,
+            statusLabel: `Library · ${getSourceBadgeLabel(reusableEntry.source)}`,
+            tone: "success",
+          };
+        }
+
+        if (nexusCollectionAccess?.canDirectDownload) {
+          const catalog = file.modId ? collectionNexusFileCatalogs.get(file.modId) : undefined;
+          const resolved = resolveCollectionNexusFileForRuntime(file, catalog, runtime);
+          const sourceRuntime = inferCollectionNexusFileRuntime(file.fileName, file.modName);
+          if (!resolved && sourceRuntime && sourceRuntime !== runtime) {
+            const loading = Boolean(file.modId && collectionNexusCatalogLoading.has(file.modId));
+            const lookupError = file.modId ? collectionNexusCatalogErrors.get(file.modId) : null;
+            return {
+              file,
+              resolutionKey: loading ? `checking:${runtime}` : `unavailable:${runtime}`,
+              statusLabel: loading
+                ? 'Checking Nexus…'
+                : lookupError
+                  ? 'Nexus lookup failed'
+                  : `No exact ${runtime} file`,
+              tone: loading ? 'muted' : 'danger',
+            };
+          }
+          return {
+            file,
+            resolutionKey: `nexus-download:${resolved?.fileId ?? file.fileId}`,
+            statusLabel: resolved?.fileId !== file.fileId
+              ? `Nexus file ${resolved?.fileId}`
+              : 'Nexus download',
+            tone: "source",
+          };
+        }
+
+        const sourceChoice = collectionSourceChoices[key] ?? "nexusmods";
+        if (sourceChoice === "thunderstore") {
+          const selection = selectCollectionThunderstoreMatch(
+            collectionMatchStates[key]?.matches ?? [],
+            runtime,
+          );
+          if (selection.match && !selection.runtimeMismatch) {
+            return {
+              file,
+              resolutionKey: `thunderstore:${selection.match.versionUuid}`,
+              statusLabel: "Thunderstore",
+              tone: "success",
+            };
+          }
+          if (selection.match) {
+            return {
+              file,
+              resolutionKey: `runtime-mismatch:${selection.match.runtime}`,
+              statusLabel: `Only ${selection.match.runtime}`,
+              tone: "warning",
+            };
+          }
+        }
+
+        return {
+          file,
+          resolutionKey: "nexus-website",
+          statusLabel: "Nexus website",
+          tone: "source",
+        };
+      });
+
+    return {
+      IL2CPP: buildPreview("IL2CPP"),
+      Mono: buildPreview("Mono"),
+    };
+  }, [
+    collectionMatchStates,
+    collectionOptionalSelections,
+    collectionSourceChoices,
+    collectionNexusCatalogErrors,
+    collectionNexusCatalogLoading,
+    collectionNexusFileCatalogs,
+    library?.downloaded,
+    nexusCollectionAccess?.canDirectDownload,
+    selectedCollectionPlan,
+  ]);
+  const collectionRuntimeDifferenceCount = useMemo(() => {
+    const monoItems = collectionRuntimePreviewByRuntime.Mono;
+    const il2cppItems = collectionRuntimePreviewByRuntime.IL2CPP;
+    return monoItems.reduce(
+      (count, item, index) =>
+        count + (item.resolutionKey === il2cppItems[index]?.resolutionKey ? 0 : 1),
+      0,
+    );
+  }, [collectionRuntimePreviewByRuntime]);
+  const activeCollectionRuntimePreview = collectionRuntimePreview
+    ? collectionRuntimePreviewByRuntime[collectionRuntimePreview]
+    : null;
 
   const refreshCollectionStaging = useCallback(async () => {
     const nextLibrary = await loadLibrarySnapshot();
@@ -7316,6 +7564,7 @@ export function ModLibraryOverlay({
     async (
       entries: ModLibraryEntry[],
       requestedRuntimes?: Array<"IL2CPP" | "Mono">,
+      nexusCatalogs = collectionNexusFileCatalogsRef.current,
     ) => {
       if (!selectedNexusCollection || !selectedCollectionPlan) return [];
       const profileKey = `${selectedNexusCollection.slug}:${selectedCollectionPlan.revisionNumber}`;
@@ -7347,7 +7596,19 @@ export function ModLibraryOverlay({
           `${file.fileId}:${candidates
             .map((entry) => entry.storageId)
             .sort()
-            .join("+") || "pending"}:${collectionSourceChoices[collectionFileKey(file)] ?? 'nexusmods'}:${collectionOptionalSelections[collectionFileKey(file)] ?? false}`,
+            .join("+") || "pending"}:${collectionSourceChoices[collectionFileKey(file)] ?? 'nexusmods'}:${collectionOptionalSelections[collectionFileKey(file)] ?? false}:${runtimes
+              .map((runtime) => {
+                const resolution = resolveCollectionNexusFileForRuntime(
+                  file,
+                  file.modId ? nexusCatalogs.get(file.modId) : undefined,
+                  runtime,
+                );
+                if (!resolution) return `${runtime}:unavailable`;
+                const runtimeFile = { ...file, fileId: resolution.fileId, fileName: resolution.fileName };
+                const entry = findExactCollectionLibraryEntry(runtimeFile, entries, runtime);
+                return `${runtime}:${resolution.fileId}:${entry ? resolveCollectionStorageId(entry, runtime) : 'pending'}`;
+              })
+              .join('+')}`,
         )
         .join(",")}`;
       if (collectionProfileBuildKeyRef.current === buildKey) {
@@ -7370,7 +7631,34 @@ export function ModLibraryOverlay({
               : `${selectedNexusCollection.name} (Revision ${selectedCollectionPlan.revisionNumber}, ${runtime})`;
           const resolvedItems = resolvedByFile.map(({ file, candidates }) => {
             const key = collectionFileKey(file);
-            const exactLibraryEntry = findExactCollectionLibraryEntry(file, entries, runtime);
+            const requestedChoice = nexusCollectionAccess?.canDirectDownload
+              ? 'nexusmods'
+              : collectionSourceChoices[key] ?? 'nexusmods';
+            const nexusResolution = requestedChoice === 'nexusmods'
+              ? resolveCollectionNexusFileForRuntime(
+                file,
+                file.modId ? nexusCatalogs.get(file.modId) : undefined,
+                runtime,
+              )
+              : null;
+            const runtimeFile = nexusResolution
+              ? {
+                ...file,
+                fileId: nexusResolution.fileId,
+                fileName: nexusResolution.fileName,
+              }
+              : file;
+            const sourceRuntime = inferCollectionNexusFileRuntime(file.fileName, file.modName);
+            const nexusRuntimeUnavailable = Boolean(
+              nexusCollectionAccess?.canDirectDownload
+              && requestedChoice === 'nexusmods'
+              && sourceRuntime
+              && sourceRuntime !== runtime
+              && !nexusResolution,
+            );
+            const exactLibraryEntry = nexusRuntimeUnavailable
+              ? null
+              : findExactCollectionLibraryEntry(runtimeFile, entries, runtime);
             const entry = exactLibraryEntry ||
               candidates.find(
                 (candidate) =>
@@ -7385,9 +7673,6 @@ export function ModLibraryOverlay({
               ? resolveCollectionStorageId(entry, runtime)
               : null;
             const selected = !file.optional || Boolean(collectionOptionalSelections[key]);
-            const requestedChoice = nexusCollectionAccess?.canDirectDownload
-              ? 'nexusmods'
-              : collectionSourceChoices[key] ?? 'nexusmods';
             const matchSelection = selectCollectionThunderstoreMatch(
               collectionMatchStates[key]?.matches ?? [],
               runtime,
@@ -7396,7 +7681,7 @@ export function ModLibraryOverlay({
             const item = {
               itemType: "mod" as const,
               name: entry?.displayName || file.modName,
-              fileName: entry?.files[0] || file.fileName,
+              fileName: entry?.files[0] || runtimeFile.fileName,
               required: !file.optional,
               enabled: selected,
               source: entry?.source || (requestedChoice === 'thunderstore' && matchSelection.match
@@ -7419,12 +7704,14 @@ export function ModLibraryOverlay({
               nexusFileId:
                 entry?.nexusFileId ||
                 (entry ? getNexusFileIdFromTags(entry.tags) : null) ||
-                String(file.fileId),
+                String(runtimeFile.fileId),
               manualReason: !selected
                 ? "This optional collection mod was not selected."
                 : storageId
-                ? null
-                : requestedChoice === 'thunderstore' && matchSelection.runtimeMismatch
+                  ? null
+                  : nexusRuntimeUnavailable
+                    ? `Nexus does not expose an exact ${file.version} file for ${runtime}.`
+                  : requestedChoice === 'thunderstore' && matchSelection.runtimeMismatch
                   ? `Exact version ${file.version} is available for ${matchSelection.match?.runtime}, not ${runtime}. Confirm this download individually if you still want it.`
                 : requestedChoice === 'thunderstore' && matchSelection.match
                   ? `Exact Thunderstore version ${file.version} is queued for this collection profile.`
@@ -7435,10 +7722,12 @@ export function ModLibraryOverlay({
             const collectionItem = {
               key,
               nexusModId: file.modId ?? null,
-              nexusFileId: String(file.fileId),
+              collectionFileId: String(file.fileId),
+              nexusFileId: String(runtimeFile.fileId),
               requestedName: file.modName,
               requestedAuthor: file.author ?? null,
               requestedVersion: file.version,
+              requestedSizeInBytes: file.sizeInBytes ?? null,
               optional: file.optional,
               selected,
               sourceChoice,
@@ -7446,6 +7735,8 @@ export function ModLibraryOverlay({
                 ? 'pending' as const
                 : storageId
                   ? 'ready' as const
+                  : nexusRuntimeUnavailable
+                    ? 'runtimeMismatch' as const
                   : requestedChoice === 'thunderstore' && matchSelection.runtimeMismatch
                     ? 'runtimeMismatch' as const
                     : requestedChoice === 'thunderstore' && matchSelection.match
@@ -7455,6 +7746,8 @@ export function ModLibraryOverlay({
                 ? 'Optional mod not selected.'
                 : storageId
                   ? `Reused the exact ${entry?.source ?? 'library'} copy already in the library.`
+                  : nexusRuntimeUnavailable
+                    ? `No exact ${file.version} Nexus file is available for ${runtime}. The ${file.fileId} collection file targets ${sourceRuntime}.`
                   : requestedChoice === 'thunderstore' && matchSelection.runtimeMismatch
                     ? `Exact ${file.version} match is for ${matchSelection.match?.runtime}; ${runtime} profile requires confirmation.`
                     : requestedChoice === 'thunderstore' && matchSelection.match
@@ -7467,7 +7760,7 @@ export function ModLibraryOverlay({
                 packageUrl: matchSelection.match.packageUrl,
                 runtime: matchSelection.match.runtime,
               } : null,
-              runtimeMismatch: matchSelection.runtimeMismatch,
+              runtimeMismatch: nexusRuntimeUnavailable || matchSelection.runtimeMismatch,
             };
             return { item, collectionItem };
           });
@@ -7503,6 +7796,7 @@ export function ModLibraryOverlay({
             },
           });
           savedProfiles.push(saved);
+          window.dispatchEvent(new CustomEvent('mod-profiles-updated', { detail: { profileId: saved.id } }));
         }
         collectionProfilesRef.current = savedProfiles;
         setCollectionProfiles(savedProfiles);
@@ -7526,15 +7820,18 @@ export function ModLibraryOverlay({
   );
 
   const ensureCollectionProfilesStarted = useCallback(async () => {
-    if (collectionProfilesRef.current.length > 0) {
-      return collectionProfilesRef.current;
-    }
-    const runtimes = await requestCollectionProfileRuntimes();
+    const runtimes = collectionProfileRuntimesRef.current.length > 0
+      ? collectionProfileRuntimesRef.current
+      : await requestCollectionProfileRuntimes();
     if (runtimes.length === 0) return [];
     try {
+      const nexusCatalogs = nexusCollectionAccess?.canDirectDownload && selectedCollectionPlan
+        ? await loadCollectionNexusRuntimeCatalogs(selectedCollectionPlan.modFiles)
+        : collectionNexusFileCatalogsRef.current;
       return await persistCollectionProfiles(
         library?.downloaded || [],
         runtimes,
+        nexusCatalogs,
       );
     } catch (error) {
       showLibraryNotice(
@@ -7547,10 +7844,79 @@ export function ModLibraryOverlay({
     }
   }, [
     library?.downloaded,
+    loadCollectionNexusRuntimeCatalogs,
+    nexusCollectionAccess?.canDirectDownload,
     persistCollectionProfiles,
     requestCollectionProfileRuntimes,
+    selectedCollectionPlan,
     showLibraryNotice,
   ]);
+
+  const saveCollectionFileStatus = useCallback(async (
+    profiles: StoredModProfile[],
+    file: NexusCollectionModFile,
+    status: 'downloading' | 'error',
+    statusMessage: string,
+    targetRuntimes?: Array<'IL2CPP' | 'Mono'>,
+    resolvedFile?: { fileId: number; fileName: string },
+  ) => {
+    const key = collectionFileKey(file);
+    const savedProfiles: StoredModProfile[] = [];
+    for (const profile of profiles) {
+      const profileRuntime = profile.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+      if (targetRuntimes && !targetRuntimes.includes(profileRuntime)) {
+        savedProfiles.push(profile);
+        continue;
+      }
+      const collection = profile.manifest.collection;
+      if (!collection || !collection.items.some((item) => item.key === key && item.selected)) {
+        savedProfiles.push(profile);
+        continue;
+      }
+      const currentCollectionItem = collection.items.find((item) => item.key === key);
+      const resolvedFileId = String(resolvedFile?.fileId ?? currentCollectionItem?.nexusFileId ?? file.fileId);
+      const saved = await ApiService.saveModProfile({
+        profileId: profile.id,
+        name: profile.name,
+        runtime: profile.runtime === 'MONO' ? 'Mono' : profile.runtime,
+        manifest: {
+          ...profile.manifest,
+          items: profile.manifest.items.map((item) => {
+            const matchesCollectionItem = item.nexusFileId === currentCollectionItem?.nexusFileId
+              || (
+                item.sourceId === String(file.modId ?? '')
+                && normalizeVersionToken(item.sourceVersion ?? '') === normalizeVersionToken(file.version)
+              );
+            return matchesCollectionItem
+              ? {
+                ...item,
+                fileName: resolvedFile?.fileName ?? item.fileName,
+                nexusFileId: resolvedFileId,
+                runtime: profileRuntime,
+              }
+              : item;
+          }),
+          collection: {
+            ...collection,
+            items: collection.items.map((item) => item.key === key
+              ? {
+                ...item,
+                collectionFileId: item.collectionFileId ?? String(file.fileId),
+                nexusFileId: resolvedFileId,
+                status,
+                statusMessage,
+              }
+              : item),
+          },
+        },
+      });
+      savedProfiles.push(saved);
+      window.dispatchEvent(new CustomEvent('mod-profiles-updated', { detail: { profileId: saved.id } }));
+    }
+    collectionProfilesRef.current = savedProfiles;
+    setCollectionProfiles(savedProfiles);
+    return savedProfiles;
+  }, []);
 
   const runCollectionThunderstoreBatch = useCallback(async (initialProfiles: StoredModProfile[]) => {
     if (!selectedNexusCollection) return;
@@ -7715,6 +8081,7 @@ export function ModLibraryOverlay({
     async (
       file: NexusCollectionModFile,
       decisionOverride?: "collection" | "existing",
+      runtime?: 'IL2CPP' | 'Mono',
     ) => {
       if (!nexusCollectionAccess?.connected) {
         showLibraryNotice(
@@ -7760,8 +8127,8 @@ export function ModLibraryOverlay({
         const result = await downloadNexusWithSecurity(
           file.modId,
           file.fileId,
-          undefined,
-          `Security Findings - ${file.modName}`,
+          runtime,
+          `Security Findings - ${file.modName}${runtime ? ` (${runtime})` : ''}`,
         );
         return result?.success ? ("downloaded" as const) : ("failed" as const);
       } finally {
@@ -7847,7 +8214,7 @@ export function ModLibraryOverlay({
 
   const handleStageCollection = useCallback(async () => {
     if (!selectedNexusCollection || !selectedCollectionPlan) return;
-    const profiles = await ensureCollectionProfilesStarted();
+    let profiles = await ensureCollectionProfilesStarted();
     if (profiles.length === 0) return;
     onOpenProfile?.(profiles[0].id);
 
@@ -7866,20 +8233,67 @@ export function ModLibraryOverlay({
       return;
     }
 
-    const failures: string[] = [];
-    const premiumFilesToDownload = missingRequiredCollectionFiles.filter((file) =>
-      profiles.some((profile) => profile.manifest.collection?.items.some(
-        (item) => item.key === collectionFileKey(file) && item.status !== 'ready',
-      )),
+    const failures = unavailableSelectedCollectionFiles.flatMap((file) =>
+      profiles.map((profile) => `${file.modName} (${profile.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono'}): exact Nexus file is unavailable`),
     );
+    const runtimeResolutionFailures = new Set<string>();
+    const downloadTasks = new Map<string, {
+      file: NexusCollectionModFile;
+      resolvedFile: { fileId: number; fileName: string };
+      targetRuntimes: Array<'IL2CPP' | 'Mono'>;
+    }>();
+    for (const file of selectedCollectionFiles) {
+      for (const profile of profiles) {
+        const runtime = profile.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+        const item = profile.manifest.collection?.items.find(
+          (candidate) => candidate.key === collectionFileKey(file),
+        );
+        if (!item?.selected || item.status === 'ready') continue;
+        if (item.status === 'runtimeMismatch') {
+          runtimeResolutionFailures.add(`${file.modName} (${runtime}): ${item.statusMessage || `no exact ${runtime} file is available`}`);
+          continue;
+        }
+        const fileId = Number(item.nexusFileId);
+        if (!Number.isFinite(fileId) || fileId <= 0) {
+          runtimeResolutionFailures.add(`${file.modName} (${runtime}): Nexus did not provide a valid exact-version file ID`);
+          continue;
+        }
+        const profileItem = profile.manifest.items.find((candidate) =>
+          candidate.nexusFileId === item.nexusFileId
+          || (
+            candidate.sourceId === String(file.modId ?? '')
+            && normalizeVersionToken(candidate.sourceVersion ?? '') === normalizeVersionToken(file.version)
+          ),
+        );
+        const taskKey = `${file.modId ?? 0}:${fileId}`;
+        const existingTask = downloadTasks.get(taskKey);
+        if (existingTask) {
+          if (!existingTask.targetRuntimes.includes(runtime)) existingTask.targetRuntimes.push(runtime);
+        } else {
+          downloadTasks.set(taskKey, {
+            file,
+            resolvedFile: {
+              fileId,
+              fileName: profileItem?.fileName || file.fileName,
+            },
+            targetRuntimes: [runtime],
+          });
+        }
+      }
+    }
+    failures.push(...runtimeResolutionFailures);
+    const premiumDownloads = Array.from(downloadTasks.values());
     const aggregateId = `collection:${selectedNexusCollection.slug}:${selectedCollectionPlan.revisionNumber}`;
     const aggregateStartedAt = Date.now();
-    const aggregateTotal = requiredCollectionFiles.length;
-    let completedFiles = requiredCollectionFiles.filter((file) =>
-      profiles.every((profile) => profile.manifest.collection?.items.some(
-        (item) => item.key === collectionFileKey(file) && item.status === 'ready',
-      )),
-    ).length;
+    const aggregateTotal = profiles.reduce(
+      (count, profile) => count + (profile.manifest.collection?.items.filter((item) => item.selected).length ?? 0),
+      0,
+    );
+    const countReadyProfileItems = (currentProfiles: StoredModProfile[]) => currentProfiles.reduce(
+      (count, profile) => count + (profile.manifest.collection?.items.filter((item) => item.selected && item.status === 'ready').length ?? 0),
+      0,
+    );
+    let completedFiles = countReadyProfileItems(profiles);
     const publishPremiumProgress = (status: 'downloading' | 'completed' | 'error', message: string, error?: string) => {
       publishDownload({
         id: aggregateId,
@@ -7899,43 +8313,114 @@ export function ModLibraryOverlay({
         persistent: true,
       });
     };
-    publishPremiumProgress('downloading', `Downloading ${premiumFilesToDownload.length} exact Nexus files in the background.`);
+    publishPremiumProgress(
+      'downloading',
+      `Downloading ${premiumDownloads.length} exact Nexus ${premiumDownloads.length === 1 ? 'file' : 'files'} for ${profiles.length} runtime ${profiles.length === 1 ? 'profile' : 'profiles'}.`,
+    );
     try {
-      for (const file of premiumFilesToDownload) {
+      for (const task of premiumDownloads) {
+        const runtimeLabel = task.targetRuntimes.length === 1 ? task.targetRuntimes[0] : 'shared runtimes';
+        const downloadFile = {
+          ...task.file,
+          fileId: task.resolvedFile.fileId,
+          fileName: task.resolvedFile.fileName,
+        };
         try {
-          const outcome = await downloadCollectionFile(file, 'collection');
+          profiles = await saveCollectionFileStatus(
+            profiles,
+            task.file,
+            'downloading',
+            `Downloading exact Nexus file ${task.resolvedFile.fileId} for ${runtimeLabel}.`,
+            task.targetRuntimes,
+            task.resolvedFile,
+          );
+          publishPremiumProgress(
+            'downloading',
+            `Downloading ${task.file.modName} for ${runtimeLabel}. ${completedFiles} of ${aggregateTotal} profile items are ready.`,
+          );
+          const outcome = await downloadCollectionFile(
+            downloadFile,
+            'collection',
+            task.targetRuntimes.length === 1 ? task.targetRuntimes[0] : undefined,
+          );
           if (outcome === "cancelled" || outcome === "manual") {
             break;
           }
           if (outcome === "failed") {
-            failures.push(file.modName);
+            failures.push(`${task.file.modName} (${runtimeLabel})`);
+            profiles = await saveCollectionFileStatus(
+              profiles,
+              task.file,
+              'error',
+              `The exact Nexus download or its security scan did not complete for ${runtimeLabel}. Retry this item from the profile.`,
+              task.targetRuntimes,
+              task.resolvedFile,
+            );
             continue;
           }
           if (outcome === "downloaded" || outcome === "kept") {
-            completedFiles += 1;
             const nextLibrary = await refreshCollectionStaging();
-            await persistCollectionProfiles(nextLibrary.downloaded);
-            publishPremiumProgress('downloading', `${completedFiles} of ${aggregateTotal} required collection files are ready.`);
+            profiles = await persistCollectionProfiles(
+              nextLibrary.downloaded,
+              undefined,
+              collectionNexusFileCatalogsRef.current,
+            );
+            const unresolvedRuntimes = task.targetRuntimes.filter((runtime) =>
+              profiles.some((profile) => {
+                const profileRuntime = profile.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+                return profileRuntime === runtime
+                  && profile.manifest.collection?.items.some(
+                    (item) => item.key === collectionFileKey(task.file) && item.selected && item.status !== 'ready',
+                  );
+              }),
+            );
+            if (unresolvedRuntimes.length > 0) {
+              const unresolvedLabel = unresolvedRuntimes.join(' + ');
+              const message = `Nexus file ${task.resolvedFile.fileId} downloaded, but it did not contain a compatible ${unresolvedLabel} payload.`;
+              failures.push(`${task.file.modName} (${unresolvedLabel}): ${message}`);
+              profiles = await saveCollectionFileStatus(
+                profiles,
+                task.file,
+                'error',
+                message,
+                unresolvedRuntimes,
+                task.resolvedFile,
+              );
+            }
+            completedFiles = countReadyProfileItems(profiles);
+            publishPremiumProgress('downloading', `${completedFiles} of ${aggregateTotal} selected profile items are ready.`);
           }
         } catch (error) {
-          failures.push(
-            `${file.modName}: ${error instanceof Error ? error.message : "download failed"}`,
+          const message = error instanceof Error ? error.message : "download failed";
+          failures.push(`${task.file.modName} (${runtimeLabel}): ${message}`);
+          profiles = await saveCollectionFileStatus(
+            profiles,
+            task.file,
+            'error',
+            `${runtimeLabel}: ${message}`,
+            task.targetRuntimes,
+            task.resolvedFile,
           );
         }
       }
       const nextLibrary = await refreshCollectionStaging();
-      await persistCollectionProfiles(nextLibrary.downloaded);
+      profiles = await persistCollectionProfiles(
+        nextLibrary.downloaded,
+        undefined,
+        collectionNexusFileCatalogsRef.current,
+      );
+      completedFiles = countReadyProfileItems(profiles);
       if (failures.length > 0) {
-        publishPremiumProgress('error', `${completedFiles} of ${aggregateTotal} required files are ready.`, 'Some collection files need another attempt.');
+        publishPremiumProgress('error', `${completedFiles} of ${aggregateTotal} selected profile items are ready.`, 'Some runtime-specific collection files need another attempt.');
         showLibraryNotice(
           "Collection Profile Partially Staged",
-          `SIMM kept every completed file in the collection profile. ${failures.length} ${failures.length === 1 ? "file needs" : "files need"} another attempt; the first issue was ${failures[0]}.`,
+          `SIMM kept every completed file in the collection profiles. ${failures.length} runtime-specific ${failures.length === 1 ? "item needs" : "items need"} attention; the first issue was ${failures[0]}.`,
         );
       } else {
-        publishPremiumProgress('completed', `${completedFiles} of ${aggregateTotal} required files are ready.`);
+        publishPremiumProgress('completed', `${completedFiles} of ${aggregateTotal} selected profile items are ready.`);
         showLibraryNotice(
           "Collection Files Staged",
-          `${selectedNexusCollection.name} has all available required Nexus files in the library.`,
+          `${selectedNexusCollection.name} has all selected Nexus files in the library.`,
         );
       }
     } finally {
@@ -7944,7 +8429,6 @@ export function ModLibraryOverlay({
   }, [
     downloadCollectionFile,
     ensureCollectionProfilesStarted,
-    missingRequiredCollectionFiles,
     nexusCollectionAccess,
     onOpenAccounts,
     onOpenProfile,
@@ -7953,9 +8437,11 @@ export function ModLibraryOverlay({
     refreshCollectionStaging,
     selectedNexusCollection,
     selectedCollectionPlan,
-    requiredCollectionFiles,
+    selectedCollectionFiles,
+    saveCollectionFileStatus,
     showLibraryNotice,
     runCollectionThunderstoreBatch,
+    unavailableSelectedCollectionFiles,
   ]);
 
   const confirmStageCollection = useCallback(() => {
@@ -7975,9 +8461,9 @@ export function ModLibraryOverlay({
       isOpen: true,
       title: `Create ${selectedNexusCollection.name} profile?`,
       message: nexusCollectionAccess?.canDirectDownload
-        ? `SIMM will create and open a new collection profile, then stage ${missingRequiredCollectionFiles.length} exact Nexus files in the background. Existing profiles and installed mods are not overwritten.`
+        ? `SIMM will create and open a new collection profile, then download ${missingSelectedCollectionFiles.length} exact Nexus files in the background. All required mods and ${selectedOptionalCollectionCount} selected optional ${selectedOptionalCollectionCount === 1 ? 'mod are' : 'mods are'} included. Existing profiles and installed mods are not overwritten.`
         : `SIMM will create and open a new collection profile. ${exactMatches} exact Thunderstore ${exactMatches === 1 ? 'match' : 'matches'} can download automatically; ${nexusRequired} ${nexusRequired === 1 ? 'item keeps' : 'items keep'} the Nexus website flow. Optional mods remain excluded unless selected.`,
-      confirmText: 'Create & Open Profile',
+      confirmText: 'Create Profile & Start',
       cancelText: 'Review choices',
       onConfirm: () => {
         closeConfirmOverlay();
@@ -7990,8 +8476,9 @@ export function ModLibraryOverlay({
     collectionOptionalSelections,
     collectionSourceChoices,
     handleStageCollection,
-    missingRequiredCollectionFiles.length,
+    missingSelectedCollectionFiles.length,
     nexusCollectionAccess?.canDirectDownload,
+    selectedOptionalCollectionCount,
     selectedCollectionPlan,
     selectedNexusCollection,
   ]);
@@ -8544,16 +9031,16 @@ export function ModLibraryOverlay({
           <SimmDialogContent
             nested
             showCloseButton={false}
-            className="app-dialog app-dialog--message"
-            style={{ maxWidth: "420px" }}
+            className="app-dialog app-dialog--message app-runtime-dialog app-collection-runtime-dialog"
           >
-            <div className="modal-header">
-              <h2>{runtimePrompt.title}</h2>
+            <DialogHeader className="modal-header app-dialog__header">
+              <DialogTitle>{runtimePrompt.title}</DialogTitle>
               <SimmButton
                 type="button"
                 variant="ghost"
                 size="icon-sm"
                 className="modal-close"
+                aria-label="Close collection runtime dialog"
                 onClick={() => {
                   runtimePrompt.onDismiss?.();
                   setRuntimePrompt(null);
@@ -8561,18 +9048,14 @@ export function ModLibraryOverlay({
               >
                 ×
               </SimmButton>
-            </div>
-            <div style={{ padding: "1rem 1.25rem 1.25rem" }}>
-              <p style={{ marginTop: 0, color: "#ccc" }}>
+            </DialogHeader>
+            <div className="app-dialog__body app-runtime-dialog__body app-collection-runtime-dialog__body">
+              <DialogDescription>
                 {runtimePrompt.message}
-              </p>
-              <div
-                style={{
-                  display: "flex",
-                  gap: "0.5rem",
-                  justifyContent: "flex-end",
-                }}
-              >
+              </DialogDescription>
+            </div>
+            <DialogFooter className="app-dialog__footer">
+              <div className="app-collection-runtime-dialog__actions">
                 <SimmButton
                   type="button"
                   variant="secondary"
@@ -8609,7 +9092,7 @@ export function ModLibraryOverlay({
                   Both
                 </SimmButton>
               </div>
-            </div>
+            </DialogFooter>
           </SimmDialogContent>
         </Dialog>
       )}
@@ -9551,13 +10034,102 @@ export function ModLibraryOverlay({
                     )}
                   </div>
                 </div>
+                {selectedCollectionPlan && (
+                  <section className="workspace-inspector-card__subsection workspace-collection-runtime-preview">
+                    <div className="workspace-inspector-card__subsection-header">
+                      <div>
+                        <h4>Profile preview</h4>
+                        <p>
+                          Preview which mods SIMM will add to the Mono and IL2CPP
+                          profiles, including any source or availability differences.
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className={`workspace-collection-runtime-preview__summary${
+                        collectionRuntimeDifferenceCount > 0
+                          ? " workspace-collection-runtime-preview__summary--different"
+                          : ""
+                      }`}
+                    >
+                      <strong>
+                        {collectionRuntimeDifferenceCount > 0
+                          ? `${collectionRuntimeDifferenceCount.toLocaleString()} ${collectionRuntimeDifferenceCount === 1 ? "mod differs" : "mods differ"} by runtime`
+                          : "Same mods in both profiles"}
+                      </strong>
+                      <span>
+                        {collectionRuntimeDifferenceCount > 0
+                          ? "These mods use a different library copy, download source, or availability state."
+                          : `Both profiles currently add the same ${selectedCollectionPlan.modFiles.length.toLocaleString()} mods from the same known sources.`}
+                      </span>
+                    </div>
+                    <div
+                      className="workspace-collection-runtime-preview__switch"
+                      role="group"
+                      aria-label="Collection profile preview"
+                    >
+                      {(["Mono", "IL2CPP"] as const).map((runtime) => {
+                        const active = collectionRuntimePreview === runtime;
+                        return (
+                          <SimmButton
+                            key={runtime}
+                            type="button"
+                            variant="secondary"
+                            className={`workspace-collection-runtime-preview__switch-button${
+                              active ? " workspace-collection-runtime-preview__switch-button--active" : ""
+                            }`}
+                            aria-label={`${active ? "Hide" : "Show"} ${runtime} profile list`}
+                            aria-pressed={active}
+                            onClick={() =>
+                              setCollectionRuntimePreview((current) =>
+                                current === runtime ? null : runtime,
+                              )
+                            }
+                          >
+                            <span>{runtime}</span>
+                            <small>{collectionRuntimePreviewByRuntime[runtime].length.toLocaleString()}</small>
+                          </SimmButton>
+                        );
+                      })}
+                    </div>
+                    {collectionRuntimePreview && activeCollectionRuntimePreview && (
+                      <div
+                        className="workspace-collection-runtime-preview__list"
+                        role="list"
+                        aria-label={`${collectionRuntimePreview} collection profile mods`}
+                      >
+                        {activeCollectionRuntimePreview.map((item) => (
+                          <div
+                            className="workspace-collection-runtime-preview__item"
+                            key={`${collectionRuntimePreview}-${collectionFileKey(item.file)}`}
+                            role="listitem"
+                          >
+                            <strong>{item.file.modName}</strong>
+                            <div className="workspace-collection-runtime-preview__item-meta">
+                              <span>
+                                {item.file.version || "Version unknown"}
+                                {item.file.optional ? " · Optional" : ""}
+                              </span>
+                              <span
+                                className={`workspace-collection-runtime-preview__status workspace-collection-runtime-preview__status--${item.tone}`}
+                              >
+                                {item.statusLabel}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                )}
+                {(!nexusCollectionAccess?.canDirectDownload || optionalCollectionFiles.length > 0) && (
                 <section className="workspace-inspector-card__subsection workspace-inspector-card__subsection--collection-stage">
                   <div className="workspace-inspector-card__subsection-header">
                     <div>
-                      <h4>Collection staging</h4>
+                      <h4>{nexusCollectionAccess?.canDirectDownload ? "Optional content" : "Collection staging"}</h4>
                       <p>
                         {nexusCollectionAccess?.canDirectDownload
-                          ? "Premium downloads stay on Nexus. SIMM creates the profile first, then downloads required files in the background."
+                          ? "Required mods are included automatically. Choose which optional mods SIMM should add before starting the download."
                           : "Thunderstore alternatives require an exact name, author, and version match. Choose each mod or apply one choice to every match."}
                       </p>
                     </div>
@@ -9565,11 +10137,12 @@ export function ModLibraryOverlay({
                       <WorkspaceBadge
                         tone={collectionReadyForProfile ? "success" : "warning"}
                       >
-                        {(
-                          stagedRequiredCollectionFiles.length +
-                          keptExistingCollectionFiles.length
-                        ).toLocaleString()} /{" "}
-                        {requiredCollectionFiles.length.toLocaleString()} ready
+                        {nexusCollectionAccess?.canDirectDownload
+                          ? `${selectedOptionalCollectionCount.toLocaleString()} / ${optionalCollectionFiles.length.toLocaleString()} selected`
+                          : `${(
+                              stagedRequiredCollectionFiles.length +
+                              keptExistingCollectionFiles.length
+                            ).toLocaleString()} / ${requiredCollectionFiles.length.toLocaleString()} ready`}
                       </WorkspaceBadge>
                     )}
                   </div>
@@ -9583,7 +10156,7 @@ export function ModLibraryOverlay({
                     </InspectorCardEmpty>
                   ) : selectedCollectionPlan ? (
                     <>
-                      {unavailableRequiredCollectionFiles.length > 0 && (
+                      {!nexusCollectionAccess?.canDirectDownload && unavailableRequiredCollectionFiles.length > 0 && (
                         <div className="workspace-collection-stage__notice workspace-collection-stage__notice--danger">
                           <strong>Revision is incomplete on Nexus</strong>
                           <span>
@@ -9596,7 +10169,7 @@ export function ModLibraryOverlay({
                           </span>
                         </div>
                       )}
-                      {requiredExternalCollectionResources.length > 0 && (
+                      {!nexusCollectionAccess?.canDirectDownload && requiredExternalCollectionResources.length > 0 && (
                         <div className="workspace-collection-stage__notice workspace-collection-stage__notice--warning">
                           <strong>External resources required</strong>
                           <span>
@@ -9641,7 +10214,10 @@ export function ModLibraryOverlay({
                         </div>
                       )}
                       <div className="workspace-collection-stage__file-list">
-                        {selectedCollectionPlan.modFiles.map((file) => {
+                        {(nexusCollectionAccess?.canDirectDownload
+                          ? optionalCollectionFiles
+                          : selectedCollectionPlan.modFiles
+                        ).map((file) => {
                           const key = collectionFileKey(file);
                           const stagedEntry = getStagedCollectionEntry(file);
                           const reusableEntry = stagedEntry
@@ -9659,21 +10235,36 @@ export function ModLibraryOverlay({
                           const keptExisting =
                             decision === "existing" &&
                             getCollectionConflictingEntries(file).length > 0;
-                          const active =
-                            downloading?.endsWith(`-${file.fileId}`) ?? false;
                           return (
                             <div
-                              className="workspace-collection-stage__file"
+                              className={`workspace-collection-stage__file${
+                                nexusCollectionAccess?.canDirectDownload
+                                  ? " workspace-collection-stage__file--premium-optional"
+                                  : ""
+                              }`}
                               key={file.collectionRevisionModId || file.fileId}
                             >
                               <div className="workspace-collection-stage__file-copy">
                                 <strong>{file.modName}</strong>
-                                <span>
-                                  {file.fileName}
-                                  {file.version ? ` • ${file.version}` : ""}
-                                  {file.author ? ` • ${file.author}` : ""}
-                                  {` • Nexus file ${file.fileId}`}
-                                </span>
+                                {nexusCollectionAccess?.canDirectDownload ? (
+                                  <>
+                                    <span className="workspace-collection-stage__file-details">
+                                      {file.version && <span>{file.version}</span>}
+                                      {file.author && <span>{file.author}</span>}
+                                      <span>Nexus file {file.fileId}</span>
+                                    </span>
+                                    <small className="workspace-collection-stage__file-name">
+                                      {file.fileName}
+                                    </small>
+                                  </>
+                                ) : (
+                                  <span>
+                                    {file.fileName}
+                                    {file.version ? ` • ${file.version}` : ""}
+                                    {file.author ? ` • ${file.author}` : ""}
+                                    {` • Nexus file ${file.fileId}`}
+                                  </span>
+                                )}
                                 {!nexusCollectionAccess?.canDirectDownload && (
                                   <small className={matchState?.error ? 'workspace-collection-stage__match-note workspace-collection-stage__match-note--warning' : 'workspace-collection-stage__match-note'}>
                                     {matchState?.loading
@@ -9694,10 +10285,22 @@ export function ModLibraryOverlay({
                                         [key]: Boolean(checked),
                                       }))}
                                     />
-                                    <span>Include optional</span>
+                                    <span>
+                                      {nexusCollectionAccess?.canDirectDownload
+                                        ? "Include in download"
+                                        : "Include optional"}
+                                    </span>
                                   </label>
                                 )}
-                                {reusableEntry ? (
+                                {nexusCollectionAccess?.canDirectDownload ? (
+                                  <WorkspaceBadge tone={optionalSelected ? (reusableEntry ? "success" : "source") : "warning"}>
+                                    {optionalSelected
+                                      ? reusableEntry
+                                        ? `Reuse from ${getSourceBadgeLabel(reusableEntry.source)}`
+                                        : "Include with download"
+                                      : "Not included"}
+                                  </WorkspaceBadge>
+                                ) : reusableEntry ? (
                                   <WorkspaceBadge tone="success">Reuse from {getSourceBadgeLabel(reusableEntry.source)}</WorkspaceBadge>
                                 ) : keptExisting ? (
                                   <WorkspaceBadge tone="source">
@@ -9707,7 +10310,7 @@ export function ModLibraryOverlay({
                                   <WorkspaceBadge tone="danger">
                                     Unavailable
                                   </WorkspaceBadge>
-                                ) : !nexusCollectionAccess?.canDirectDownload ? (
+                                ) : (
                                   <div className="workspace-collection-stage__source-actions" aria-label={`Download source for ${file.modName}`}>
                                     {exactMatches.length > 0 && (
                                       <SimmButton
@@ -9730,22 +10333,6 @@ export function ModLibraryOverlay({
                                       Keep Nexus
                                     </SimmButton>
                                   </div>
-                                ) : (
-                                  <SimmButton
-                                    type="button"
-                                    size="sm"
-                                    variant="secondary"
-                                    disabled={collectionDownloadBusy}
-                                    onClick={() =>
-                                      void handleStageSingleCollectionFile(file)
-                                    }
-                                  >
-                                    {active
-                                      ? "Waiting…"
-                                      : nexusCollectionAccess?.canDirectDownload
-                                        ? "Download"
-                                        : "Open download"}
-                                  </SimmButton>
                                 )}
                               </div>
                             </div>
@@ -9755,6 +10342,7 @@ export function ModLibraryOverlay({
                     </>
                   ) : null}
                 </section>
+                )}
                 <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped workspace-inspector-card__actions--collection">
                   <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
                     {!nexusCollectionAccess?.connected ? (
@@ -9771,26 +10359,22 @@ export function ModLibraryOverlay({
                       <SimmButton
                         type="button"
                         className="btn btn-primary"
-                        aria-label={nexusCollectionAccess.canDirectDownload
-                          ? "Download collection"
-                          : "Start collection download"}
+                        aria-label="Start collection download"
+                        title={nexusCollectionAccess.canDirectDownload
+                          ? "Create and open a collection profile, then download every required mod plus the optional mods selected above."
+                          : "Create and open a collection profile, automatically download selected exact Thunderstore matches, and retain the remaining Nexus downloads for individual completion."}
                         onClick={confirmStageCollection}
                         disabled={
                           nexusCollectionPlanState.loading ||
                           collectionMatchesLoading ||
-                          collectionDownloadBusy ||
-                          (nexusCollectionAccess.canDirectDownload && missingRequiredCollectionFiles.length === 0)
+                          collectionDownloadBusy
                         }
                       >
                         <Icon
                           name={`fas ${collectionDownloadBusy ? "fa-spinner fa-spin" : "fa-download"}`}
                         />
                         <span>
-                          {nexusCollectionAccess.canDirectDownload
-                            ? missingRequiredCollectionFiles.length > 0
-                              ? "Download"
-                              : "Files ready"
-                            : "Start download"}
+                          {collectionDownloadBusy ? "Starting…" : "Start download"}
                         </span>
                       </SimmButton>
                     )}
@@ -9808,7 +10392,7 @@ export function ModLibraryOverlay({
                           ? collectionReadyForProfile
                             ? "The complete collection profile is saved in Profiles."
                             : "The partial collection profile is saved in Profiles and will update as files are staged."
-                          : "Create the collection profile now; missing files remain listed for staging or retry."
+                          : "Create and open the collection profile without starting downloads. Choose individual mod downloads from the profile page."
                       }
                     >
                       <Icon
@@ -9821,7 +10405,7 @@ export function ModLibraryOverlay({
                             ? collectionReadyForProfile
                               ? "Profile ready"
                               : "Profile saved"
-                            : "Create profile"}
+                            : "Create profile & choose mods"}
                       </span>
                     </SimmButton>
                   </div>

@@ -1532,6 +1532,9 @@ function AppContent() {
     if (a.view === 'library' && b.view === 'library') {
       return a.initialTab === b.initialTab;
     }
+    if (a.view === 'profiles' && b.view === 'profiles') {
+      return a.profileId === b.profileId;
+    }
     return true;
   }, []);
 

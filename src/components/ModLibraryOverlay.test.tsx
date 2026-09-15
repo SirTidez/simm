@@ -178,11 +178,13 @@ function renderLibraryOverlay({
   libraryTab,
   navigationState,
   onOpenSecurityReport,
+  onOpenProfile,
   onNavigationStateChange,
 }: {
   libraryTab?: "discover" | "library" | "updates";
   navigationState?: ModLibraryNavigationState;
   onOpenSecurityReport?: (request: { title: string }) => void;
+  onOpenProfile?: (profileId: string) => void;
   onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
 } = {}) {
   return render(
@@ -192,6 +194,7 @@ function renderLibraryOverlay({
           isOpen={true}
           onClose={() => {}}
           onOpenSecurityReport={onOpenSecurityReport}
+          onOpenProfile={onOpenProfile}
           onNavigationStateChange={onNavigationStateChange}
           navigationState={
             navigationState ?? (libraryTab ? { libraryTab } : undefined)
@@ -1488,12 +1491,25 @@ describe("ModLibraryOverlay", () => {
       )!,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Download collection" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Collection staging" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Optional content" })).toBeNull();
+    });
+    const startDownload = await screen.findByRole("button", { name: "Start collection download" });
+    expect(startDownload).toHaveAttribute(
+      "title",
+      "Create and open a collection profile, then download every required mod plus the optional mods selected above.",
+    );
+    expect(screen.getByRole("button", { name: "Create profile & choose mods" })).toHaveAttribute(
+      "title",
+      "Create and open the collection profile without starting downloads. Choose individual mod downloads from the profile page.",
+    );
+    fireEvent.click(startDownload);
     expect(apiMocks.searchThunderstoreByRuntime).not.toHaveBeenCalledWith("schedule-i", "Conflict Mod");
     expect(apiMocks.searchThunderstoreByRuntime).not.toHaveBeenCalledWith("schedule-i", "Background Mod");
     expect(screen.queryByRole("button", { name: "Use Thunderstore" })).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Apply next choice to all matches/i })).toBeNull();
-    fireEvent.click(await screen.findByRole("button", { name: "Create & Open Profile" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
     await waitFor(() => expect(apiMocks.saveModProfile).toHaveBeenCalledTimes(1));
     const initialRequest = apiMocks.saveModProfile.mock.calls[0][0];
     expect(initialRequest.profileId).toBeUndefined();
@@ -1515,10 +1531,10 @@ describe("ModLibraryOverlay", () => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
         42,
         9001,
-        undefined,
+        "Mono",
       );
     });
-    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(43, 9002, undefined));
+    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(43, 9002, "Mono"));
     library = { downloaded: [existing, downloadedConflict, downloaded] };
     backgroundDownload.resolve({ success: true, storageId: "collection-43" });
 
@@ -1541,6 +1557,448 @@ describe("ModLibraryOverlay", () => {
         }),
       ]),
     );
+  });
+
+  it("shows only optional choices to Premium users and downloads the selected optional files", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const collection = {
+      id: 25,
+      slug: "premium-options",
+      name: "Premium Options",
+      summary: "Required and optional content.",
+      curator_name: "Curator",
+      endorsements: 1,
+      total_downloads: 5,
+      revision_number: 4,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    const downloadedEntries = {
+      91: makeEntry({
+        storageId: "premium-required",
+        displayName: "Required Mod",
+        source: "nexusmods",
+        sourceId: "91",
+        nexusFileId: "9101",
+        sourceVersion: "1.0.0",
+        storageIdsByRuntime: { Mono: "premium-required" },
+      }),
+      92: makeEntry({
+        storageId: "premium-optional",
+        displayName: "Optional Mod",
+        source: "nexusmods",
+        sourceId: "92",
+        nexusFileId: "9201",
+        sourceVersion: "2.0.0",
+        storageIdsByRuntime: { Mono: "premium-optional" },
+      }),
+    };
+    let library = { downloaded: [] as ModLibraryEntry[] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([{
+      id: "env-mono",
+      name: "Main Mono",
+      appId: "3164500",
+      branch: "main",
+      outputDir: "C:/game",
+      runtime: "Mono",
+      status: "completed",
+    }]);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { isPremium: true, canDirectDownload: false, requiresSiteConfirmation: true },
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-4",
+      revisionNumber: 4,
+      modFiles: [
+        { collectionRevisionModId: "premium-required", modId: 91, fileId: 9101, modName: "Required Mod", fileName: "required.zip", version: "1.0.0", optional: false, available: true },
+        { collectionRevisionModId: "premium-optional", modId: 92, fileId: 9201, modName: "Optional Mod", fileName: "optional.zip", version: "2.0.0", optional: true, available: true },
+      ],
+      externalResources: [],
+    });
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (modId: 91 | 92) => {
+      library = { downloaded: [...library.downloaded, downloadedEntries[modId]] };
+      return { success: true, storageId: downloadedEntries[modId].storageId };
+    });
+    const onOpenProfile = vi.fn();
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+      onOpenProfile,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Premium Options")).closest('[role="button"]')!);
+
+    expect(await screen.findByRole("heading", { name: "Optional content" })).toBeTruthy();
+    expect(screen.queryByText("Required Mod")).toBeNull();
+    expect(screen.getByText("Optional Mod")).toBeTruthy();
+    expect(screen.getByText("0 / 1 selected")).toBeTruthy();
+    const optionalChoice = screen.getByRole("checkbox", { name: "Include in download" });
+    expect(optionalChoice.closest(".workspace-collection-stage__file")).toHaveClass(
+      "workspace-collection-stage__file--premium-optional",
+    );
+    fireEvent.click(optionalChoice);
+    expect(screen.getByText("1 / 1 selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start collection download" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+
+    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledTimes(2));
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(91, 9101, "Mono");
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(92, 9201, "Mono");
+    expect(apiMocks.saveModProfile.mock.calls[0][0].manifest.collection.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nexusFileId: "9101", selected: true }),
+        expect.objectContaining({ nexusFileId: "9201", optional: true, selected: true }),
+      ]),
+    );
+    expect(apiMocks.saveModProfile.mock.calls.some(([request]) =>
+      request.manifest.collection.items.some((item: { status: string }) => item.status === "downloading")
+    )).toBe(true);
+    expect(apiMocks.saveModProfile.mock.calls.some(([request]) =>
+      request.manifest.collection.items.every((item: { selected: boolean; status: string }) =>
+        !item.selected || item.status === "ready"
+      )
+    )).toBe(true);
+    expect(dispatchSpy.mock.calls.some(([event]) => event.type === "mod-profiles-updated")).toBe(true);
+    expect(onOpenProfile).toHaveBeenCalledWith("profile-test");
+    dispatchSpy.mockRestore();
+  });
+
+  it("downloads exact-version Nexus files separately for Mono and IL2CPP collection profiles", async () => {
+    const collection = {
+      id: 28,
+      slug: "runtime-downloads",
+      name: "Runtime Downloads",
+      summary: "Separate runtime archives.",
+      curator_name: "Curator",
+      endorsements: 1,
+      total_downloads: 5,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    let library = { downloaded: [] as ModLibraryEntry[] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/mono",
+        runtime: "Mono",
+        status: "completed",
+      },
+      {
+        id: "env-il2cpp",
+        name: "Main IL2CPP",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/il2cpp",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { isPremium: true, canDirectDownload: true, requiresSiteConfirmation: false },
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "runtime-downloads-revision",
+      revisionNumber: 1,
+      modFiles: [{
+        collectionRevisionModId: "runtime-download-mod",
+        modId: 93,
+        fileId: 9301,
+        modName: "Runtime Mod",
+        fileName: "Runtime Mod IL2CPP.zip",
+        version: "1.0.0",
+        optional: false,
+        available: true,
+      }],
+      externalResources: [],
+    });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 9301,
+        name: "Runtime Mod IL2CPP",
+        version: "1.0.0",
+        category_id: 1,
+        category_name: "MAIN",
+        is_primary: true,
+        size: 1024,
+        file_name: "Runtime Mod IL2CPP.zip",
+        uploaded_timestamp: 10,
+        mod_version: "1.0.0",
+      },
+      {
+        file_id: 9302,
+        name: "Runtime Mod Mono",
+        version: "1.0.0",
+        category_id: 1,
+        category_name: "MAIN",
+        is_primary: false,
+        size: 1024,
+        file_name: "Runtime Mod Mono.zip",
+        uploaded_timestamp: 11,
+        mod_version: "1.0.0",
+      },
+      {
+        file_id: 9303,
+        name: "Runtime Mod Mono",
+        version: "1.1.0",
+        category_id: 1,
+        category_name: "MAIN",
+        is_primary: true,
+        size: 1024,
+        file_name: "Runtime Mod Mono 1.1.0.zip",
+        uploaded_timestamp: 12,
+        mod_version: "1.1.0",
+      },
+    ]);
+    apiMocks.saveModProfile.mockImplementation(async (request) => ({
+      id: request.profileId || `profile-${request.runtime.toLowerCase()}`,
+      name: request.name,
+      runtime: request.runtime,
+      isDefault: false,
+      activeEnvironmentIds: [],
+      manifest: request.manifest,
+      createdAt: "2026-09-10T00:00:00Z",
+      updatedAt: "2026-09-10T00:00:00Z",
+    }));
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (_modId, fileId, runtime) => {
+      const normalizedRuntime = runtime === "IL2CPP" ? "IL2CPP" : "Mono";
+      const storageId = `runtime-${normalizedRuntime.toLowerCase()}-${fileId}`;
+      library = {
+        downloaded: [
+          ...library.downloaded,
+          makeEntry({
+            storageId,
+            displayName: "Runtime Mod",
+            source: "nexusmods",
+            sourceId: "93",
+            nexusFileId: String(fileId),
+            sourceVersion: "1.0.0",
+            availableRuntimes: [normalizedRuntime],
+            storageIdsByRuntime: { [normalizedRuntime]: storageId },
+            installedInByRuntime: { [normalizedRuntime]: [] },
+            filesByRuntime: { [normalizedRuntime]: ["RuntimeMod.dll"] },
+          }),
+        ],
+      };
+      return { success: true, storageId };
+    });
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Runtime Downloads")).closest('[role="button"]')!);
+
+    expect(await screen.findByText("1 mod differs by runtime")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show Mono profile list" }));
+    expect(screen.getByRole("list", { name: "Mono collection profile mods" })).toHaveTextContent(
+      "Nexus file 9302",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Start collection download" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Both" }));
+
+    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledTimes(2));
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(93, 9302, "Mono");
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(93, 9301, "IL2CPP");
+    expect(apiMocks.downloadNexusModToLibrary).not.toHaveBeenCalledWith(93, 9303, "Mono");
+
+    await waitFor(() => {
+      const requests = apiMocks.saveModProfile.mock.calls.map(([request]) => request);
+      expect(requests.some((request) =>
+        request.runtime === "Mono"
+        && request.manifest.collection.items.some((item: {
+          collectionFileId?: string;
+          nexusFileId: string;
+          status: string;
+        }) => item.collectionFileId === "9301" && item.nexusFileId === "9302" && item.status === "ready")
+      )).toBe(true);
+      expect(requests.some((request) =>
+        request.runtime === "IL2CPP"
+        && request.manifest.collection.items.some((item: {
+          collectionFileId?: string;
+          nexusFileId: string;
+          status: string;
+        }) => item.collectionFileId === "9301" && item.nexusFileId === "9301" && item.status === "ready")
+      )).toBe(true);
+    });
+  });
+
+  it("previews runtime-specific collection resolution and renders the runtime chooser with visible dialog anatomy", async () => {
+    const collection = {
+      id: 26,
+      slug: "runtime-preview",
+      name: "Runtime Preview",
+      summary: "Compare runtime resolution.",
+      curator_name: "Curator",
+      endorsements: 1,
+      total_downloads: 5,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [makeEntry({
+        storageId: "runtime-preview-mono",
+        displayName: "Runtime Mod",
+        source: "nexusmods",
+        sourceId: "93",
+        nexusFileId: "9301",
+        sourceVersion: "1.0.0",
+        availableRuntimes: ["Mono"],
+        storageIdsByRuntime: { Mono: "runtime-preview-mono" },
+        installedInByRuntime: { Mono: [] },
+        filesByRuntime: { Mono: ["RuntimeMod.dll"] },
+      })],
+    });
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/mono",
+        runtime: "Mono",
+        status: "completed",
+      },
+      {
+        id: "env-il2cpp",
+        name: "Main IL2CPP",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/il2cpp",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { isPremium: true, canDirectDownload: true, requiresSiteConfirmation: false },
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "runtime-preview-revision",
+      revisionNumber: 1,
+      modFiles: [{
+        collectionRevisionModId: "runtime-preview-mod",
+        modId: 93,
+        fileId: 9301,
+        modName: "Runtime Mod",
+        fileName: "RuntimeMod.zip",
+        version: "1.0.0",
+        optional: false,
+        available: true,
+      }],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Runtime Preview")).closest('[role="button"]')!);
+
+    expect(await screen.findByRole("heading", { name: "Profile preview" })).toBeTruthy();
+    expect(screen.getByText("1 mod differs by runtime")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Mono collection profile mods" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show Mono profile list" }));
+    expect(screen.getByRole("list", { name: "Mono collection profile mods" })).toHaveTextContent(
+      "Library · Nexus Mods",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show IL2CPP profile list" }));
+    expect(screen.queryByRole("list", { name: "Mono collection profile mods" })).toBeNull();
+    expect(screen.getByRole("list", { name: "IL2CPP collection profile mods" })).toHaveTextContent(
+      "Nexus download",
+    );
+
+  });
+
+  it("renders the collection runtime chooser with the shared visible dialog anatomy", async () => {
+    const collection = {
+      id: 27,
+      slug: "runtime-chooser",
+      name: "Runtime Chooser",
+      summary: "Choose a profile runtime.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/mono",
+        runtime: "Mono",
+        status: "completed",
+      },
+      {
+        id: "env-il2cpp",
+        name: "Main IL2CPP",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/il2cpp",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "runtime-chooser-revision",
+      revisionNumber: 1,
+      modFiles: [{
+        collectionRevisionModId: "runtime-chooser-mod",
+        modId: 94,
+        fileId: 9401,
+        modName: "Chooser Mod",
+        fileName: "ChooserMod.zip",
+        version: "1.0.0",
+        optional: false,
+        available: true,
+      }],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Runtime Chooser")).closest('[role="button"]')!);
+    fireEvent.click(await screen.findByRole("button", { name: "Create profile & choose mods" }));
+
+    const dialogTitle = await screen.findByRole("heading", { name: "Choose collection profile runtime" });
+    expect(dialogTitle.closest(".modal-header")).toHaveClass("app-dialog__header");
+    expect(screen.getByText(/Collection profiles are runtime-specific/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close collection runtime dialog" })).toBeTruthy();
   });
 
   it("keeps a partial collection profile when a later Premium file fails", async () => {
@@ -1635,9 +2093,9 @@ describe("ModLibraryOverlay", () => {
       )!,
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: "Download collection" }),
+      await screen.findByRole("button", { name: "Start collection download" }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Create & Open Profile" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
 
     expect(
       await screen.findByText("Collection Profile Partially Staged"),
@@ -1645,10 +2103,20 @@ describe("ModLibraryOverlay", () => {
     expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
       71,
       7101,
-      undefined,
+      "Mono",
     );
-    expect(apiMocks.saveModProfile).toHaveBeenCalledTimes(2);
+    expect(apiMocks.saveModProfile.mock.calls.length).toBeGreaterThanOrEqual(4);
     const profileCalls = apiMocks.saveModProfile.mock.calls;
+    expect(profileCalls.some(([request]) =>
+      request.manifest.collection.items.some((item: { nexusFileId: string; status: string }) =>
+        item.nexusFileId === "7101" && item.status === "downloading"
+      )
+    )).toBe(true);
+    expect(profileCalls.some(([request]) =>
+      request.manifest.collection.items.some((item: { nexusFileId: string; status: string }) =>
+        item.nexusFileId === "7101" && item.status === "error"
+      )
+    )).toBe(true);
     const savedPartial = profileCalls[profileCalls.length - 1][0];
     expect(savedPartial.profileId).toBe("profile-test");
     expect(savedPartial.manifest.items).toEqual(
@@ -1736,12 +2204,7 @@ describe("ModLibraryOverlay", () => {
         '[role="button"]',
       )!,
     );
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Start collection download",
-      }),
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Create & Open Profile" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create profile & choose mods" }));
 
     await waitFor(() => {
       expect(apiMocks.saveModProfile).toHaveBeenCalledWith(
@@ -1818,7 +2281,7 @@ describe("ModLibraryOverlay", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Keep Nexus" })[0]);
     fireEvent.click(screen.getAllByRole("button", { name: "Use Thunderstore" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Start collection download" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Create & Open Profile" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
 
     await waitFor(() => expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledTimes(2));
     expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(

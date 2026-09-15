@@ -7136,6 +7136,40 @@ exit 1
         Ok(())
     }
 
+    /// Removes one tracked mod file from an environment without uninstalling the
+    /// rest of its shared-library package. Profile reconciliation uses this for
+    /// an explicitly excluded file when another file from the same package is kept.
+    pub async fn delete_mod_file_only(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
+        let mods_directory = self.get_mods_directory(game_dir);
+        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
+        let enabled_path = mods_directory.join(&relative_mod_path);
+        let disabled_path = PathBuf::from(format!("{}.disabled", enabled_path.to_string_lossy()));
+        let file_to_delete = if self.path_exists_or_symlink(&enabled_path).await {
+            enabled_path
+        } else if self.path_exists_or_symlink(&disabled_path).await {
+            disabled_path
+        } else {
+            return Err(anyhow::anyhow!("Mod file not found"));
+        };
+
+        if !self
+            .managed_mutation_path_is_inside_environment(&file_to_delete, game_dir)
+            .await
+        {
+            anyhow::bail!("Refusing to remove a mod path outside the environment");
+        }
+        self.remove_path_if_exists(&file_to_delete).await?;
+
+        let mut metadata_map = self
+            .load_mod_metadata(&mods_directory)
+            .await
+            .unwrap_or_else(|_| HashMap::new());
+        metadata_map.remove(mod_file_name);
+        self.save_mod_metadata(&mods_directory, &metadata_map)
+            .await?;
+        Ok(())
+    }
+
     pub async fn disable_mod(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
         safe_mod_relative_dll_path(mod_file_name)?;
 

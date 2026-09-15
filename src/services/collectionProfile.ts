@@ -3,6 +3,7 @@ import type {
   ModProfileCollectionThunderstoreMatch,
   ModProfileItem,
   NexusCollectionModFile,
+  NexusModFile,
   Runtime,
   StoredModProfile,
 } from '../types';
@@ -37,6 +38,70 @@ export function normalizeCollectionVersion(value: string | null | undefined): st
 
 export function collectionFileKey(file: NexusCollectionModFile): string {
   return file.collectionRevisionModId || `${file.modId ?? 0}:${file.fileId}`;
+}
+
+export type CollectionNexusRuntime = 'IL2CPP' | 'Mono';
+
+export interface ResolvedCollectionNexusFile {
+  fileId: number;
+  fileName: string;
+  version: string;
+  isCollectionFile: boolean;
+}
+
+export function inferNexusFileRuntime(
+  ...values: Array<string | null | undefined>
+): CollectionNexusRuntime | null {
+  const identity = values.join(' ').toLowerCase();
+  if (/il\s*2\s*cpp/.test(identity)) return 'IL2CPP';
+  if (/(^|[^a-z0-9])mono([^a-z0-9]|$)/.test(identity)) return 'Mono';
+  return null;
+}
+
+export function resolveCollectionNexusFileForRuntime(
+  collectionFile: NexusCollectionModFile,
+  files: NexusModFile[] | null | undefined,
+  runtime: CollectionNexusRuntime,
+): ResolvedCollectionNexusFile | null {
+  const collectionRuntime = inferNexusFileRuntime(
+    collectionFile.fileName,
+    collectionFile.modName,
+  );
+  const original = files?.find((file) => file.file_id === collectionFile.fileId);
+  const originalRuntime = inferNexusFileRuntime(
+    original?.file_name,
+    original?.name,
+    collectionFile.fileName,
+    collectionFile.modName,
+  );
+  const originalResolution: ResolvedCollectionNexusFile = {
+    fileId: collectionFile.fileId,
+    fileName: original?.file_name || original?.name || collectionFile.fileName,
+    version: original?.version || original?.mod_version || collectionFile.version,
+    isCollectionFile: true,
+  };
+
+  if ((originalRuntime ?? collectionRuntime) === null || (originalRuntime ?? collectionRuntime) === runtime) {
+    return originalResolution;
+  }
+  if (!files) return null;
+
+  const requestedVersion = normalizeCollectionVersion(collectionFile.version);
+  const candidates = files
+    .filter((file) => normalizeCollectionVersion(file.version || file.mod_version) === requestedVersion)
+    .filter((file) => inferNexusFileRuntime(file.file_name, file.name) === runtime)
+    .sort((left, right) => {
+      if (left.is_primary !== right.is_primary) return left.is_primary ? -1 : 1;
+      return (right.uploaded_timestamp ?? 0) - (left.uploaded_timestamp ?? 0);
+    });
+  const resolved = candidates[0];
+  if (!resolved) return null;
+  return {
+    fileId: resolved.file_id,
+    fileName: resolved.file_name || resolved.name,
+    version: resolved.version || resolved.mod_version || collectionFile.version,
+    isCollectionFile: resolved.file_id === collectionFile.fileId,
+  };
 }
 
 function runtimeMatches(entryRuntime: Runtime, runtime: 'IL2CPP' | 'Mono'): boolean {

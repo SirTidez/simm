@@ -1208,10 +1208,14 @@ pub struct ModProfileCollection {
 pub struct ModProfileCollectionItem {
     pub key: String,
     pub nexus_mod_id: Option<u32>,
+    #[serde(default)]
+    pub collection_file_id: Option<String>,
     pub nexus_file_id: String,
     pub requested_name: String,
     pub requested_author: Option<String>,
     pub requested_version: String,
+    #[serde(default)]
+    pub requested_size_in_bytes: Option<u64>,
     pub optional: bool,
     pub selected: bool,
     pub source_choice: String,
@@ -1322,7 +1326,17 @@ pub struct ModProfileImportPlan {
     pub profile: ModProfileInfo,
     pub target_environment_id: Option<String>,
     pub items: Vec<ModProfileImportPlanItem>,
+    #[serde(default)]
+    pub removals: Vec<ModProfileRemovalPlanItem>,
     pub summary: ModProfileImportSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileRemovalPlanItem {
+    pub item: ModProfileItem,
+    pub recoverable: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1369,6 +1383,7 @@ pub struct ModProfileApplyRequest {
 pub struct ModProfileApplyResult {
     pub plan: ModProfileImportPlan,
     pub installed: usize,
+    pub removed: usize,
     pub skipped: usize,
     pub unresolved: usize,
     pub messages: Vec<String>,
