@@ -1,6 +1,6 @@
 ---
 name: simmrust-workbench
-description: Route broad work in the SIMM Tauri/React/Rust repo to the right focused SIMM skill and validation path. Use for ambiguous or cross-cutting SIMM tasks involving frontend/backend contracts, runtime-aware mod library behavior, Nexus/FOMOD debugging, releases/updater workflows, desktop UI changes, or when Codex needs a repo-specific starting checklist before editing.
+description: "Coordinate SIMM repository work. Use when a task spans IPC, mod-library behavior, platform parity, releases, or desktop UI validation."
 ---
 
 # SIMM Workbench
@@ -9,7 +9,7 @@ description: Route broad work in the SIMM Tauri/React/Rust repo to the right foc
 
 Ground in the repo before choosing a path:
 
-1. Read `AGENTS.md`, `ARCHITECTURE.md`, and the changed or likely touched files.
+1. Read `AGENTS.md` and the affected files; use `ARCHITECTURE.md` when the task crosses subsystem boundaries.
 2. Check `git status --short` and preserve unrelated user changes.
 3. Classify the task by the routing table below.
 4. Pick the narrowest focused skill, then run the matching validation for the touched surface.

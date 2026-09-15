@@ -1,6 +1,6 @@
 ---
 name: simmrust-desktop-ui-validation
-description: Design, implement, or review SIMM desktop UI changes using the app's native utility direction, existing React/Tauri boundaries, overlay architecture, CSS system, and real Tauri smoke-test concerns. Use for app shell, overlays, mod library UI, environment UI, logs/configuration/accounts/settings screens, responsive desktop layout, or UI ship-readiness work.
+description: "Design and validate SIMM desktop UI. Use when changing app layout, overlays, interaction states, or responsive behavior that needs real Tauri-host evidence."
 ---
 
 # SIMM Desktop UI Validation

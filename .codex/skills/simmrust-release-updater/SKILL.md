@@ -1,6 +1,6 @@
 ---
 name: simmrust-release-updater
-description: Prepare, debug, and review SIMM changelog, versioning, release notes, GitHub Actions release workflows, Tauri updater manifests, Windows NSIS installer artifacts, and CI failures. Use for release or beta release tasks, updater JSON, signed installer artifacts, workflow PowerShell JSON mutation, changelog backfill, contributor credit normalization, or version alignment.
+description: "Prepare and diagnose SIMM releases. Use when changing version metadata, release workflows, signed installers, updater feeds, or changelogs."
 ---
 
 # SIMM Release Updater
