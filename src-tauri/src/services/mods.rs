@@ -3805,7 +3805,10 @@ impl ModsService {
             }
         };
 
-        let storage_dir = PathBuf::from(settings.default_download_dir).join("Mods");
+        let storage_dir = PathBuf::from(SettingsService::normalize_download_dir(
+            &settings.default_download_dir,
+        ))
+        .join("Mods");
         fs::create_dir_all(&storage_dir)
             .await
             .context("Failed to create mods storage directory")?;
