@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod cli;
 mod commands;
 mod config;
 mod db;
@@ -24,6 +25,10 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 static DEPOT_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    if let Some(exit_code) = crate::cli::run_if_requested() {
+        std::process::exit(exit_code);
+    }
+
     // Initialize global logger FIRST to capture all output
     crate::utils::global_logger::init_global_logger();
     crate::utils::global_logger::init_logger_service();
