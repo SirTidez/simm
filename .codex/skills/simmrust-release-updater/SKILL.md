@@ -16,6 +16,8 @@ description: "Prepare and diagnose SIMM releases. Use when changing version meta
 ## Invariants
 
 - Tauri 2 Windows updater artifacts are a signed installer `.exe` plus `.exe.sig`.
+- Manual Beta releases include the versioned mod integration SDK package plus separate Mono and IL2CPP bridge deployment archives.
+- Build release bridge archives from a pinned, hash-verified MelonLoader reference package.
 - Workflow JSON mutation that adds nested keys should use hashtable-shaped PowerShell objects.
 - Public changelog entries should be feature-oriented, human-readable, and free of private contributor labels.
 - Version, package metadata, changelog, and updater surfaces should stay aligned when a release changes them.
