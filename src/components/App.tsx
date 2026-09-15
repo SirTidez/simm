@@ -9,7 +9,7 @@ import {
 } from 'react';
 import type { ComponentType, ReactNode, TransitionEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { confirm, message } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
@@ -24,7 +24,11 @@ import { DownloadStatusStoreProvider, useDownloadStatusStore } from '../stores/d
 import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
-import { createAsyncListenerScope, onRuntimeSwitch } from '../services/events';
+import {
+  createAsyncListenerScope,
+  onModIntegrationRequestsChanged,
+  onRuntimeSwitch,
+} from '../services/events';
 import { logger } from '../services/logger';
 import {
   buildSetupGuideSettings,
@@ -40,6 +44,7 @@ import type {
   AppUpdateChannelPreferences,
   AppUpdatePreferences,
   AppUpdateStatus,
+  ModIntegrationRequestRecord,
   RuntimeSwitchResult,
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -201,6 +206,10 @@ const DownloadsPanel = lazyNamed(
 const ProfilesWorkspace = lazyNamed(
   () => import('./ProfilesWorkspace'),
   (module) => module.ProfilesWorkspace,
+);
+const ModIntegrationDialog = lazyNamed(
+  () => import('./ModIntegrationDialog'),
+  (module) => module.ModIntegrationDialog,
 );
 
 function WorkspacePanelFallback() {
@@ -1363,6 +1372,7 @@ function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUti
 }
 
 function AppContent() {
+  const [appWindow] = useState(() => getCurrentWindow());
   type PendingNexusRuntimeSelection = {
     nxmUrl: string;
     kind: 'library' | 'install';
@@ -1415,6 +1425,8 @@ function AppContent() {
   const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
   const [runtimeSwitchNotice, setRuntimeSwitchNotice] = useState<RuntimeSwitchResult | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
+  const [modIntegrationNotice, setModIntegrationNotice] = useState<ModIntegrationRequestRecord | null>(null);
+  const [modIntegrationReviewEnvironmentId, setModIntegrationReviewEnvironmentId] = useState<string | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
   const [dismissedAppUpdateVersions, setDismissedAppUpdateVersions] = useState<Partial<Record<AppUpdateChannel, string>>>({});
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
@@ -1427,6 +1439,9 @@ function AppContent() {
   const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
   const [closePrompt, setClosePrompt] = useState({ isOpen: false, remember: false });
   const closeRequestInFlightRef = useRef(false);
+  const dismissedModIntegrationRequestsRef = useRef(new Set<string>());
+  const notifiedModIntegrationRequestsRef = useRef(new Set<string>());
+  const modIntegrationRefreshGenerationRef = useRef(0);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
   const startupSetupCheckedRef = useRef(false);
@@ -1515,6 +1530,85 @@ function AppContent() {
     });
     return () => unlisten?.();
   }, []);
+  const refreshPendingModIntegrationRequest = useCallback(async (preferredEnvironmentId?: string) => {
+    const environmentIds = environments
+      .filter((environment) => environment.status === 'completed')
+      .map((environment) => environment.id);
+    if (preferredEnvironmentId && !environmentIds.includes(preferredEnvironmentId)) {
+      environmentIds.unshift(preferredEnvironmentId);
+    } else if (preferredEnvironmentId) {
+      environmentIds.splice(environmentIds.indexOf(preferredEnvironmentId), 1);
+      environmentIds.unshift(preferredEnvironmentId);
+    }
+
+    const generation = ++modIntegrationRefreshGenerationRef.current;
+    const requestGroups = await Promise.all(environmentIds.map(async (environmentId) => {
+      try {
+        const requests = await ApiService.listModIntegrationRequests(environmentId);
+        return Array.isArray(requests) ? requests : [];
+      } catch (error) {
+        logger.warn('Failed to load pending mod integration requests', {
+          environmentId,
+          error: getErrorMessage(error, 'request lookup failed'),
+        });
+        return [];
+      }
+    }));
+
+    if (generation !== modIntegrationRefreshGenerationRef.current) return null;
+
+    const pendingRequests = requestGroups
+      .flat()
+      .filter((request) => (
+        request.status === 'awaiting-user-approval' || request.status === 'awaiting-user-source'
+      ))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    const visibleRequests = pendingRequests.filter(
+      (request) => !dismissedModIntegrationRequestsRef.current.has(request.id),
+    );
+    setModIntegrationNotice((current) => {
+      if (
+        current
+        && !dismissedModIntegrationRequestsRef.current.has(current.id)
+        && pendingRequests.some((request) => request.id === current.id)
+      ) {
+        return current;
+      }
+      return visibleRequests[0] ?? null;
+    });
+    return preferredEnvironmentId
+      ? visibleRequests.find((request) => request.environmentId === preferredEnvironmentId) ?? null
+      : visibleRequests[0] ?? null;
+  }, [environments]);
+  useEffect(() => {
+    const listeners = createAsyncListenerScope((error) => {
+      logger.warn('Failed to listen for mod integration requests', {
+        error: getErrorMessage(error, 'listener setup failed'),
+      });
+    });
+
+    void refreshPendingModIntegrationRequest();
+    listeners.register(async () => {
+      const unlisten = await onModIntegrationRequestsChanged(({ environmentId }) => {
+        void refreshPendingModIntegrationRequest(environmentId).then((request) => {
+          if (!request || notifiedModIntegrationRequestsRef.current.has(request.id)) return;
+          notifiedModIntegrationRequestsRef.current.add(request.id);
+          void appWindow.requestUserAttention(UserAttentionType.Informational).catch((error) => {
+            logger.warn('Failed to request attention for a mod update approval', {
+              environmentId,
+              error: getErrorMessage(error, 'attention request failed'),
+            });
+          });
+        });
+      });
+      // Take a second snapshot after the subscription is active so a request cannot
+      // fall between the initial database read and listener registration.
+      void refreshPendingModIntegrationRequest();
+      return unlisten;
+    });
+
+    return listeners.dispose;
+  }, [appWindow, refreshPendingModIntegrationRequest]);
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
       return false;
@@ -2817,6 +2911,108 @@ function AppContent() {
           }))}
         />
       )}
+
+      {modIntegrationNotice && !modIntegrationReviewEnvironmentId && (() => {
+        const environment = environments.find(
+          (item) => item.id === modIntegrationNotice.environmentId,
+        );
+        return (
+          <section
+            className="mod-integration-notice"
+            role="status"
+            aria-live="assertive"
+            aria-labelledby="mod-integration-notice-title"
+          >
+            <header className="mod-integration-notice__header">
+              <div>
+                <span className="mod-integration-notice__eyebrow">Your decision is needed</span>
+                <strong id="mod-integration-notice-title">
+                  {modIntegrationNotice.operation === 'requestManagement'
+                    ? 'Mod management request'
+                    : 'Mod update request'}
+                </strong>
+              </div>
+              <SimmIconButton
+                className="window-control-btn mod-integration-notice__dismiss"
+                onClick={() => {
+                  dismissedModIntegrationRequestsRef.current.add(modIntegrationNotice.id);
+                  setModIntegrationNotice(null);
+                  void refreshPendingModIntegrationRequest();
+                }}
+                aria-label="Remind me about this mod update later"
+                title="Remind me later"
+              >
+                <Icon name="times" />
+              </SimmIconButton>
+            </header>
+            <p>
+              <strong>{modIntegrationNotice.modName}</strong>{' '}
+              {modIntegrationNotice.operation === 'requestManagement'
+                ? 'asked SIMM to manage its existing local installation'
+                : 'requested an update'}
+              {modIntegrationNotice.operation !== 'requestManagement'
+                && modIntegrationNotice.currentVersion
+                && modIntegrationNotice.targetVersion
+                ? ` from ${modIntegrationNotice.currentVersion} to ${modIntegrationNotice.targetVersion}`
+                : ''}
+              {environment ? ` for ${environment.name}` : ''}.
+            </p>
+            <div className="mod-integration-notice__actions">
+              <SimmButton
+                variant="secondary"
+                className="btn btn-secondary btn-small"
+                onClick={() => {
+                  dismissedModIntegrationRequestsRef.current.add(modIntegrationNotice.id);
+                  setModIntegrationNotice(null);
+                  void refreshPendingModIntegrationRequest();
+                }}
+              >
+                Later
+              </SimmButton>
+              <SimmButton
+                className="btn btn-primary btn-small"
+                onClick={() => setModIntegrationReviewEnvironmentId(modIntegrationNotice.environmentId)}
+                disabled={!environment}
+              >
+                Review request
+              </SimmButton>
+            </div>
+          </section>
+        );
+      })()}
+
+      {modIntegrationReviewEnvironmentId && (() => {
+        const environment = environments.find(
+          (item) => item.id === modIntegrationReviewEnvironmentId,
+        );
+        return environment ? (
+          <Suspense fallback={null}>
+            <ModIntegrationDialog
+              isOpen={true}
+              environment={environment}
+              onClose={() => setModIntegrationReviewEnvironmentId(null)}
+              onManageRequest={(request: ModIntegrationRequestRecord) => {
+                dismissedModIntegrationRequestsRef.current.add(request.id);
+                setModIntegrationNotice(null);
+                setModIntegrationReviewEnvironmentId(null);
+                pushWorkspace(
+                  { view: 'mods', environmentId: request.environmentId },
+                  {
+                    modsState: {
+                      modsTab: 'installed',
+                      localSourceLinkRequest: {
+                        requestId: request.id,
+                        fileName: request.modFileName,
+                        currentVersion: request.currentVersion,
+                      },
+                    },
+                  },
+                );
+              }}
+            />
+          </Suspense>
+        ) : null;
+      })()}
 
       {appNotice && (
         <div className="app-notice app-notice--danger" role="alert" aria-live="assertive">

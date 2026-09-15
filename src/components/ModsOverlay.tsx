@@ -5,6 +5,7 @@ import {
   useRef,
   useCallback,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
@@ -34,7 +35,7 @@ import {
   type SecurityScanReportOption,
 } from './SecurityScanReportOverlay';
 import { type SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
-import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
+import { resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { getSecurityBadgeConfig } from './securityScanHelpers';
@@ -77,6 +78,15 @@ interface ModInfo {
   tags?: string[];
   installedAt?: number;
   securityScan?: SecurityScanSummary;
+}
+
+function installedModKey(mod: Pick<ModInfo, 'fileName' | 'path'>): string {
+  return `${mod.fileName}-${mod.path}`;
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement
+    && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
 }
 
 type ModUpdateInfo = {
@@ -236,11 +246,28 @@ export interface ModsOverlayNavigationState {
   modListFilter?: 'all' | 'updates' | 'enabled' | 'disabled';
   installedSearchTerm?: string;
   activeModView?: ModViewState | null;
+  localSourceLinkRequest?: {
+    requestId: string;
+    fileName: string;
+    currentVersion?: string;
+  };
 }
 
 type LocalSourceLinkStage = 'chooseSource' | 'edit' | 'confirmMismatch' | 'pickOwnership' | 'saving';
-type LocalSourceLinkStrategy = 'existing' | 'manual' | null;
+type LocalSourceLinkStrategy = 'existing' | 'discovered' | 'manual' | null;
 const LOCAL_SOURCE_VERSION_UNSELECTED = '__select-installed-version__';
+
+interface LocalSourceDiscoveryCandidate {
+  id: string;
+  source: 'nexusmods' | 'thunderstore';
+  displayName: string;
+  author: string;
+  sourceUrl: string;
+  latestVersion?: string;
+  exactVersion: boolean;
+  highConfidence: boolean;
+  runtimes: Array<'IL2CPP' | 'Mono'>;
+}
 
 interface LocalSourceLinkState {
   modId: string;
@@ -250,9 +277,12 @@ interface LocalSourceLinkState {
   stage: LocalSourceLinkStage;
   strategy: LocalSourceLinkStrategy;
   loadingExistingHint: boolean;
+  loadingDiscovery: boolean;
   loadingPreview: boolean;
   loadingOwnership: boolean;
   existingSourceHint?: LocalModSourcePreview | null;
+  discoveredSources: LocalSourceDiscoveryCandidate[];
+  managementRequestId?: string;
   preview?: LocalModSourcePreview;
   selectedVersion?: string;
   customVersion: string;
@@ -499,7 +529,7 @@ const runtimeSuffixPatterns = [
   /\s+(mono|il2cpp)\s*$/i,
 ];
 
-function normalizeModNameKey(name: string): string {
+function stripRuntimeSuffix(name: string): string {
   let normalized = name;
   let changed = true;
   while (changed) {
@@ -512,7 +542,14 @@ function normalizeModNameKey(name: string): string {
       }
     }
   }
-  return normalized.toLowerCase();
+  return normalized;
+}
+
+function normalizeModNameKey(name: string): string {
+  return stripRuntimeSuffix(name)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
 }
 
 function normalizeVersionToken(value?: string): string {
@@ -532,6 +569,10 @@ function normalizeVersionToken(value?: string): string {
     normalized = normalized.slice(1);
   }
   return normalized.toLowerCase();
+}
+
+function normalizeAuthorKey(value?: string): string {
+  return (value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] {
@@ -588,6 +629,7 @@ export function ModsOverlay({
   }, [navigationState?.searchSource]);
 
   const [mods, setMods] = useState<ModInfo[]>([]);
+  const [hasLoadedMods, setHasLoadedMods] = useState(false);
   const [downloadedMods, setDownloadedMods] = useState<ModLibraryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -638,6 +680,8 @@ export function ModsOverlay({
   const [modsTab, setModsTab] = useState<ModsTab>(() => navigationState?.modsTab ?? 'installed');
   const [installedSearchTerm, setInstalledSearchTerm] = useState(() => navigationState?.installedSearchTerm ?? '');
   const [activeModView, setActiveModView] = useState<ModViewState | null>(() => navigationState?.activeModView ?? null);
+  const [selectedInstalledModKeys, setSelectedInstalledModKeys] = useState<Set<string>>(() => new Set());
+  const [bulkModAction, setBulkModAction] = useState<'enable' | 'disable' | 'uninstall' | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
   const activeLoadRequestRef = useRef(0);
   const modsScrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -646,8 +690,13 @@ export function ModsOverlay({
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
   const uploadBatchResultsRef = useRef<ManualUploadBatchResult[]>([]);
+  const installedSelectionAnchorRef = useRef<string | null>(null);
+  const handledLocalSourceRequestRef = useRef<string | null>(null);
   const navigationChangeHandlerRef = useRef(onNavigationStateChange);
   const [localSourceLinkState, setLocalSourceLinkState] = useState<LocalSourceLinkState | null>(null);
+  const [pendingLocalSourceLinkRequest, setPendingLocalSourceLinkRequest] = useState(
+    () => navigationState?.localSourceLinkRequest,
+  );
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
   const adjustedProfileManifest = profileExport.manifest ? {
     ...profileExport.manifest,
@@ -723,6 +772,13 @@ export function ModsOverlay({
   useEffect(() => {
     navigationChangeHandlerRef.current?.(reportedNavigationState);
   }, [reportedNavigationState]);
+
+  useEffect(() => {
+    const request = navigationState?.localSourceLinkRequest;
+    if (request && handledLocalSourceRequestRef.current !== request.requestId) {
+      setPendingLocalSourceLinkRequest(request);
+    }
+  }, [navigationState?.localSourceLinkRequest]);
   const loadEnvironment = useCallback(async () => {
     try {
       const env = await ApiService.getEnvironment(environmentId);
@@ -1065,6 +1121,7 @@ export function ModsOverlay({
       }));
       setMods(previous => mergeModSnapshots(previous, normalizedMods));
       setModsDirectory(result.modsDirectory);
+      setHasLoadedMods(true);
     } catch (err) {
       if (requestId !== activeLoadRequestRef.current) {
         return;
@@ -1075,6 +1132,7 @@ export function ModsOverlay({
       } else {
         console.warn('Failed to refresh installed mods:', err);
       }
+      setHasLoadedMods(true);
     } finally {
       if (showSpinner && requestId === activeLoadRequestRef.current) {
         setLoading(false);
@@ -2049,18 +2107,22 @@ export function ModsOverlay({
     setLocalSourceLinkState(null);
   }, []);
 
-  const openLocalSourceLink = useCallback((mod: ModInfo) => {
+  const openLocalSourceLink = useCallback((mod: ModInfo, managementRequestId?: string) => {
+    const modId = `${mod.fileName}-${mod.path}`;
     setLocalSourceLinkState({
-      modId: `${mod.fileName}-${mod.path}`,
+      modId,
       modFileName: mod.fileName,
       sourceUrl: mod.sourceUrl || '',
       sourceUrlTouched: false,
       stage: 'chooseSource',
       strategy: null,
       loadingExistingHint: true,
+      loadingDiscovery: true,
       loadingPreview: false,
       loadingOwnership: false,
       existingSourceHint: null,
+      discoveredSources: [],
+      managementRequestId,
       preview: undefined,
       selectedVersion: undefined,
       customVersion: '',
@@ -2071,32 +2133,111 @@ export function ModsOverlay({
     void ApiService.getLocalModExistingSourceHint(environmentId, mod.fileName)
       .then((hint) => {
         setLocalSourceLinkState((current) => {
-          if (!current || current.modId !== `${mod.fileName}-${mod.path}`) {
+          if (!current || current.modId !== modId) {
             return current;
           }
           return {
             ...current,
             loadingExistingHint: false,
             existingSourceHint: hint,
-            stage: hint ? 'chooseSource' : 'edit',
           };
         });
       })
       .catch((err) => {
         setLocalSourceLinkState((current) => {
-          if (!current || current.modId !== `${mod.fileName}-${mod.path}`) {
+          if (!current || current.modId !== modId) {
             return current;
           }
           return {
             ...current,
             loadingExistingHint: false,
             existingSourceHint: null,
-            stage: 'edit',
             error: err instanceof Error ? err.message : 'Failed to load existing source hint.',
           };
         });
       });
-  }, [environmentId]);
+
+    const cleanName = stripRuntimeSuffix(
+      (mod.name || mod.fileName).replace(/\.dll(?:\.disabled)?$/i, '').trim(),
+    );
+    void Promise.allSettled([
+      ApiService.searchNexusMods('schedule1', cleanName),
+      ApiService.searchThunderstoreByRuntime('schedule-i', cleanName),
+    ]).then(([nexusResult, thunderstoreResult]) => {
+      const localName = normalizeModNameKey(cleanName);
+      const localAuthor = normalizeAuthorKey(mod.author);
+      const installedVersion = normalizeVersionToken(mod.version);
+      const candidates: LocalSourceDiscoveryCandidate[] = [];
+
+      if (nexusResult.status === 'fulfilled') {
+        for (const remote of nexusResult.value.mods as NexusMod[]) {
+          if (normalizeModNameKey(remote.name) !== localName) continue;
+          const remoteAuthor = normalizeAuthorKey(remote.author || remote.uploader);
+          candidates.push({
+            id: `nexusmods:${remote.mod_id}`,
+            source: 'nexusmods',
+            displayName: remote.name,
+            author: remote.author || remote.uploader || 'Unknown author',
+            sourceUrl: `https://www.nexusmods.com/schedule1/mods/${remote.mod_id}`,
+            latestVersion: remote.version,
+            exactVersion: !!installedVersion && normalizeVersionToken(remote.version) === installedVersion,
+            highConfidence: !!localAuthor && localAuthor === remoteAuthor,
+            runtimes: [],
+          });
+        }
+      }
+
+      if (thunderstoreResult.status === 'fulfilled') {
+        const byUrl = new Map<string, LocalSourceDiscoveryCandidate>();
+        for (const runtime of ['IL2CPP', 'Mono'] as const) {
+          for (const remote of (thunderstoreResult.value.packagesByRuntime[runtime] || []) as ThunderstorePackage[]) {
+            if (normalizeModNameKey(remote.name) !== localName) continue;
+            const remoteAuthor = normalizeAuthorKey(remote.owner);
+            const existing = byUrl.get(remote.package_url);
+            if (existing) {
+              if (!existing.runtimes.includes(runtime)) existing.runtimes.push(runtime);
+              existing.exactVersion ||= remote.versions.some(
+                (version) => normalizeVersionToken(version.version_number) === installedVersion,
+              );
+              continue;
+            }
+            const latestVersion = remote.versions[0]?.version_number;
+            byUrl.set(remote.package_url, {
+              id: `thunderstore:${remote.uuid4}`,
+              source: 'thunderstore',
+              displayName: remote.name,
+              author: remote.owner,
+              sourceUrl: remote.package_url,
+              latestVersion,
+              exactVersion: !!installedVersion && remote.versions.some(
+                (version) => normalizeVersionToken(version.version_number) === installedVersion,
+              ),
+              highConfidence: !!localAuthor && localAuthor === remoteAuthor,
+              runtimes: [runtime],
+            });
+          }
+        }
+        candidates.push(...byUrl.values());
+      }
+
+      candidates.sort((left, right) => Number(right.highConfidence) - Number(left.highConfidence)
+        || Number(right.exactVersion) - Number(left.exactVersion)
+        || Number(right.runtimes.includes(environment?.runtime === 'Mono' ? 'Mono' : 'IL2CPP'))
+          - Number(left.runtimes.includes(environment?.runtime === 'Mono' ? 'Mono' : 'IL2CPP'))
+        || left.displayName.localeCompare(right.displayName));
+
+      setLocalSourceLinkState((current) => current?.modId === modId ? {
+        ...current,
+        loadingDiscovery: false,
+        discoveredSources: candidates,
+        error: candidates.length === 0
+          && nexusResult.status === 'rejected'
+          && thunderstoreResult.status === 'rejected'
+          ? 'SIMM could not search Nexus Mods or Thunderstore. You can still enter a source URL.'
+          : current.error,
+      } : current);
+    });
+  }, [environment?.runtime, environmentId]);
 
   const requestLocalSourcePreview = useCallback(async (
     mod: ModInfo,
@@ -2150,6 +2291,24 @@ export function ModsOverlay({
     }
   }, [environmentId]);
 
+  const selectDiscoveredSource = useCallback((
+    mod: ModInfo,
+    candidate: LocalSourceDiscoveryCandidate,
+  ) => {
+    setLocalSourceLinkState((current) => current ? {
+      ...current,
+      strategy: 'discovered',
+      stage: 'edit',
+      sourceUrl: candidate.sourceUrl,
+      sourceUrlTouched: false,
+      preview: undefined,
+      selectedVersion: undefined,
+      customVersion: '',
+      error: null,
+    } : current);
+    void requestLocalSourcePreview(mod, candidate.sourceUrl);
+  }, [requestLocalSourcePreview]);
+
   const promoteLocalSourceLink = useCallback(async (
     mod: ModInfo,
     preview: LocalModSourcePreview,
@@ -2171,11 +2330,30 @@ export function ModsOverlay({
         selectedVersion,
         selectedOwnershipIds,
       );
-      showToast('Mod linked and added to Mod Library.');
+      let requestResolutionError: string | null = null;
+      if (localSourceLinkState?.managementRequestId) {
+        try {
+          await ApiService.resolveModIntegrationRequest(
+            localSourceLinkState.managementRequestId,
+            true,
+          );
+        } catch (err) {
+          requestResolutionError = getErrorMessage(
+            err,
+            'SIMM could not close the original management request.',
+          );
+        }
+      }
+      showToast(requestResolutionError
+        ? 'Mod linked and added to Mod Library; the original request still needs review.'
+        : 'Mod linked and added to Mod Library.');
       closeLocalSourceLink();
       await loadInstalledMods(false, true);
       await refreshDownloadedLibrary();
       await loadCachedModUpdates();
+      if (requestResolutionError) {
+        setError(requestResolutionError);
+      }
       onModsChanged?.();
     } catch (err) {
       setLocalSourceLinkState((current) => current ? {
@@ -2192,6 +2370,7 @@ export function ModsOverlay({
     loadInstalledMods,
     onModsChanged,
     showToast,
+    localSourceLinkState?.managementRequestId,
   ]);
 
   const prepareLocalOwnershipStep = useCallback(async (
@@ -2270,7 +2449,7 @@ export function ModsOverlay({
     return !!updateInfo?.updateAvailable && canAutoUpdate;
   }).length;
 
-  const filteredMods = [...mods]
+  const filteredMods = useMemo(() => [...mods]
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
     .filter((mod) => {
       const updateAvailable = !!modUpdates.get(mod.fileName)?.updateAvailable;
@@ -2300,12 +2479,12 @@ export function ModsOverlay({
         || mod.fileName.toLowerCase().includes(query)
         || (mod.summary || '').toLowerCase().includes(query)
         || (mod.version || '').toLowerCase().includes(query);
-    });
+    }), [installedSearchTerm, modListFilter, modUpdates, mods, modsTab]);
 
   const openInstalledModView = useCallback((mod: ModInfo) => {
     const update = modUpdates.get(mod.fileName);
     openModView({
-      id: `${mod.fileName}-${mod.path}`,
+      id: installedModKey(mod),
       storageId: mod.modStorageId,
       name: mod.name,
       source: mod.source || 'local',
@@ -2325,35 +2504,258 @@ export function ModsOverlay({
       kind: 'installed',
     });
   }, [modUpdates, openModView]);
-  const selectedInstalledMod = useMemo(() => {
-    if (!isOpen || activeModView?.kind !== 'installed') {
-      return null;
-    }
-    return mods.find((mod) => `${mod.fileName}-${mod.path}` === activeModView.id) || null;
-  }, [activeModView, isOpen, mods]);
+  const selectedInstalledMods = useMemo(
+    () => filteredMods.filter((mod) => selectedInstalledModKeys.has(installedModKey(mod))),
+    [filteredMods, selectedInstalledModKeys],
+  );
+  const selectedInstalledMod = selectedInstalledMods.length === 1 ? selectedInstalledMods[0] : null;
   const selectedInstalledSecurityBadge = getSecurityBadgeConfig(selectedInstalledMod?.securityScan);
+
+  useEffect(() => {
+    const request = pendingLocalSourceLinkRequest;
+    if (!isOpen || !request || !hasLoadedMods || handledLocalSourceRequestRef.current === request.requestId) {
+      return;
+    }
+    const mod = mods.find((entry) => entry.fileName === request.fileName);
+    handledLocalSourceRequestRef.current = request.requestId;
+    setPendingLocalSourceLinkRequest(undefined);
+    if (!mod) {
+      setError(`The requesting mod ${request.fileName} is no longer installed in this environment.`);
+      return;
+    }
+    const modWithRequestVersion = request.currentVersion && !mod.version
+      ? { ...mod, version: request.currentVersion }
+      : mod;
+    if (modWithRequestVersion !== mod) {
+      setMods((current) => current.map((entry) => (
+        installedModKey(entry) === installedModKey(mod) ? modWithRequestVersion : entry
+      )));
+    }
+    setModsTab('installed');
+    setInstalledSearchTerm('');
+    setSelectedInstalledModKeys(new Set([installedModKey(mod)]));
+    installedSelectionAnchorRef.current = installedModKey(mod);
+    if (mod.managed) {
+      void ApiService.resolveModIntegrationRequest(request.requestId, true)
+        .then(() => showToast('This mod is already linked to a managed source.'))
+        .catch((err) => setError(getErrorMessage(err, 'Failed to complete the management request.')));
+      return;
+    }
+    openLocalSourceLink(modWithRequestVersion, request.requestId);
+  }, [
+    hasLoadedMods,
+    isOpen,
+    mods,
+    pendingLocalSourceLinkRequest,
+    openLocalSourceLink,
+    showToast,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !localSourceLinkState) {
       return;
     }
-    if (!selectedInstalledMod || `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` !== localSourceLinkState.modId) {
+    if (!selectedInstalledMod || installedModKey(selectedInstalledMod) !== localSourceLinkState.modId) {
       setLocalSourceLinkState(null);
     }
   }, [isOpen, localSourceLinkState, selectedInstalledMod]);
 
   useEffect(() => {
     if (!isOpen || filteredMods.length === 0) {
+      setSelectedInstalledModKeys((current) => current.size === 0 ? current : new Set());
+      installedSelectionAnchorRef.current = null;
       return;
     }
 
     const stillValid = activeModView?.kind === 'installed'
-      && filteredMods.some((mod) => `${mod.fileName}-${mod.path}` === activeModView.id);
+      && filteredMods.some((mod) => installedModKey(mod) === activeModView.id);
+
+    setSelectedInstalledModKeys((current) => {
+      const visibleKeys = new Set(filteredMods.map(installedModKey));
+      const next = new Set([...current].filter((key) => visibleKeys.has(key)));
+      if (next.size === 0) {
+        next.add(stillValid ? activeModView.id : installedModKey(filteredMods[0]));
+      }
+      const unchanged = next.size === current.size && [...next].every((key) => current.has(key));
+      return unchanged ? current : next;
+    });
 
     if (!stillValid) {
       openInstalledModView(filteredMods[0]);
     }
   }, [activeModView, filteredMods, isOpen, openInstalledModView]);
+
+  const selectInstalledMod = useCallback((
+    mod: ModInfo,
+    index: number,
+    modifiers: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean },
+  ) => {
+    const key = installedModKey(mod);
+    const additive = modifiers.ctrlKey || modifiers.metaKey;
+    setSelectedInstalledModKeys((current) => {
+      if (modifiers.shiftKey && installedSelectionAnchorRef.current) {
+        const anchorIndex = filteredMods.findIndex((entry) => installedModKey(entry) === installedSelectionAnchorRef.current);
+        if (anchorIndex >= 0) {
+          const start = Math.min(anchorIndex, index);
+          const end = Math.max(anchorIndex, index);
+          const next = additive ? new Set(current) : new Set<string>();
+          filteredMods.slice(start, end + 1).forEach((entry) => next.add(installedModKey(entry)));
+          return next;
+        }
+      }
+
+      installedSelectionAnchorRef.current = key;
+      if (additive) {
+        const next = new Set(current);
+        if (next.has(key) && next.size > 1) {
+          next.delete(key);
+        } else {
+          next.add(key);
+        }
+        return next;
+      }
+      return new Set([key]);
+    });
+    openInstalledModView(mod);
+  }, [filteredMods, openInstalledModView]);
+
+  const handleInstalledModRowKeyDown = useCallback((
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    mod: ModInfo,
+    index: number,
+  ) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    selectInstalledMod(mod, index, event);
+  }, [selectInstalledMod]);
+
+  useEffect(() => {
+    if (!isOpen || modsTab !== 'installed') return;
+    const handleSelectAll = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'a') return;
+      if (isEditableKeyboardTarget(event.target) || filteredMods.length === 0) return;
+      event.preventDefault();
+      setSelectedInstalledModKeys(new Set(filteredMods.map(installedModKey)));
+      installedSelectionAnchorRef.current = installedModKey(filteredMods[0]);
+      if (
+        activeModView?.kind !== 'installed'
+        || !filteredMods.some((mod) => installedModKey(mod) === activeModView.id)
+      ) {
+        openInstalledModView(filteredMods[0]);
+      }
+    };
+    window.addEventListener('keydown', handleSelectAll);
+    return () => window.removeEventListener('keydown', handleSelectAll);
+  }, [activeModView, filteredMods, isOpen, modsTab, openInstalledModView]);
+
+  const applySelectedModState = useCallback(async (disabled: boolean) => {
+    const targets = selectedInstalledMods.filter((mod) => Boolean(mod.disabled) !== disabled);
+    if (targets.length === 0) return;
+
+    setBulkModAction(disabled ? 'disable' : 'enable');
+    setError(null);
+    const succeeded = new Set<string>();
+    const failed: string[] = [];
+    try {
+      for (const mod of targets) {
+        try {
+          if (disabled) {
+            await ApiService.disableMod(environmentId, mod.fileName);
+          } else {
+            await ApiService.enableMod(environmentId, mod.fileName);
+          }
+          succeeded.add(installedModKey(mod));
+        } catch {
+          failed.push(mod.name);
+        }
+      }
+
+      if (succeeded.size > 0) {
+        setMods((current) => current.map((mod) =>
+          succeeded.has(installedModKey(mod)) ? { ...mod, disabled } : mod
+        ));
+        onModsChanged?.();
+      }
+
+      const actionLabel = disabled ? 'disabled' : 'enabled';
+      if (failed.length > 0) {
+        setError(`${succeeded.size} mod(s) ${actionLabel}; ${failed.length} failed: ${failed.join(', ')}.`);
+      } else {
+        showToast(`${succeeded.size} selected mod${succeeded.size === 1 ? '' : 's'} ${actionLabel}.`);
+      }
+    } finally {
+      setBulkModAction(null);
+    }
+  }, [environmentId, onModsChanged, selectedInstalledMods, showToast]);
+
+  const deleteSelectedMods = useCallback(async (targets: ModInfo[]) => {
+    if (targets.length === 0) return;
+    setBulkModAction('uninstall');
+    setError(null);
+    const failed: string[] = [];
+    const failedKeys = new Set<string>();
+    try {
+      for (const mod of targets) {
+        try {
+          await ApiService.deleteMod(environmentId, mod.fileName);
+        } catch {
+          failed.push(mod.name);
+          failedKeys.add(installedModKey(mod));
+        }
+      }
+
+      await loadInstalledMods(false, true);
+      await refreshDownloadedLibrary();
+      await loadCachedModUpdates();
+      if (failed.length < targets.length) {
+        onModsChanged?.();
+      }
+      setSelectedInstalledModKeys(failedKeys);
+      if (failed.length === 0) {
+        setActiveModView(null);
+        showToast(`${targets.length} selected mod${targets.length === 1 ? '' : 's'} removed from this environment.`);
+      } else {
+        setError(`${targets.length - failed.length} mod(s) removed; ${failed.length} failed: ${failed.join(', ')}.`);
+      }
+    } finally {
+      setBulkModAction(null);
+    }
+  }, [environmentId, loadCachedModUpdates, loadInstalledMods, onModsChanged, refreshDownloadedLibrary, showToast]);
+
+  const requestDeleteSelectedMods = useCallback(() => {
+    const targets = [...selectedInstalledMods];
+    if (targets.length === 0) return;
+    const managedCount = targets.filter((mod) => mod.managed || mod.modStorageId).length;
+    const unmanagedCount = targets.length - managedCount;
+    const consequences = [
+      managedCount > 0
+        ? `${managedCount} managed install${managedCount === 1 ? '' : 's'} will be removed from this environment while their shared-library downloads are retained.`
+        : null,
+      unmanagedCount > 0
+        ? `${unmanagedCount} local file${unmanagedCount === 1 ? '' : 's'} will be permanently deleted from the Mods folder.`
+        : null,
+    ].filter(Boolean).join(' ');
+    const dialog: ConfirmDialog = {
+      title: `Uninstall ${targets.length} Selected Mods?`,
+      message: consequences,
+      confirmText: `Uninstall ${targets.length} Mods`,
+      cancelText: 'Cancel',
+      onConfirm: () => deleteSelectedMods(targets),
+      readyAt: Date.now() + 200,
+    };
+    window.setTimeout(() => setConfirmDialog(dialog), 0);
+  }, [deleteSelectedMods, selectedInstalledMods]);
+
+  const collapseInstalledSelection = useCallback(() => {
+    const activeKey = activeModView?.kind === 'installed' ? activeModView.id : null;
+    const retained = selectedInstalledMods.find((mod) => installedModKey(mod) === activeKey)
+      ?? selectedInstalledMods[0];
+    if (!retained) return;
+    const retainedKey = installedModKey(retained);
+    installedSelectionAnchorRef.current = retainedKey;
+    setSelectedInstalledModKeys(new Set([retainedKey]));
+    openInstalledModView(retained);
+  }, [activeModView, openInstalledModView, selectedInstalledMods]);
 
   if (!isOpen) return null;
 
@@ -2580,6 +2982,59 @@ export function ModsOverlay({
                   </SimmButton>
                 </div>
               </div>
+              {selectedInstalledMods.length > 1 && (
+                <div className="workspace-collection__bulk-actions" role="toolbar" aria-label="Selected mod actions">
+                  <div className="workspace-collection__bulk-summary">
+                    <strong>{selectedInstalledMods.length} mods selected</strong>
+                    <span>Ctrl-click to add or remove · Shift-click for a range · Ctrl+A selects this list</span>
+                  </div>
+                  <div className="workspace-collection__bulk-buttons">
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      className="btn btn-secondary btn-small"
+                      aria-label="Enable selected mods"
+                      onClick={() => void applySelectedModState(false)}
+                      disabled={bulkModAction !== null || !selectedInstalledMods.some((mod) => mod.disabled)}
+                    >
+                      <Icon name={bulkModAction === 'enable' ? 'spinner' : 'check'} />
+                      Enable
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      className="btn btn-secondary btn-small"
+                      aria-label="Disable selected mods"
+                      onClick={() => void applySelectedModState(true)}
+                      disabled={bulkModAction !== null || !selectedInstalledMods.some((mod) => !mod.disabled)}
+                    >
+                      <Icon name={bulkModAction === 'disable' ? 'spinner' : 'toggleOff'} />
+                      Disable
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="destructive"
+                      className="btn btn-danger btn-small"
+                      aria-label="Uninstall selected mods"
+                      onClick={requestDeleteSelectedMods}
+                      disabled={bulkModAction !== null}
+                    >
+                      <Icon name={bulkModAction === 'uninstall' ? 'spinner' : 'trash'} />
+                      Uninstall
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="ghost"
+                      className="btn btn-small"
+                      aria-label="Keep current mod only"
+                      onClick={collapseInstalledSelection}
+                      disabled={bulkModAction !== null}
+                    >
+                      Keep one
+                    </SimmButton>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="workspace-collection__content" ref={modsScrollContainerRef}>
@@ -2614,20 +3069,22 @@ export function ModsOverlay({
                     <span>Status</span>
                   </div>
                   <div className="workspace-collection__list-body">
-                    {filteredMods.map((mod) => {
+                    {filteredMods.map((mod, index) => {
                       const updateInfo = modUpdates.get(mod.fileName);
-                      const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
+                      const modKey = installedModKey(mod);
+                      const isSelected = selectedInstalledModKeys.has(modKey);
                       const updateDisabledReason = getUpdateDisabledReason(mod, updateInfo?.updateAvailable);
                       const securityBadge = getSecurityBadgeConfig(mod.securityScan);
                       return (
                         <div
-                          key={`${mod.fileName}-${mod.path}`}
-                          className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                          key={modKey}
+                          className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''} ${isSelected && selectedInstalledMods.length > 1 ? 'workspace-collection__row--multi-selected' : ''}`}
                           role="button"
                           aria-label={`Open details for ${mod.name}`}
+                          aria-pressed={isSelected}
                           tabIndex={0}
-                          onClick={() => openInstalledModView(mod)}
-                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
+                          onClick={(event) => selectInstalledMod(mod, index, event)}
+                          onKeyDown={(event) => handleInstalledModRowKeyDown(event, mod, index)}
                           onContextMenu={(event) => openContextMenu(event, [
                             {
                               key: mod.disabled ? 'enable' : 'disable',
@@ -2681,7 +3138,12 @@ export function ModsOverlay({
                         >
                           {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'inline')}
                           <div className="workspace-collection__row-body">
-                            <div className="workspace-collection__row-title">{mod.name}</div>
+                            <div className="workspace-collection__row-title">
+                              {isSelected && selectedInstalledMods.length > 1 && (
+                                <span className="workspace-collection__selection-check" aria-hidden="true"><Icon name="check" /></span>
+                              )}
+                              {mod.name}
+                            </div>
                             <div className="workspace-collection__row-meta">
                               {mod.disabled && <WorkspaceBadge tone="danger">Disabled</WorkspaceBadge>}
                               {updateInfo?.updateAvailable && <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>}
@@ -2701,7 +3163,26 @@ export function ModsOverlay({
           </div>
 
           <aside className="workspace-collection__inspector">
-            {!selectedInstalledMod && (
+            {selectedInstalledMods.length > 1 && (
+              <div className="workspace-inspector-card workspace-inspector-card--bulk-selection">
+                <div className="workspace-inspector-card__header">
+                  <span className="workspace-file-row__icon workspace-file-row__icon--large"><Icon name="layerGroup" /></span>
+                  <div>
+                    <h3>{selectedInstalledMods.length} mods selected</h3>
+                    <div className="workspace-inspector-card__subtle">Bulk changes apply to {environment?.name || 'this environment'}.</div>
+                  </div>
+                </div>
+                <p className="workspace-inspector-card__summary">
+                  Use the selection toolbar to enable, disable, or uninstall the selected mods together. Managed downloads remain available in Mod Library after uninstalling them from this environment.
+                </p>
+                <div className="workspace-inspector-card__metrics">
+                  <div><span>Enabled</span><strong>{selectedInstalledMods.filter((mod) => !mod.disabled).length}</strong></div>
+                  <div><span>Disabled</span><strong>{selectedInstalledMods.filter((mod) => mod.disabled).length}</strong></div>
+                  <div><span>Selected</span><strong>{selectedInstalledMods.length}</strong></div>
+                </div>
+              </div>
+            )}
+            {selectedInstalledMods.length <= 1 && !selectedInstalledMod && (
               <InspectorEmpty>Select an installed mod to review details and actions.</InspectorEmpty>
             )}
             {selectedInstalledMod && localSourceLinkState && localSourceLinkState.modId === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` && (
@@ -2714,7 +3195,7 @@ export function ModsOverlay({
                   <WorkspaceBadge tone="source">Local</WorkspaceBadge>
                 </div>
                 <div className="workspace-inspector-link-panel__summary">
-                  <strong>{selectedInstalledMod.name}</strong>
+                  <strong>{stripRuntimeSuffix(selectedInstalledMod.name)}</strong>
                   <span>{selectedInstalledMod.fileName}</span>
                 </div>
                 {localSourceLinkState.error && (
@@ -2722,89 +3203,107 @@ export function ModsOverlay({
                 )}
                 {localSourceLinkState.stage === 'chooseSource' && (
                   <div className="workspace-inspector-link-panel__step">
-                    <h4>Choose source strategy</h4>
-                    {localSourceLinkState.loadingExistingHint ? (
-                      <p>Checking whether this local file matches an existing linked mod family.</p>
-                    ) : localSourceLinkState.existingSourceHint ? (
-                      <>
-                        <p>
-                          This local file appears to match the existing linked source family{' '}
-                          <strong>{localSourceLinkState.existingSourceHint.displayName}</strong>.
-                        </p>
-                        <div className="workspace-inspector-link-panel__actions">
-                          <SimmButton
-                            type="button"
-                            variant="secondary"
-                            className="btn btn-secondary"
-                            onClick={() => {
-                              setLocalSourceLinkState((current) => current ? {
-                                ...current,
-                                strategy: 'manual',
-                                stage: 'edit',
-                                preview: undefined,
-                                sourceUrl: '',
-                                sourceUrlTouched: false,
-                                selectedVersion: undefined,
-                                customVersion: '',
-                                error: null,
-                              } : current);
-                            }}
-                          >
-                            Choose Different Source
-                          </SimmButton>
-                          <SimmButton
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => {
-                              const preview = localSourceLinkState.existingSourceHint!;
-                              const runtimeLabel = environment?.runtime;
-                              const matchingRuntimeVersion = runtimeLabel
-                                ? preview.versions.find((entry) => !entry.runtime || entry.runtime === runtimeLabel)
-                                : undefined;
-                              setLocalSourceLinkState((current) => current ? {
-                                ...current,
-                                strategy: 'existing',
-                                stage: 'edit',
-                                preview,
-                                sourceUrl: preview.sourceUrl,
-                                sourceUrlTouched: false,
-                                selectedVersion: matchingRuntimeVersion?.version,
-                                customVersion: '',
-                                error: null,
-                              } : current);
-                            }}
-                          >
-                            Use Existing Source Family
-                          </SimmButton>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <p>No existing managed source family confidently matches this local file yet.</p>
-                        <div className="workspace-inspector-link-panel__actions">
-                          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</SimmButton>
-                          <SimmButton
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => {
-                              setLocalSourceLinkState((current) => current ? {
-                                ...current,
-                                strategy: 'manual',
-                                stage: 'edit',
-                                preview: undefined,
-                                sourceUrl: '',
-                                sourceUrlTouched: false,
-                                selectedVersion: undefined,
-                                customVersion: '',
-                                error: null,
-                              } : current);
-                            }}
-                          >
-                            Link Different Source
-                          </SimmButton>
-                        </div>
-                      </>
+                    <h4>Choose the source SIMM should manage</h4>
+                    <p>
+                      SIMM will preserve the files already installed. Review the matches below and
+                      choose the provider and source yourself.
+                    </p>
+                    {(localSourceLinkState.loadingExistingHint || localSourceLinkState.loadingDiscovery) && (
+                      <div className="workspace-inspector-link-panel__searching" role="status">
+                        <Icon name="fas fa-spinner fa-spin" />
+                        Searching Nexus Mods, Thunderstore, and your Mod Library…
+                      </div>
                     )}
+                    {!localSourceLinkState.loadingExistingHint && localSourceLinkState.existingSourceHint && (
+                      <button
+                        type="button"
+                        className="workspace-source-candidate workspace-source-candidate--high"
+                        onClick={() => {
+                          const preview = localSourceLinkState.existingSourceHint!;
+                          const runtimeLabel = environment?.runtime;
+                          const matchingRuntimeVersion = runtimeLabel
+                            ? preview.versions.find((entry) => !entry.runtime || entry.runtime === runtimeLabel)
+                            : undefined;
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            strategy: 'existing',
+                            stage: 'edit',
+                            preview,
+                            sourceUrl: preview.sourceUrl,
+                            sourceUrlTouched: false,
+                            selectedVersion: matchingRuntimeVersion?.version,
+                            customVersion: '',
+                            error: null,
+                          } : current);
+                        }}
+                      >
+                        <span className="workspace-source-candidate__topline">
+                          <strong>{localSourceLinkState.existingSourceHint.displayName}</strong>
+                          <WorkspaceBadge tone="success">Existing library match</WorkspaceBadge>
+                        </span>
+                        <span>{getSourceLabel(localSourceLinkState.existingSourceHint.source)} · {localSourceLinkState.existingSourceHint.author || 'Unknown author'}</span>
+                      </button>
+                    )}
+                    {!localSourceLinkState.loadingDiscovery && localSourceLinkState.discoveredSources.length > 0 && (
+                      <div className="workspace-source-candidate-list">
+                        {localSourceLinkState.discoveredSources.map((candidate) => {
+                          const currentRuntime = environment?.runtime === 'Mono' ? 'Mono' : 'IL2CPP';
+                          const runtimeMismatch = candidate.runtimes.length > 0
+                            && !candidate.runtimes.includes(currentRuntime);
+                          return (
+                            <button
+                              key={`${candidate.id}:${candidate.runtimes.join(',')}`}
+                              type="button"
+                              className={`workspace-source-candidate${candidate.highConfidence ? ' workspace-source-candidate--high' : ''}`}
+                              onClick={() => selectDiscoveredSource(selectedInstalledMod, candidate)}
+                            >
+                              <span className="workspace-source-candidate__topline">
+                                <strong>{candidate.displayName}</strong>
+                                <span className="workspace-source-candidate__badges">
+                                  <WorkspaceBadge tone="source">{getSourceLabel(candidate.source)}</WorkspaceBadge>
+                                  {candidate.highConfidence && <WorkspaceBadge tone="success">Name + author match</WorkspaceBadge>}
+                                  {candidate.exactVersion && <WorkspaceBadge tone="success">Installed version found</WorkspaceBadge>}
+                                  {runtimeMismatch && <WorkspaceBadge tone="warning">Different runtime</WorkspaceBadge>}
+                                </span>
+                              </span>
+                              <span>
+                                {candidate.author}
+                                {candidate.latestVersion ? ` · Latest ${candidate.latestVersion}` : ''}
+                                {candidate.runtimes.length > 0 ? ` · ${candidate.runtimes.join(' + ')}` : ''}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {!localSourceLinkState.loadingDiscovery
+                      && !localSourceLinkState.loadingExistingHint
+                      && !localSourceLinkState.existingSourceHint
+                      && localSourceLinkState.discoveredSources.length === 0 && (
+                      <p>No exact-name provider match was found. You can still enter the correct source page yourself.</p>
+                    )}
+                    <div className="workspace-inspector-link-panel__actions">
+                      <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</SimmButton>
+                      <SimmButton
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => {
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            strategy: 'manual',
+                            stage: 'edit',
+                            preview: undefined,
+                            sourceUrl: '',
+                            sourceUrlTouched: false,
+                            selectedVersion: undefined,
+                            customVersion: '',
+                            error: null,
+                          } : current);
+                        }}
+                      >
+                        Enter source URL
+                      </SimmButton>
+                    </div>
                   </div>
                 )}
                 {localSourceLinkState.stage === 'edit' && (
@@ -2817,7 +3316,7 @@ export function ModsOverlay({
                         type="url"
                         value={localSourceLinkState.sourceUrl}
                         placeholder="https://thunderstore.io/... or https://www.nexusmods.com/..."
-                        readOnly={localSourceLinkState.strategy === 'existing'}
+                        readOnly={localSourceLinkState.strategy === 'existing' || localSourceLinkState.strategy === 'discovered'}
                         onChange={(event) => {
                           const nextValue = event.target.value;
                           setLocalSourceLinkState((current) => current ? {
@@ -2832,7 +3331,7 @@ export function ModsOverlay({
                           } : current);
                         }}
                         onBlur={() => {
-                          if (localSourceLinkState.strategy === 'existing') {
+                          if (localSourceLinkState.strategy === 'existing' || localSourceLinkState.strategy === 'discovered') {
                             return;
                           }
                           if (!localSourceLinkState.sourceUrlTouched) {
@@ -2965,7 +3464,7 @@ export function ModsOverlay({
                         variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
-                          if (localSourceLinkState.existingSourceHint) {
+                          if (localSourceLinkState.existingSourceHint || localSourceLinkState.discoveredSources.length > 0 || localSourceLinkState.managementRequestId) {
                             setLocalSourceLinkState((current) => current ? {
                               ...current,
                               stage: 'chooseSource',
@@ -2976,7 +3475,7 @@ export function ModsOverlay({
                           closeLocalSourceLink();
                         }}
                       >
-                        {localSourceLinkState.existingSourceHint ? 'Back' : 'Cancel'}
+                        {localSourceLinkState.existingSourceHint || localSourceLinkState.discoveredSources.length > 0 || localSourceLinkState.managementRequestId ? 'Back' : 'Cancel'}
                       </SimmButton>
                       <SimmButton
                         type="button"

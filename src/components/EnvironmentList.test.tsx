@@ -31,6 +31,11 @@ const apiMocks = vi.hoisted(() => ({
   repairMelonLoaderLaunchOptions: vi.fn(),
   exportEnvironmentProfile: vi.fn(),
   saveModProfileFile: vi.fn(),
+  getModIntegrationConfig: vi.fn(),
+  setModIntegrationPolicy: vi.fn(),
+  setModIntegrationPort: vi.fn(),
+  listModIntegrationRequests: vi.fn(),
+  resolveModIntegrationRequest: vi.fn(),
 }));
 
 const dialogMocks = vi.hoisted(() => ({
@@ -273,6 +278,26 @@ describe('EnvironmentList', () => {
     apiMocks.installMelonLoader.mockResolvedValue({ success: true });
     apiMocks.repairMelonLoaderLaunchOptions.mockResolvedValue({ success: true });
     apiMocks.saveModProfileFile.mockResolvedValue(undefined);
+    apiMocks.getModIntegrationConfig.mockResolvedValue({
+      environmentId: 'env-1',
+      policy: 'disabled',
+      protocolVersion: 1,
+      port: 43871,
+      configured: false,
+      listening: false,
+      pendingRequestCount: 0,
+    });
+    apiMocks.setModIntegrationPolicy.mockResolvedValue({
+      environmentId: 'env-1',
+      policy: 'ask',
+      protocolVersion: 1,
+      port: 43871,
+      configured: true,
+      listening: true,
+      pendingRequestCount: 0,
+    });
+    apiMocks.listModIntegrationRequests.mockResolvedValue([]);
+    apiMocks.resolveModIntegrationRequest.mockResolvedValue({});
     dialogMocks.save.mockResolvedValue('C:\\Profiles\\steam-installation.json');
     apiMocks.exportEnvironmentProfile.mockResolvedValue({
       schemaVersion: 1,
@@ -343,6 +368,18 @@ describe('EnvironmentList', () => {
     await waitFor(() => expect(card).toHaveAttribute('aria-expanded', 'true'));
     expect(card).toHaveAttribute('aria-controls', `environment-actions-${completedEnv.id}`);
     expect(document.getElementById(`environment-actions-${completedEnv.id}`)).not.toBeNull();
+  });
+
+  it('opens per-install mod integration settings from the environment actions', async () => {
+    render(<EnvironmentList />);
+
+    const card = await screen.findByRole('button', { name: `Open actions for ${completedEnv.name}` });
+    fireEvent.keyDown(card, { key: 'ContextMenu' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Mod Integration' }));
+
+    expect(await screen.findByRole('heading', { name: 'Mod Integration' })).toBeTruthy();
+    expect(apiMocks.getModIntegrationConfig).toHaveBeenCalledWith('env-1');
+    expect(apiMocks.listModIntegrationRequests).toHaveBeenCalledWith('env-1');
   });
 
   afterEach(() => {

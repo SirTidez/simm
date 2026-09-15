@@ -650,6 +650,51 @@ export interface NexusMod {
   mod_downloads: number;
 }
 
+export type ModIntegrationPolicy = 'disabled' | 'ask' | 'automatic';
+
+export type ModIntegrationRequestStatus =
+  | 'update-available'
+  | 'up-to-date'
+  | 'queued'
+  | 'awaiting-user-approval'
+  | 'awaiting-user-source'
+  | 'already-managed'
+  | 'managed'
+  | 'denied'
+  | 'update-not-available'
+  | 'not-managed-by-simm'
+  | 'integration-disabled'
+  | 'simm-unavailable'
+  | 'invalid'
+  | 'failed';
+
+export interface ModIntegrationConfig {
+  environmentId: string;
+  policy: ModIntegrationPolicy;
+  protocolVersion: number;
+  port: number;
+  bridgeConfigPath?: string;
+  configured: boolean;
+  listening: boolean;
+  connectionError?: string;
+  pendingRequestCount: number;
+}
+
+export interface ModIntegrationRequestRecord {
+  id: string;
+  environmentId: string;
+  operation: 'checkForUpdate' | 'requestUpdate' | 'requestManagement';
+  status: ModIntegrationRequestStatus;
+  modFileName: string;
+  modName: string;
+  currentVersion?: string;
+  targetVersion?: string;
+  source?: string;
+  message?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface NexusModsPage {
   mods: NexusMod[];
   totalCount: number;

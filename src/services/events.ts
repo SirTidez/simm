@@ -161,6 +161,10 @@ export interface ModMetadataRefreshStatusEvent {
   running: boolean;
 }
 
+export interface ModIntegrationRequestsChangedEvent {
+  environmentId: string;
+}
+
 export type TrackedDownloadUpdatedEvent = TrackedDownload;
 
 export async function onLiveTelemetryEvent(handler: (data: LiveTelemetryEvent) => void): Promise<() => void> {
@@ -283,6 +287,14 @@ export async function onModMetadataRefreshStatus(
   handler: (data: ModMetadataRefreshStatusEvent) => void
 ): Promise<() => void> {
   return await listen<ModMetadataRefreshStatusEvent>('mod_metadata_refresh_status', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onModIntegrationRequestsChanged(
+  handler: (data: ModIntegrationRequestsChangedEvent) => void,
+): Promise<() => void> {
+  return await listen<ModIntegrationRequestsChangedEvent>('mod_integration_requests_changed', (event) => {
     handler(event.payload);
   });
 }

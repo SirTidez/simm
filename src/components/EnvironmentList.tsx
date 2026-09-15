@@ -30,6 +30,7 @@ import { Input } from '@/components/ui/input';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
+import { ModIntegrationDialog } from './ModIntegrationDialog';
 import {
   createAsyncListenerScope,
   onAuthWaiting,
@@ -466,6 +467,7 @@ export function EnvironmentList({
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; confirmText?: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
   const [environmentMenu, setEnvironmentMenu] = useState<{ envId: string; x: number; y: number } | null>(null);
+  const [modIntegrationEnvironmentId, setModIntegrationEnvironmentId] = useState<string | null>(null);
   const [preferredLaunchMethod, setPreferredLaunchMethod] = useState<Map<string, 'steam' | 'direct'>>(() => {
     // Load from localStorage on init
     try {
@@ -1939,6 +1941,13 @@ export function EnvironmentList({
         },
       },
       {
+        key: 'mod-integration',
+        label: 'Mod Integration',
+        icon: 'fas fa-plug',
+        disabled: env.status !== 'completed',
+        onSelect: () => setModIntegrationEnvironmentId(env.id),
+      },
+      {
         key: 'delete',
         label: isSteam ? 'Clear Environment Records' : 'Delete Environment',
         icon: 'fas fa-trash',
@@ -2715,6 +2724,17 @@ export function EnvironmentList({
         onToggleItem={handleToggleProfileItem}
         onSave={() => void handleSaveProfile()}
       />
+
+      {modIntegrationEnvironmentId && (() => {
+        const environment = environments.find((item) => item.id === modIntegrationEnvironmentId);
+        return environment ? (
+          <ModIntegrationDialog
+            isOpen={true}
+            environment={environment}
+            onClose={() => setModIntegrationEnvironmentId(null)}
+          />
+        ) : null;
+      })()}
 
       <div className="environments-grid">
         {sortEnvironmentsForDisplay(environments).map(renderEnvironmentCard)}

@@ -58,6 +58,9 @@ import type {
   NexusCollection,
   NexusCollectionsPage,
   NexusCollectionRevisionPlan,
+  ModIntegrationConfig,
+  ModIntegrationPolicy,
+  ModIntegrationRequestRecord,
 } from '../types';
 
 export interface LogWatchSession {
@@ -1485,6 +1488,37 @@ export class ApiService {
     }>;
   }>> {
     return invoke('get_all_mod_updates_summary', {});
+  }
+
+  static async getModIntegrationConfig(environmentId: string): Promise<ModIntegrationConfig> {
+    return invoke('get_mod_integration_config', { environmentId });
+  }
+
+  static async setModIntegrationPolicy(
+    environmentId: string,
+    policy: ModIntegrationPolicy,
+  ): Promise<ModIntegrationConfig> {
+    return invoke('set_mod_integration_policy', { environmentId, policy });
+  }
+
+  static async setModIntegrationPort(
+    environmentId: string,
+    port: number,
+  ): Promise<ModIntegrationConfig> {
+    return invoke('set_mod_integration_port', { environmentId, port });
+  }
+
+  static async listModIntegrationRequests(
+    environmentId: string,
+  ): Promise<ModIntegrationRequestRecord[]> {
+    return invoke('list_mod_integration_requests', { environmentId });
+  }
+
+  static async resolveModIntegrationRequest(
+    requestId: string,
+    approve: boolean,
+  ): Promise<ModIntegrationRequestRecord> {
+    return invoke('resolve_mod_integration_request', { requestId, approve });
   }
 
   static async getS1APIStatus(environmentId: string): Promise<{
