@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework Condition="'$(RuntimeBackend)' == 'Mono'">netstandard2.1</TargetFramework>
+    <TargetFramework Condition="'$(RuntimeBackend)' == 'IL2CPP'">net6.0</TargetFramework>
+    <AssemblyName>Simm.ModIntegration.Bridge.MelonLoader</AssemblyName>
+    <RootNamespace>Simm.ModIntegration.Bridge.MelonLoader</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <MelonLoaderAssembly Condition="'$(MelonLoaderAssembly)' == ''">$(SIMM_MELONLOADER_ASSEMBLY)</MelonLoaderAssembly>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Simm.ModIntegration.Abstractions/Simm.ModIntegration.Abstractions.csproj" />
+    <ProjectReference Include="../Simm.ModIntegration.Bridge.Core/Simm.ModIntegration.Bridge.Core.csproj" />
+    <Reference Include="MelonLoader" HintPath="$(MelonLoaderAssembly)" Private="false" />
+  </ItemGroup>
+
+  <Target Name="ValidateMelonLoaderReference" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(RuntimeBackend)' != 'Mono' and '$(RuntimeBackend)' != 'IL2CPP'"
+           Text="RuntimeBackend must be Mono or IL2CPP." />
+    <Error Condition="'$(MelonLoaderAssembly)' == '' or !Exists('$(MelonLoaderAssembly)')"
+           Text="Set MelonLoaderAssembly to the matching runtime's MelonLoader.dll." />
+  </Target>
+</Project>

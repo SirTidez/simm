@@ -36,6 +36,23 @@ jobs:
       - name: Run release contract tests
         run: bun run test:release
 
+  mod-integration:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Test mod integration abstractions and transport
+        run: dotnet test integrations/mod-integration/Simm.ModIntegration.sln -c Release --nologo
+
+      - name: Verify mod integration formatting
+        run: dotnet format integrations/mod-integration/Simm.ModIntegration.sln --verify-no-changes --no-restore
+
   backend:
     runs-on: ubuntu-latest
     steps:

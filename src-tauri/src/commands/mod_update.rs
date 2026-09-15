@@ -33,7 +33,7 @@ fn map_mod_source(source: Option<ModSource>) -> &'static str {
     }
 }
 
-async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
+pub(crate) async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     let mut service = MOD_UPDATE_SERVICE.lock().await;
     if service.is_none() {
         *service = Some(Arc::new(ModUpdateService::new()));
@@ -41,12 +41,16 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
+pub(crate) async fn get_thunderstore_service(
+    db: Arc<SqlitePool>,
+) -> Result<Arc<ThunderStoreService>, String> {
     let _ = db;
     Ok(shared_thunderstore_service())
 }
 
-async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
+pub(crate) async fn get_nexus_mods_service(
+    db: Arc<SqlitePool>,
+) -> Result<Arc<NexusModsService>, String> {
     let nexus_service = {
         let mut service = NEXUS_MODS_SERVICE.lock().await;
         if service.is_none() {
@@ -65,11 +69,13 @@ async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsServ
     Ok(nexus_service)
 }
 
-fn load_nexus_game_id(settings: &Settings) -> String {
+pub(crate) fn load_nexus_game_id(settings: &Settings) -> String {
     normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
 }
 
-async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
+pub(crate) async fn get_github_service(
+    db: Arc<SqlitePool>,
+) -> Result<Arc<GitHubReleasesService>, String> {
     let _ = db;
     let github_service = {
         let mut service = GITHUB_SERVICE.lock().await;
@@ -89,16 +95,25 @@ pub async fn check_mod_updates(
     environment_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let settings = runtime_settings.snapshot().await;
+    check_mod_updates_for_environment(db.inner().clone(), &app, &environment_id, settings).await
+}
+
+pub(crate) async fn check_mod_updates_for_environment(
+    pool: Arc<SqlitePool>,
+    app: &AppHandle,
+    environment_id: &str,
+    settings: Settings,
+) -> Result<Vec<serde_json::Value>, String> {
     let mod_update_service = get_mod_update_service().await?;
-    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings.clone());
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
-    let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
-    let github_service = get_github_service(db.inner().clone()).await?;
+    let mods_service = ModsService::new(pool.clone()).with_runtime_settings(settings.clone());
+    let env_service = EnvironmentService::new(pool.clone()).map_err(|e| e.to_string())?;
+    let thunderstore_service = get_thunderstore_service(pool.clone()).await?;
+    let nexus_mods_service = get_nexus_mods_service(pool.clone()).await?;
+    let github_service = get_github_service(pool).await?;
     let nexus_game_id = load_nexus_game_id(&settings);
 
     let mut active_count = 0usize;
-    if let Ok(Some(env)) = env_service.get_environment(&environment_id).await {
+    if let Ok(Some(env)) = env_service.get_environment(environment_id).await {
         if !env.output_dir.is_empty() {
             active_count = mods_service
                 .list_mods(&env.output_dir)
@@ -153,14 +168,33 @@ pub async fn update_mod(
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let settings = runtime_settings.snapshot().await;
+    update_mod_for_environment(
+        db.inner().clone(),
+        &app,
+        &environment_id,
+        &mod_file_name,
+        settings,
+        security_override.unwrap_or(false),
+    )
+    .await
+}
+
+pub(crate) async fn update_mod_for_environment(
+    pool: Arc<SqlitePool>,
+    app: &AppHandle,
+    environment_id: &str,
+    mod_file_name: &str,
+    settings: Settings,
+    security_override: bool,
+) -> Result<serde_json::Value, String> {
     let mod_update_service = get_mod_update_service().await?;
-    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings.clone());
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
-    let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
-    let github_service = get_github_service(db.inner().clone()).await?;
+    let mods_service = ModsService::new(pool.clone()).with_runtime_settings(settings.clone());
+    let env_service = EnvironmentService::new(pool.clone()).map_err(|e| e.to_string())?;
+    let thunderstore_service = get_thunderstore_service(pool.clone()).await?;
+    let nexus_mods_service = get_nexus_mods_service(pool.clone()).await?;
+    let github_service = get_github_service(pool.clone()).await?;
     let nexus_game_id = load_nexus_game_id(&settings);
-    let nexus_access_token = get_valid_nexus_access_token(db.inner().clone()).await.ok();
+    let nexus_access_token = get_valid_nexus_access_token(pool).await.ok();
 
     mod_update_service
         .update_mod(
@@ -175,7 +209,7 @@ pub async fn update_mod(
             nexus_access_token.as_deref(),
             &github_service,
             &settings,
-            security_override.unwrap_or(false),
+            security_override,
         )
         .await
         .map_err(|error| {

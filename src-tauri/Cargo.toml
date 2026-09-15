@@ -47,6 +47,8 @@ quick-xml = { version = "0.31", features = ["serialize"] }
 log = "0.4"
 env_logger = "0.11"
 discord-rich-presence = "1.0"
+clrmeta = "0.1.0"
+portex = "0.3.0"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 nexus-api = { git = "https://github.com/SirTidez/nexusmods-api-handler.git", rev = "494f754de30b4890be1d42dfadb6168905b41aa4" }
 tempfile = "3.10"

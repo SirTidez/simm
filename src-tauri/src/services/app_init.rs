@@ -200,6 +200,15 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
     );
     log::info!("Background update scheduler initialized after environment recovery");
 
+    let mod_integration = crate::services::mod_integration::ModIntegrationService::new(
+        pool.clone(),
+        app.clone(),
+        runtime_settings.clone(),
+    );
+    app.manage(mod_integration.clone());
+    mod_integration.start();
+    log::info!("Local mod integration API and request queue initialized");
+
     // The telemetry monitor's interval also ticks immediately and reads environment
     // paths. Start it after deletion recovery and watcher reconciliation for the
     // same reason as the update scheduler.

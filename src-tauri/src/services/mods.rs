@@ -4792,51 +4792,47 @@ impl ModsService {
             .await
             .context("Failed to read DLL file")?;
 
-        // Read first 1MB to search for version strings
-        let search_len = std::cmp::min(content.len(), 1024 * 1024);
-        let text = String::from_utf8_lossy(&content[..search_len]);
+        Self::extract_version_from_binary_content(&content)
+    }
 
-        // Look for AssemblyVersion or AssemblyFileVersion
-        let assembly_version_re =
-            Regex::new(r#"AssemblyVersion[^\x00]*?([0-9]+\.[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?)"#)
-                .context("Failed to compile regex")?;
-
-        if let Some(caps) = assembly_version_re.captures(&text) {
-            if let Some(version) = caps.get(1) {
-                return Ok(version.as_str().to_string());
+    fn extract_version_from_binary_content(content: &[u8]) -> Result<String> {
+        match portex::PeImage::parse(content) {
+            Ok(pe) => {
+                let cli = pe
+                    .clr_header()
+                    .context("Failed to parse the CLR header")?
+                    .context("DLL does not contain CLR metadata")?;
+                let metadata_bytes = pe
+                    .read_at_rva(cli.metadata_rva, cli.metadata_size as usize)
+                    .context("DLL CLR metadata range is invalid")?;
+                let metadata = clrmeta::Metadata::parse(metadata_bytes)
+                    .context("Failed to parse DLL CLR metadata")?;
+                let assembly = metadata
+                    .assembly()
+                    .context("DLL does not define a CLR assembly identity")?;
+                return Ok(assembly.version_string());
             }
-        }
-
-        let file_version_re =
-            Regex::new(r#"AssemblyFileVersion[^\x00]*?([0-9]+\.[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?)"#)
-                .context("Failed to compile regex")?;
-
-        if let Some(caps) = file_version_re.captures(&text) {
-            if let Some(version) = caps.get(1) {
-                return Ok(version.as_str().to_string());
-            }
-        }
-
-        // Fallback: look for any version-like pattern
-        let version_pattern = Regex::new(r#"\b([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)\b"#)
-            .context("Failed to compile regex")?;
-
-        for cap in version_pattern.captures_iter(&text) {
-            if let Some(version) = cap.get(1) {
-                let version_str = version.as_str();
-                let parts: Vec<&str> = version_str.split('.').collect();
-                // Avoid very large numbers that might be timestamps
-                if parts.len() >= 2 {
-                    if let Ok(major) = parts[0].parse::<u32>() {
-                        if major < 1000 {
-                            return Ok(version_str.to_string());
-                        }
-                    }
+            Err(_) => {
+                // A narrow text fallback keeps synthetic/import fixtures supported without
+                // treating an arbitrary dependency or product version as the DLL identity.
+                let search_len = std::cmp::min(content.len(), 1024 * 1024);
+                let text = String::from_utf8_lossy(&content[..search_len]);
+                let declared_version = Regex::new(
+                    r#"Assembly(?:File)?Version\s*\(\s*[\"']([0-9]+\.[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?)[\"']\s*\)"#,
+                )
+                .context("Failed to compile declared assembly version regex")?;
+                if let Some(version) = declared_version
+                    .captures(&text)
+                    .and_then(|captures| captures.get(1))
+                {
+                    return Ok(version.as_str().to_string());
                 }
             }
         }
 
-        Err(anyhow::anyhow!("No version found in DLL binary"))
+        Err(anyhow::anyhow!(
+            "No CLR assembly version found in DLL binary"
+        ))
     }
 
     pub async fn list_mods(&self, game_dir: &str) -> Result<serde_json::Value> {
@@ -10136,6 +10132,41 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    #[test]
+    #[ignore = "requires SIMMRUST_TEST_ASSEMBLY_PATH and SIMMRUST_TEST_ASSEMBLY_VERSION"]
+    fn live_clr_assembly_version_matches_expected() -> Result<()> {
+        let path = std::env::var("SIMMRUST_TEST_ASSEMBLY_PATH")
+            .context("SIMMRUST_TEST_ASSEMBLY_PATH is required")?;
+        let expected = std::env::var("SIMMRUST_TEST_ASSEMBLY_VERSION")
+            .context("SIMMRUST_TEST_ASSEMBLY_VERSION is required")?;
+        let content = std::fs::read(&path).with_context(|| format!("Failed to read {path}"))?;
+
+        assert_eq!(
+            ModsService::extract_version_from_binary_content(&content)?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn binary_version_detection_rejects_unrelated_version_strings() {
+        let result = ModsService::extract_version_from_binary_content(
+            b"not-a-real-dotnet-assembly dependency-version=2.1.0.0",
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn binary_version_detection_keeps_explicit_text_fixture_support() -> Result<()> {
+        let version = ModsService::extract_version_from_binary_content(
+            br#"not-a-real-dotnet-assembly AssemblyVersion("1.2.3.4")"#,
+        )?;
+
+        assert_eq!(version, "1.2.3.4");
+        Ok(())
     }
 
     async fn set_test_download_dir(pool: Arc<SqlitePool>, download_dir: &Path) -> Result<()> {

@@ -336,6 +336,11 @@ fn main() {
             commands::mod_update::update_mod,
             commands::mod_update::get_mod_updates_summary,
             commands::mod_update::get_all_mod_updates_summary,
+            commands::mod_integration::get_mod_integration_config,
+            commands::mod_integration::set_mod_integration_policy,
+            commands::mod_integration::set_mod_integration_port,
+            commands::mod_integration::list_mod_integration_requests,
+            commands::mod_integration::resolve_mod_integration_request,
             // Logs (game logs)
             commands::logs::get_log_files,
             commands::logs::read_log_file,

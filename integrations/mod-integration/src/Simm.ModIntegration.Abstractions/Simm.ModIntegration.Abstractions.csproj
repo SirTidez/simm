@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.1;net6.0</TargetFrameworks>
+    <AssemblyName>Simm.ModIntegration.Abstractions</AssemblyName>
+    <RootNamespace>Simm.ModIntegration</RootNamespace>
+    <PackageId>Simm.ModIntegration</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Token-free developer API for requesting mod update checks from SIMM.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" Link="README.md" />
+  </ItemGroup>
+</Project>

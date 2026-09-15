@@ -13,6 +13,7 @@ pub mod linux_readiness;
 pub mod logger;
 pub mod logs;
 pub mod melon_loader;
+pub mod mod_integration;
 pub mod mod_profiles;
 pub mod mod_update;
 pub mod mods;

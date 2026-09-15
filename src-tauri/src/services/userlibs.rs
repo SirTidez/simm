@@ -1,3 +1,4 @@
+use crate::services::mod_integration::is_mod_integration_infrastructure_file;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -121,6 +122,10 @@ impl UserLibsService {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
+
+            if is_mod_integration_infrastructure_file(file_name) {
+                continue;
+            }
 
             let is_disabled = file_name.to_ascii_lowercase().ends_with(".disabled");
             let original_file_name = if is_disabled {
@@ -287,6 +292,46 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("entries");
         assert_eq!(entries.len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_userlibs_hides_simm_mod_integration_infrastructure() -> Result<()> {
+        let temp = tempdir()?;
+        let service = UserLibsService::new();
+
+        let userlibs_dir = temp.path().join("UserLibs");
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::write(
+            userlibs_dir.join("Simm.ModIntegration.Abstractions.dll"),
+            b"infrastructure",
+        )
+        .await?;
+        fs::write(
+            userlibs_dir.join("Simm.ModIntegration.Bridge.Core.dll"),
+            b"infrastructure",
+        )
+        .await?;
+        fs::write(userlibs_dir.join("Regular.Library.dll"), b"user lib").await?;
+
+        let listed = service
+            .list_user_libs(temp.path().to_string_lossy().as_ref())
+            .await?;
+
+        assert_eq!(
+            listed.get("count").and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            listed
+                .get("userLibs")
+                .and_then(|value| value.as_array())
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.get("fileName"))
+                .and_then(|value| value.as_str()),
+            Some("Regular.Library.dll")
+        );
 
         Ok(())
     }

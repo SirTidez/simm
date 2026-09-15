@@ -1192,6 +1192,185 @@ pub struct ModProfileManifest {
     pub collection: Option<ModProfileCollection>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModIntegrationPolicy {
+    #[default]
+    Disabled,
+    Ask,
+    Automatic,
+}
+
+impl ModIntegrationPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Ask => "ask",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
+impl std::str::FromStr for ModIntegrationPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "disabled" => Ok(Self::Disabled),
+            "ask" => Ok(Self::Ask),
+            "automatic" => Ok(Self::Automatic),
+            _ => Err(format!("Unknown mod integration policy: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ModIntegrationOperation {
+    CheckForUpdate,
+    RequestUpdate,
+    RequestManagement,
+}
+
+impl ModIntegrationOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CheckForUpdate => "checkForUpdate",
+            Self::RequestUpdate => "requestUpdate",
+            Self::RequestManagement => "requestManagement",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModIntegrationRequestStatus {
+    UpdateAvailable,
+    UpToDate,
+    Queued,
+    AwaitingUserApproval,
+    AwaitingUserSource,
+    AlreadyManaged,
+    Managed,
+    Denied,
+    UpdateNotAvailable,
+    NotManagedBySimm,
+    IntegrationDisabled,
+    SimmUnavailable,
+    Invalid,
+    Failed,
+}
+
+impl ModIntegrationRequestStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UpdateAvailable => "update-available",
+            Self::UpToDate => "up-to-date",
+            Self::Queued => "queued",
+            Self::AwaitingUserApproval => "awaiting-user-approval",
+            Self::AwaitingUserSource => "awaiting-user-source",
+            Self::AlreadyManaged => "already-managed",
+            Self::Managed => "managed",
+            Self::Denied => "denied",
+            Self::UpdateNotAvailable => "update-not-available",
+            Self::NotManagedBySimm => "not-managed-by-simm",
+            Self::IntegrationDisabled => "integration-disabled",
+            Self::SimmUnavailable => "simm-unavailable",
+            Self::Invalid => "invalid",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::str::FromStr for ModIntegrationRequestStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "update-available" => Ok(Self::UpdateAvailable),
+            "up-to-date" => Ok(Self::UpToDate),
+            "queued" => Ok(Self::Queued),
+            "awaiting-user-approval" => Ok(Self::AwaitingUserApproval),
+            "awaiting-user-source" => Ok(Self::AwaitingUserSource),
+            "already-managed" => Ok(Self::AlreadyManaged),
+            "managed" => Ok(Self::Managed),
+            "denied" => Ok(Self::Denied),
+            "update-not-available" => Ok(Self::UpdateNotAvailable),
+            "not-managed-by-simm" => Ok(Self::NotManagedBySimm),
+            "integration-disabled" => Ok(Self::IntegrationDisabled),
+            "simm-unavailable" => Ok(Self::SimmUnavailable),
+            "invalid" => Ok(Self::Invalid),
+            "failed" => Ok(Self::Failed),
+            _ => Err(format!("Unknown mod integration request status: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationIdentity {
+    pub assembly_path: Option<String>,
+    pub simm_storage_id: Option<String>,
+    pub guid: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationWireRequest {
+    pub protocol_version: u32,
+    pub request_id: String,
+    pub capability_token: String,
+    pub environment_id: String,
+    pub operation: ModIntegrationOperation,
+    pub mod_identity: ModIntegrationIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationWireResponse {
+    pub protocol_version: u32,
+    pub request_id: String,
+    pub status: ModIntegrationRequestStatus,
+    pub message: String,
+    pub current_version: Option<String>,
+    pub target_version: Option<String>,
+    pub source: Option<String>,
+    pub queued_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationConfig {
+    pub environment_id: String,
+    pub policy: ModIntegrationPolicy,
+    pub protocol_version: u32,
+    pub port: u16,
+    pub bridge_config_path: Option<String>,
+    pub configured: bool,
+    pub listening: bool,
+    pub connection_error: Option<String>,
+    pub pending_request_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationRequestRecord {
+    pub id: String,
+    pub environment_id: String,
+    pub operation: ModIntegrationOperation,
+    pub status: ModIntegrationRequestStatus,
+    pub mod_file_name: String,
+    pub mod_name: String,
+    pub current_version: Option<String>,
+    pub target_version: Option<String>,
+    pub source: Option<String>,
+    pub message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModProfileCollection {
@@ -1646,6 +1825,54 @@ mod tests {
         assert_eq!(
             json["byChannel"]["stable"]["skippedVersionNormalized"],
             "0.8.6"
+        );
+    }
+
+    #[test]
+    fn mod_integration_wire_contract_uses_versioned_camel_case_requests() {
+        let request = ModIntegrationWireRequest {
+            protocol_version: 1,
+            request_id: "request-1".to_string(),
+            capability_token: "token".to_string(),
+            environment_id: "env-1".to_string(),
+            operation: ModIntegrationOperation::RequestUpdate,
+            mod_identity: ModIntegrationIdentity {
+                assembly_path: Some("C:/Games/Schedule I/Mods/Example.dll".to_string()),
+                simm_storage_id: Some("storage-1".to_string()),
+                guid: Some("com.example.mod".to_string()),
+                name: Some("Example Mod".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+        };
+
+        let json = serde_json::to_value(request).expect("serialize integration request");
+        assert_eq!(json["protocolVersion"], 1);
+        assert_eq!(json["operation"], "requestUpdate");
+        assert_eq!(json["modIdentity"]["simmStorageId"], "storage-1");
+
+        let response = ModIntegrationWireResponse {
+            protocol_version: 1,
+            request_id: "request-1".to_string(),
+            status: ModIntegrationRequestStatus::AwaitingUserApproval,
+            message: "Waiting".to_string(),
+            current_version: Some("1.0.0".to_string()),
+            target_version: Some("1.1.0".to_string()),
+            source: Some("thunderstore".to_string()),
+            queued_request_id: Some("queue-1".to_string()),
+        };
+        let json = serde_json::to_value(response).expect("serialize integration response");
+        assert_eq!(json["status"], "awaiting-user-approval");
+        assert_eq!(json["queuedRequestId"], "queue-1");
+
+        assert_eq!(
+            serde_json::to_value(ModIntegrationOperation::RequestManagement)
+                .expect("serialize management operation"),
+            "requestManagement"
+        );
+        assert_eq!(
+            serde_json::to_value(ModIntegrationRequestStatus::AwaitingUserSource)
+                .expect("serialize source status"),
+            "awaiting-user-source"
         );
     }
 }

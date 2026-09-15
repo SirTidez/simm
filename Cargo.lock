@@ -658,6 +658,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clrmeta"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55b79baced645960d480f3ee57ebc38dc7d5100d061359e384b672edca2de5cf"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3142,6 +3151,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
+name = "nostdio"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e818b1435af48545c0f098dc3f267548c7c01640651c8f556f8123562df0be54"
+
+[[package]]
 name = "notify"
 version = "6.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3989,6 +4004,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "091397be61a01d4be58e7841595bd4bfedb15f1cd54977d79b8271e94ed799a3"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "portex"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5810e2667f6e815b60447c767370d1ed16c3ec04a5407aba8d57ff0bf0f1dcf9"
+dependencies = [
+ "nostdio",
 ]
 
 [[package]]
@@ -5254,6 +5278,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "clrmeta",
  "dirs 5.0.1",
  "discord-rich-presence",
  "dotenv",
@@ -5267,6 +5292,7 @@ dependencies = [
  "notify",
  "octocrab",
  "once_cell",
+ "portex",
  "quick-xml 0.31.0",
  "regex",
  "reqwest 0.11.27",
