@@ -4,7 +4,7 @@ Protocol version 1 provides a local request boundary for installed Schedule I mo
 
 ## Ownership and security boundary
 
-- The listener always binds to the IPv4 loopback interface. The default port is `43871`; the user may change only the port.
+- The listener always binds to the IPv4 loopback interface. SIMM requests port `43871` by default and advances through the port sequence until it can own an available listener.
 - Provider credentials never leave SIMM.
 - Every enabled installation receives a separate 64-character random capability token. SIMM stores only its SHA-256 digest in the database; the token is written to that installation's `UserData/SIMM/mod-integration.json` bridge configuration.
 - Each request must include the calling assembly's full path. SIMM resolves that path against the selected installation and rejects assemblies that are not actually installed there. Update operations still reject unmanaged assemblies; the management operation is the explicit, user-controlled path for adopting one.
@@ -25,7 +25,7 @@ Each enabled installation receives a bridge file with a numeric port:
 }
 ```
 
-The port can be changed in SIMM or edited directly in this file. SIMM watches enabled bridge files and reconciles valid changes while it is running. Ports must be between `1` and `65535`; occupied ports are rejected. Legacy version-one files containing a loopback-only `endpoint` remain readable and are migrated to the numeric `port` field the next time SIMM saves the configuration.
+The port is application-controlled. SIMM owns one listener for all enabled installations and keeps every bridge file synchronized to the port it actually acquired. If the requested port is occupied or reserved, SIMM selects the next available port in sequence instead of failing the integration. Legacy version-one files containing a loopback-only `endpoint` remain readable and are migrated to the numeric `port` field the next time SIMM saves the configuration.
 
 ## Framing
 
@@ -114,7 +114,6 @@ The Tauri UI uses these internal commands to manage each installation without ha
 
 - `get_mod_integration_config`
 - `set_mod_integration_policy`
-- `set_mod_integration_port`
 - `list_mod_integration_requests`
 - `resolve_mod_integration_request`
 

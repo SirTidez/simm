@@ -14472,37 +14472,19 @@ body {
   background: color-mix(in srgb, var(--primary-btn-color) 8%, var(--card-bg-color));
 }
 
-.mod-integration-dialog__port-editor,
-.mod-integration-dialog__port-editor label {
+.mod-integration-dialog__managed-port {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-}
-
-.mod-integration-dialog__port-editor {
   flex: 0 0 auto;
-}
-
-.mod-integration-dialog__port-editor label > span {
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--input-bg-color);
+  padding: 0.35rem 0.6rem;
   color: var(--text-secondary);
   font-size: 0.75rem;
   font-weight: 700;
-}
-
-.mod-integration-dialog__port-editor input {
-  width: 5.6rem;
-  border: 1px solid var(--border-color);
-  border-radius: 0.45rem;
-  background: var(--input-bg-color);
-  padding: 0.42rem 0.5rem;
-  color: var(--app-text-color);
-  font: inherit;
-}
-
-.mod-integration-dialog__port-editor input:focus-visible {
-  border-color: var(--primary-btn-color);
-  outline: 2px solid color-mix(in srgb, var(--primary-btn-color) 35%, transparent);
-  outline-offset: 1px;
+  white-space: nowrap;
 }
 
 .mod-integration-dialog__connection-error {
@@ -14542,10 +14524,6 @@ body {
   color: var(--text-secondary);
   font-size: 0.72rem;
   line-height: 1.4;
-}
-
-.mod-integration-dialog__port-hint code {
-  color: var(--app-text-color);
 }
 
 .mod-integration-request-list,
@@ -14631,12 +14609,4 @@ body {
     width: 100%;
   }
 
-  .mod-integration-dialog__port-editor {
-    align-items: stretch;
-  }
-
-  .mod-integration-dialog__port-editor label,
-  .mod-integration-dialog__port-editor input {
-    flex: 1 1 auto;
-  }
 }

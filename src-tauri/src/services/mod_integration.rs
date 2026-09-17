@@ -17,10 +17,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -34,6 +36,7 @@ pub const DEFAULT_MOD_INTEGRATION_PORT: u16 = 43871;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const REQUESTS_PER_MINUTE: usize = 30;
 const REQUEST_RETENTION_PER_ENVIRONMENT: i64 = 200;
+const PORT_SEARCH_SPACE: u32 = u16::MAX as u32;
 
 pub(crate) fn is_mod_integration_infrastructure_file(file_name: &str) -> bool {
     let normalized = file_name
@@ -101,6 +104,8 @@ pub struct ModIntegrationService {
     runtime_settings: RuntimeSettingsState,
     rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     listener_tasks: Arc<Mutex<HashMap<u16, JoinHandle<()>>>>,
+    background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    shutdown_started: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,18 +165,52 @@ impl ModIntegrationService {
             runtime_settings,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
             listener_tasks: Arc::new(Mutex::new(HashMap::new())),
+            background_tasks: Arc::new(Mutex::new(Vec::new())),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn start(self) {
+    pub async fn start(&self) {
         let listener_service = self.clone();
-        tokio::spawn(async move {
+        let listener_task = tokio::spawn(async move {
             listener_service.run_listener_supervisor().await;
         });
 
-        tokio::spawn(async move {
-            self.run_queue_worker().await;
+        let queue_service = self.clone();
+        let queue_task = tokio::spawn(async move {
+            queue_service.run_queue_worker().await;
         });
+
+        self.background_tasks
+            .lock()
+            .await
+            .extend([listener_task, queue_task]);
+    }
+
+    pub async fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let background_tasks = {
+            let mut tasks = self.background_tasks.lock().await;
+            tasks.drain(..).collect::<Vec<_>>()
+        };
+        for task in background_tasks {
+            task.abort();
+            let _ = task.await;
+        }
+
+        let listener_tasks = {
+            let mut listeners = self.listener_tasks.lock().await;
+            listeners.drain().map(|(_, task)| task).collect::<Vec<_>>()
+        };
+        for task in listener_tasks {
+            task.abort();
+            let _ = task.await;
+        }
+
+        log::info!("Local mod integration listeners and workers stopped");
     }
 
     pub async fn get_config(&self, environment_id: &str) -> Result<ModIntegrationConfig> {
@@ -218,8 +257,15 @@ impl ModIntegrationService {
                             Ok(validated_port) => {
                                 port = validated_port;
                                 configured = true;
-                                match self.ensure_listener(port).await {
-                                    Ok(()) => listening = true,
+                                match self.reconcile_listener_ports().await {
+                                    Ok(()) => {
+                                        if let Ok(updated) =
+                                            Self::read_bridge_config(&config_path).await
+                                        {
+                                            port = updated.configured_port().unwrap_or(port);
+                                        }
+                                        listening = self.listener_is_running(port).await;
+                                    }
                                     Err(error) => connection_error = Some(error.to_string()),
                                 }
                             }
@@ -293,13 +339,9 @@ impl ModIntegrationService {
             .await
             .context("Failed to close pending integration requests")?;
         } else {
-            let port = match Self::read_bridge_config(&config_path).await {
-                Ok(existing) => existing
-                    .configured_port()
-                    .unwrap_or(DEFAULT_MOD_INTEGRATION_PORT),
-                Err(_) => DEFAULT_MOD_INTEGRATION_PORT,
-            };
-            self.ensure_listener(port).await?;
+            let port = self
+                .ensure_application_listener(DEFAULT_MOD_INTEGRATION_PORT)
+                .await?;
             let capability_token = Self::new_capability_token();
             let token_hash = Self::hash_token(&capability_token);
             sqlx::query(
@@ -327,78 +369,6 @@ impl ModIntegrationService {
             )
             .await?;
         }
-
-        self.reconcile_listener_ports().await?;
-        let config = self.get_config(environment_id).await?;
-        self.emit_changed(environment_id);
-        Ok(config)
-    }
-
-    pub async fn set_port(&self, environment_id: &str, port: u32) -> Result<ModIntegrationConfig> {
-        let port = Self::validate_port(port)?;
-        let environment = EnvironmentService::new(self.pool.clone())?
-            .get_environment(environment_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
-        if environment.output_dir.trim().is_empty() {
-            anyhow::bail!("This environment does not have an installation directory");
-        }
-
-        let row = sqlx::query(
-            "SELECT policy, token_hash FROM mod_integration_config WHERE environment_id = ?",
-        )
-        .bind(environment_id)
-        .fetch_optional(&*self.pool)
-        .await
-        .context("Failed to load mod integration configuration")?
-        .ok_or_else(|| anyhow::anyhow!("Enable mod integration before changing its port"))?;
-        let policy = ModIntegrationPolicy::from_str(row.get::<String, _>("policy").as_str())
-            .map_err(anyhow::Error::msg)?;
-        if policy == ModIntegrationPolicy::Disabled {
-            anyhow::bail!("Enable mod integration before changing its port");
-        }
-
-        self.ensure_listener(port).await?;
-        let config_path = Self::bridge_config_path(&environment.output_dir);
-        let stored_hash = row
-            .get::<Option<String>, _>("token_hash")
-            .unwrap_or_default();
-        let existing = Self::read_bridge_config(&config_path).await.ok();
-        let capability_token = existing
-            .as_ref()
-            .filter(|config| {
-                config.protocol_version == MOD_INTEGRATION_PROTOCOL_VERSION
-                    && config.environment_id == environment_id
-                    && config.capability_token.len() >= 32
-                    && config.capability_token.len() <= 256
-                    && Self::constant_time_eq(
-                        Self::hash_token(&config.capability_token).as_bytes(),
-                        stored_hash.as_bytes(),
-                    )
-            })
-            .map(|config| config.capability_token.clone())
-            .unwrap_or_else(Self::new_capability_token);
-        let token_hash = Self::hash_token(&capability_token);
-        Self::write_bridge_config(
-            &config_path,
-            BridgeConfigFile {
-                protocol_version: MOD_INTEGRATION_PROTOCOL_VERSION,
-                port: Some(port),
-                endpoint: None,
-                environment_id: environment_id.to_string(),
-                capability_token,
-            },
-        )
-        .await?;
-        sqlx::query(
-            "UPDATE mod_integration_config SET token_hash = ?, updated_at = ? WHERE environment_id = ?",
-        )
-        .bind(token_hash)
-        .bind(Utc::now().to_rfc3339())
-        .bind(environment_id)
-        .execute(&*self.pool)
-        .await
-        .context("Failed to save the mod integration port")?;
 
         self.reconcile_listener_ports().await?;
         let config = self.get_config(environment_id).await?;
@@ -528,36 +498,54 @@ impl ModIntegrationService {
     }
 
     async fn run_listener_supervisor(&self) {
+        let mut last_error = None;
         loop {
-            if let Err(error) = self.reconcile_listener_ports().await {
-                log::warn!("Could not reconcile local mod integration ports: {error}");
+            if self.shutdown_started.load(Ordering::Acquire) {
+                break;
+            }
+            match self.reconcile_listener_ports().await {
+                Ok(()) => {
+                    if last_error.take().is_some() {
+                        log::info!("Local mod integration listener reconciliation recovered");
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if last_error.as_deref() != Some(message.as_str()) {
+                        log::warn!("Could not reconcile local mod integration listener: {error}");
+                        last_error = Some(message);
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 
     async fn reconcile_listener_ports(&self) -> Result<()> {
-        let desired_ports = self.desired_listener_ports().await?;
-        for port in desired_ports.iter().copied() {
-            self.ensure_listener(port).await?;
+        let bridge_configs = self.enabled_bridge_configs().await?;
+        if bridge_configs.is_empty() {
+            self.stop_all_listeners().await;
+            return Ok(());
         }
 
-        let mut listeners = self.listener_tasks.lock().await;
-        let stale_ports = listeners
-            .keys()
-            .copied()
-            .filter(|port| !desired_ports.contains(port))
-            .collect::<Vec<_>>();
-        for port in stale_ports {
-            if let Some(task) = listeners.remove(&port) {
-                task.abort();
-                log::info!("Stopped local mod integration listener on port {port}");
+        let port = self
+            .ensure_application_listener(DEFAULT_MOD_INTEGRATION_PORT)
+            .await?;
+        for (environment_id, config_path, mut config) in bridge_configs {
+            if config.port != Some(port) || config.endpoint.is_some() {
+                config.port = Some(port);
+                config.endpoint = None;
+                Self::write_bridge_config(&config_path, config).await?;
+                self.emit_changed(&environment_id);
+                log::info!(
+                    "Synchronized local mod integration bridge for {environment_id} to port {port}"
+                );
             }
         }
         Ok(())
     }
 
-    async fn desired_listener_ports(&self) -> Result<HashSet<u16>> {
+    async fn enabled_bridge_configs(&self) -> Result<Vec<(String, PathBuf, BridgeConfigFile)>> {
         let rows = sqlx::query(
             r#"SELECT mic.environment_id, mic.token_hash, e.output_dir
                FROM mod_integration_config mic
@@ -568,7 +556,7 @@ impl ModIntegrationService {
         .await
         .context("Failed to load configured mod integration ports")?;
 
-        let mut ports = HashSet::new();
+        let mut configs = Vec::new();
         for row in rows {
             let environment_id = row.get::<String, _>("environment_id");
             let token_hash = row.get::<String, _>("token_hash");
@@ -579,32 +567,28 @@ impl ModIntegrationService {
                 .with_context(|| {
                     format!("Failed to load bridge configuration for {environment_id}")
                 })?;
-            ports.insert(Self::validate_bridge_config(
-                &config,
-                &environment_id,
-                &token_hash,
-            )?);
+            Self::validate_bridge_config(&config, &environment_id, &token_hash)?;
+            configs.push((environment_id, config_path, config));
         }
-        Ok(ports)
+        Ok(configs)
     }
 
-    async fn ensure_listener(&self, port: u16) -> Result<()> {
+    async fn ensure_application_listener(&self, requested_port: u16) -> Result<u16> {
         let mut listeners = self.listener_tasks.lock().await;
-        if listeners
-            .get(&port)
-            .is_some_and(|listener| !listener.is_finished())
-        {
-            return Ok(());
+        let finished_ports = listeners
+            .iter()
+            .filter_map(|(port, task)| task.is_finished().then_some(*port))
+            .collect::<Vec<_>>();
+        for port in finished_ports {
+            if let Some(finished) = listeners.remove(&port) {
+                let _ = finished.await;
+            }
         }
-        if let Some(finished) = listeners.remove(&port) {
-            let _ = finished.await;
+        if let Some(port) = listeners.keys().next().copied() {
+            return Ok(port);
         }
 
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-            .await
-            .with_context(|| {
-                format!("Port {port} is unavailable for the local mod integration API")
-            })?;
+        let (port, listener) = Self::bind_next_available_port(requested_port).await?;
         let service = self.clone();
         let task = tokio::spawn(async move {
             if let Err(error) = service.run_listener_on_port(listener, port).await {
@@ -617,7 +601,71 @@ impl ModIntegrationService {
             port,
             MOD_INTEGRATION_PROTOCOL_VERSION
         );
-        Ok(())
+        if port != requested_port {
+            log::warn!(
+                "Local mod integration port {requested_port} was unavailable; using port {port}"
+            );
+        }
+        Ok(port)
+    }
+
+    async fn bind_next_available_port(requested_port: u16) -> Result<(u16, TcpListener)> {
+        let mut last_unavailable = None;
+        for offset in 0..PORT_SEARCH_SPACE {
+            let port = Self::port_in_sequence(requested_port, offset);
+            match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                Ok(listener) => return Ok((port, listener)),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::AddrInUse | ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    last_unavailable = Some((port, error));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to bind the local mod integration API to loopback port {port}"
+                        )
+                    });
+                }
+            }
+        }
+
+        let detail = last_unavailable
+            .map(|(port, error)| format!("; last attempt was port {port}: {error}"))
+            .unwrap_or_default();
+        anyhow::bail!(
+            "No available local mod integration port was found after {PORT_SEARCH_SPACE} attempts starting at {requested_port}{detail}"
+        )
+    }
+
+    fn port_in_sequence(requested_port: u16, offset: u32) -> u16 {
+        (((requested_port as u32 - 1 + offset) % u16::MAX as u32) + 1) as u16
+    }
+
+    async fn listener_is_running(&self, port: u16) -> bool {
+        self.listener_tasks
+            .lock()
+            .await
+            .get(&port)
+            .is_some_and(|task| !task.is_finished())
+    }
+
+    async fn stop_all_listeners(&self) {
+        let listener_tasks = {
+            let mut listeners = self.listener_tasks.lock().await;
+            listeners
+                .drain()
+                .map(|(port, task)| (port, task))
+                .collect::<Vec<_>>()
+        };
+        for (port, task) in listener_tasks {
+            task.abort();
+            let _ = task.await;
+            log::info!("Stopped local mod integration listener on port {port}");
+        }
     }
 
     async fn run_listener_on_port(&self, listener: TcpListener, port: u16) -> Result<()> {
@@ -1356,6 +1404,9 @@ impl ModIntegrationService {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if self.shutdown_started.load(Ordering::Acquire) {
+                break;
+            }
             if let Err(error) = self.process_queued_requests().await {
                 log::warn!("Mod integration queue will retry: {error}");
             }
@@ -1592,13 +1643,6 @@ impl ModIntegrationService {
         config.configured_port()
     }
 
-    fn validate_port(port: u32) -> Result<u16> {
-        if !(1..=u16::MAX as u32).contains(&port) {
-            anyhow::bail!("The bridge port must be between 1 and 65535");
-        }
-        Ok(port as u16)
-    }
-
     async fn write_bridge_config(path: &Path, config: BridgeConfigFile) -> Result<()> {
         let parent = path
             .parent()
@@ -1760,14 +1804,26 @@ mod tests {
     }
 
     #[test]
-    fn bridge_port_validation_rejects_values_outside_the_socket_range() {
-        assert_eq!(ModIntegrationService::validate_port(1).unwrap(), 1);
-        assert_eq!(
-            ModIntegrationService::validate_port(65_535).unwrap(),
-            65_535
-        );
-        assert!(ModIntegrationService::validate_port(0).is_err());
-        assert!(ModIntegrationService::validate_port(65_536).is_err());
+    fn bridge_port_sequence_advances_and_wraps_without_using_zero() {
+        assert_eq!(ModIntegrationService::port_in_sequence(43_871, 0), 43_871);
+        assert_eq!(ModIntegrationService::port_in_sequence(43_871, 1), 43_872);
+        assert_eq!(ModIntegrationService::port_in_sequence(65_535, 1), 1);
+    }
+
+    #[tokio::test]
+    async fn bridge_port_selection_skips_an_occupied_loopback_port() {
+        let occupied = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("occupied listener");
+        let requested = occupied.local_addr().expect("occupied address").port();
+
+        let (selected, available) = ModIntegrationService::bind_next_available_port(requested)
+            .await
+            .expect("next available listener");
+
+        assert_ne!(selected, requested);
+        drop(available);
+        drop(occupied);
     }
 
     #[test]

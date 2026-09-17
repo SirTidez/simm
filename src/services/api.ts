@@ -1501,13 +1501,6 @@ export class ApiService {
     return invoke('set_mod_integration_policy', { environmentId, policy });
   }
 
-  static async setModIntegrationPort(
-    environmentId: string,
-    port: number,
-  ): Promise<ModIntegrationConfig> {
-    return invoke('set_mod_integration_port', { environmentId, port });
-  }
-
   static async listModIntegrationRequests(
     environmentId: string,
   ): Promise<ModIntegrationRequestRecord[]> {

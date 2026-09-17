@@ -26,18 +26,6 @@ pub async fn set_mod_integration_policy(
 }
 
 #[tauri::command]
-pub async fn set_mod_integration_port(
-    service: State<'_, ModIntegrationService>,
-    environment_id: String,
-    port: u32,
-) -> Result<ModIntegrationConfig, String> {
-    service
-        .set_port(&environment_id, port)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 pub async fn list_mod_integration_requests(
     service: State<'_, ModIntegrationService>,
     environment_id: String,

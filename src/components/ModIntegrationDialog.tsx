@@ -60,15 +60,12 @@ export function ModIntegrationDialog({
   const [config, setConfig] = useState<ModIntegrationConfig | null>(null);
   const [requests, setRequests] = useState<ModIntegrationRequestRecord[]>([]);
   const [selectedPolicy, setSelectedPolicy] = useState<ModIntegrationPolicy>('disabled');
-  const [portDraft, setPortDraft] = useState('43871');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [savingPort, setSavingPort] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadInFlight = useRef(false);
   const policyDirty = useRef(false);
-  const portDirty = useRef(false);
 
   const load = useCallback(async (showLoading = false) => {
     if (loadInFlight.current) return;
@@ -82,9 +79,6 @@ export function ModIntegrationDialog({
       setConfig(nextConfig);
       if (!policyDirty.current) {
         setSelectedPolicy(nextConfig.policy);
-      }
-      if (!portDirty.current) {
-        setPortDraft(String(nextConfig.port));
       }
       setRequests(nextRequests);
       setError(null);
@@ -123,32 +117,6 @@ export function ModIntegrationDialog({
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const numericPort = Number(portDraft);
-  const portIsValid = /^\d+$/.test(portDraft)
-    && Number.isInteger(numericPort)
-    && numericPort >= 1
-    && numericPort <= 65535;
-
-  const savePort = async () => {
-    if (!portIsValid) {
-      setError('The bridge port must be between 1 and 65535.');
-      return;
-    }
-    setSavingPort(true);
-    setError(null);
-    try {
-      const next = await ApiService.setModIntegrationPort(environment.id, numericPort);
-      portDirty.current = false;
-      setConfig(next);
-      setPortDraft(String(next.port));
-      await load(false);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : String(saveError));
-    } finally {
-      setSavingPort(false);
     }
   };
 
@@ -265,34 +233,10 @@ export function ModIntegrationDialog({
                       <h4>Local connection</h4>
                       <p>Protocol v{config.protocolVersion}; connections from outside this computer are refused.</p>
                     </div>
-                    <div className="mod-integration-dialog__port-editor">
-                      <label htmlFor="mod-integration-port">
-                        <span>Port</span>
-                        <input
-                          id="mod-integration-port"
-                          type="number"
-                          min="1"
-                          max="65535"
-                          step="1"
-                          inputMode="numeric"
-                          value={portDraft}
-                          onChange={(event) => {
-                            portDirty.current = true;
-                            setPortDraft(event.target.value);
-                          }}
-                          aria-invalid={!portIsValid}
-                        />
-                      </label>
-                      <SimmButton
-                        variant="secondary"
-                        className="btn btn-secondary btn-small"
-                        onClick={() => void savePort()}
-                        disabled={savingPort || !portIsValid || numericPort === config.port}
-                      >
-                        {savingPort ? <Icon name="fas fa-spinner fa-spin" /> : <Icon name="fas fa-save" />}
-                        {savingPort ? 'Saving…' : 'Save port'}
-                      </SimmButton>
-                    </div>
+                    <span className="mod-integration-dialog__managed-port">
+                      <Icon name="fas fa-sync-alt" />
+                      Port {config.port} · managed automatically
+                    </span>
                   </div>
                   {config.connectionError && (
                     <div className="mod-integration-dialog__connection-error" role="alert">
@@ -307,7 +251,7 @@ export function ModIntegrationDialog({
                         <span>{config.bridgeConfigPath}</span>
                       </div>
                       <p className="mod-integration-dialog__port-hint">
-                        You can also change the numeric <code>port</code> in this bridge file. SIMM detects valid changes while it is running.
+                        SIMM selects an available local port and keeps this bridge file synchronized automatically.
                       </p>
                     </>
                   )}

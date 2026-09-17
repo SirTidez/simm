@@ -206,7 +206,7 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         runtime_settings.clone(),
     );
     app.manage(mod_integration.clone());
-    mod_integration.start();
+    mod_integration.start().await;
     log::info!("Local mod integration API and request queue initialized");
 
     // The telemetry monitor's interval also ticks immediately and reads environment

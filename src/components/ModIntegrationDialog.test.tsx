@@ -6,7 +6,6 @@ import type { Environment, ModIntegrationConfig, ModIntegrationRequestRecord } f
 const apiMocks = vi.hoisted(() => ({
   getModIntegrationConfig: vi.fn(),
   setModIntegrationPolicy: vi.fn(),
-  setModIntegrationPort: vi.fn(),
   listModIntegrationRequests: vi.fn(),
   resolveModIntegrationRequest: vi.fn(),
 }));
@@ -58,10 +57,6 @@ describe('ModIntegrationDialog', () => {
       configured: policy !== 'disabled',
       listening: policy !== 'disabled',
     }));
-    apiMocks.setModIntegrationPort.mockReset().mockImplementation(async (_environmentId, port) => ({
-      ...config,
-      port,
-    }));
     apiMocks.listModIntegrationRequests.mockReset().mockResolvedValue([request]);
     apiMocks.resolveModIntegrationRequest.mockReset().mockResolvedValue({
       ...request,
@@ -79,22 +74,18 @@ describe('ModIntegrationDialog', () => {
 
     expect(await screen.findByRole('heading', { name: 'Mod Integration' })).toBeTruthy();
     expect(screen.getByText('Beta - Mono')).toBeTruthy();
-    expect(screen.getByRole('spinbutton', { name: 'Port' })).toHaveValue(43871);
+    expect(screen.getByText('Port 43871 · managed automatically')).toBeTruthy();
     expect(screen.queryByText('127.0.0.1:43871')).toBeNull();
     expect(screen.getAllByText('Example Mod')).toHaveLength(2);
     expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy();
   });
 
-  it('updates the loopback port without exposing an address', async () => {
+  it('shows the application-managed port without exposing an address or editor', async () => {
     render(<ModIntegrationDialog isOpen={true} environment={environment} onClose={vi.fn()} />);
 
-    const portInput = await screen.findByRole('spinbutton', { name: 'Port' });
-    fireEvent.change(portInput, { target: { value: '43872' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save port' }));
-
-    await waitFor(() => {
-      expect(apiMocks.setModIntegrationPort).toHaveBeenCalledWith('env-1', 43872);
-    });
+    expect(await screen.findByText('Port 43871 · managed automatically')).toBeTruthy();
+    expect(screen.queryByRole('spinbutton', { name: 'Port' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save port' })).toBeNull();
     expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull();
   });
 

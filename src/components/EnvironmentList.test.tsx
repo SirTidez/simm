@@ -33,7 +33,6 @@ const apiMocks = vi.hoisted(() => ({
   saveModProfileFile: vi.fn(),
   getModIntegrationConfig: vi.fn(),
   setModIntegrationPolicy: vi.fn(),
-  setModIntegrationPort: vi.fn(),
   listModIntegrationRequests: vi.fn(),
   resolveModIntegrationRequest: vi.fn(),
 }));

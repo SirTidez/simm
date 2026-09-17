@@ -818,7 +818,6 @@ describe('ApiService', () => {
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll', securityOverride: false }],
     ['getModIntegrationConfig', () => ApiService.getModIntegrationConfig('env-1'), 'get_mod_integration_config', { environmentId: 'env-1' }],
     ['setModIntegrationPolicy', () => ApiService.setModIntegrationPolicy('env-1', 'ask'), 'set_mod_integration_policy', { environmentId: 'env-1', policy: 'ask' }],
-    ['setModIntegrationPort', () => ApiService.setModIntegrationPort('env-1', 43872), 'set_mod_integration_port', { environmentId: 'env-1', port: 43872 }],
     ['listModIntegrationRequests', () => ApiService.listModIntegrationRequests('env-1'), 'list_mod_integration_requests', { environmentId: 'env-1' }],
     ['resolveModIntegrationRequest', () => ApiService.resolveModIntegrationRequest('request-1', true), 'resolve_mod_integration_request', { requestId: 'request-1', approve: true }],
     ['refreshThunderstorePackageCache', () => ApiService.refreshThunderstorePackageCache('schedule-i'), 'refresh_thunderstore_package_cache', { gameId: 'schedule-i' }],
