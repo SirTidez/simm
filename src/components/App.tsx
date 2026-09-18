@@ -17,6 +17,7 @@ import type { WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
 import { AppUpdateToast } from './AppUpdateToast';
+import { MelonLoaderUpdateToast } from './MelonLoaderUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
 import { ModLibraryStoreProvider } from '../stores/modLibraryStore';
@@ -26,6 +27,7 @@ import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import {
   createAsyncListenerScope,
+  onMelonLoaderUpdateAvailable,
   onModIntegrationRequestsChanged,
   onRuntimeSwitch,
 } from '../services/events';
@@ -44,6 +46,7 @@ import type {
   AppUpdateChannelPreferences,
   AppUpdatePreferences,
   AppUpdateStatus,
+  MelonLoaderUpdateNotice,
   ModIntegrationRequestRecord,
   RuntimeSwitchResult,
 } from '../types';
@@ -1428,6 +1431,8 @@ function AppContent() {
   const [modIntegrationNotice, setModIntegrationNotice] = useState<ModIntegrationRequestRecord | null>(null);
   const [modIntegrationReviewEnvironmentId, setModIntegrationReviewEnvironmentId] = useState<string | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
+  const [melonLoaderUpdateNotice, setMelonLoaderUpdateNotice] = useState<MelonLoaderUpdateNotice | null>(null);
+  const [dismissedMelonLoaderVersion, setDismissedMelonLoaderVersion] = useState<string | null>(null);
   const [dismissedAppUpdateVersions, setDismissedAppUpdateVersions] = useState<Partial<Record<AppUpdateChannel, string>>>({});
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string | null>(null);
@@ -1529,6 +1534,17 @@ function AppContent() {
       });
     });
     return () => unlisten?.();
+  }, []);
+  useEffect(() => {
+    const listeners = createAsyncListenerScope((error) => {
+      logger.warn('Failed to listen for MelonLoader stable updates', {
+        error: getErrorMessage(error, 'listener setup failed'),
+      });
+    });
+    listeners.register(() => onMelonLoaderUpdateAvailable((notice) => {
+      setMelonLoaderUpdateNotice(notice);
+    }));
+    return listeners.dispose;
   }, []);
   const refreshPendingModIntegrationRequest = useCallback(async (preferredEnvironmentId?: string) => {
     const environmentIds = environments
@@ -2595,6 +2611,14 @@ function AppContent() {
     && !isAppUpdateSnoozed
     && !isAppUpdateSkipped
     && !isAppUpdateDismissedForSession;
+  const availableMelonLoaderUpdate = melonLoaderUpdateNotice
+    ?? settings?.melonLoaderUpdate?.available
+    ?? null;
+  const showMelonLoaderUpdateToast = availableMelonLoaderUpdate !== null
+    && availableMelonLoaderUpdate.latestVersion !== dismissedMelonLoaderVersion
+    && availableMelonLoaderUpdate.latestVersion !== settings?.melonLoaderUpdate?.dismissedVersion
+    && !showAppUpdateToast
+    && !modIntegrationNotice;
   const currentEnvironmentId =
     'environmentId' in activeWorkspace
       ? activeWorkspace.environmentId
@@ -2909,6 +2933,34 @@ function AppContent() {
             ...previous,
             [appUpdateState.result.channel]: appUpdateReleaseIdentity(appUpdateState.result),
           }))}
+        />
+      )}
+
+      {showMelonLoaderUpdateToast && availableMelonLoaderUpdate && (
+        <MelonLoaderUpdateToast
+          notice={availableMelonLoaderUpdate}
+          onReview={() => {
+            const firstTarget = availableMelonLoaderUpdate.targets[0];
+            setDismissedMelonLoaderVersion(availableMelonLoaderUpdate.latestVersion);
+            setMelonLoaderUpdateNotice(null);
+            void updateSettings({
+              melonLoaderUpdate: {
+                ...(settings?.melonLoaderUpdate ?? {}),
+                dismissedVersion: availableMelonLoaderUpdate.latestVersion,
+              },
+            });
+            openEnvironmentsWorkspace(firstTarget?.environmentId);
+          }}
+          onDismiss={() => {
+            setDismissedMelonLoaderVersion(availableMelonLoaderUpdate.latestVersion);
+            setMelonLoaderUpdateNotice(null);
+            void updateSettings({
+              melonLoaderUpdate: {
+                ...(settings?.melonLoaderUpdate ?? {}),
+                dismissedVersion: availableMelonLoaderUpdate.latestVersion,
+              },
+            });
+          }}
         />
       )}
 

@@ -293,6 +293,27 @@ export interface AppUpdatePreferences extends AppUpdateChannelPreferences {
   byChannel?: Partial<Record<AppUpdateChannel, AppUpdateChannelPreferences>> | null;
 }
 
+export interface MelonLoaderUpdateTarget {
+  environmentId: string;
+  environmentName: string;
+  currentVersion: string;
+  runtime: 'IL2CPP' | 'MONO';
+}
+
+export interface MelonLoaderUpdateNotice {
+  latestVersion: string;
+  releaseName: string;
+  publishedAt?: string | null;
+  releaseUrl: string;
+  targets: MelonLoaderUpdateTarget[];
+}
+
+export interface MelonLoaderUpdatePreferences {
+  lastCheckedAt?: string | null;
+  dismissedVersion?: string | null;
+  available?: MelonLoaderUpdateNotice | null;
+}
+
 export type AppUpdateChannel = 'stable' | 'beta';
 
 export type ExperienceMode = 'player' | 'powerUser';
@@ -326,6 +347,7 @@ export interface Settings {
   databaseBackupCount?: number;
   logRetentionDays?: number;
   appUpdate?: AppUpdatePreferences | null;
+  melonLoaderUpdate?: MelonLoaderUpdatePreferences | null;
   experienceMode?: ExperienceMode | null;
   showAdvancedGameTools?: boolean | null;
   windowCloseBehavior?: 'ask' | 'tray' | 'quit' | null;

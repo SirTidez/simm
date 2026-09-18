@@ -1600,6 +1600,7 @@ mod tests {
             database_backup_count: Some(10),
             log_retention_days: Some(7),
             app_update: None,
+            melon_loader_update: None,
             experience_mode: None,
             show_advanced_game_tools: None,
             window_close_behavior: None,

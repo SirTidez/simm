@@ -302,6 +302,33 @@ pub struct AppUpdateSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct MelonLoaderUpdateSettings {
+    pub last_checked_at: Option<String>,
+    pub dismissed_version: Option<String>,
+    pub available: Option<MelonLoaderUpdateNotice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MelonLoaderUpdateNotice {
+    pub latest_version: String,
+    pub release_name: String,
+    pub published_at: Option<String>,
+    pub release_url: String,
+    pub targets: Vec<MelonLoaderUpdateTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MelonLoaderUpdateTarget {
+    pub environment_id: String,
+    pub environment_name: String,
+    pub current_version: String,
+    pub runtime: Runtime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AppUpdateChannelPreferences {
     pub last_checked_at: Option<String>,
     pub last_seen_version_raw: Option<String>,
@@ -407,6 +434,8 @@ pub struct Settings {
     pub database_backup_count: Option<u32>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
     pub app_update: Option<AppUpdateSettings>,
+    #[serde(default)]
+    pub melon_loader_update: Option<MelonLoaderUpdateSettings>,
     pub experience_mode: Option<ExperienceMode>,
     pub show_advanced_game_tools: Option<bool>,
     #[serde(default)]

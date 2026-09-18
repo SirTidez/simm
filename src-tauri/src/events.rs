@@ -1,4 +1,7 @@
-use crate::types::{DownloadProgress, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult};
+use crate::types::{
+    DownloadProgress, MelonLoaderUpdateNotice, RuntimeSwitchResult, TrackedDownload,
+    UpdateCheckResult,
+};
 use tauri::{AppHandle, Emitter, Runtime};
 
 pub fn emit_progress<R: Runtime>(
@@ -129,6 +132,13 @@ pub fn emit_melonloader_error<R: Runtime>(
             "message": message
         }),
     )
+}
+
+pub fn emit_melonloader_update_available<R: Runtime>(
+    app: &AppHandle<R>,
+    notice: MelonLoaderUpdateNotice,
+) -> Result<(), tauri::Error> {
+    app.emit("melonloader_update_available", notice)
 }
 
 pub fn emit_update_available<R: Runtime>(

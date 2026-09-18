@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult } from '../types';
+import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, MelonLoaderUpdateNotice, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult } from '../types';
 
 export type EventUnlisten = () => void;
 
@@ -161,6 +161,8 @@ export interface ModMetadataRefreshStatusEvent {
   running: boolean;
 }
 
+export type MelonLoaderUpdateAvailableEvent = MelonLoaderUpdateNotice;
+
 export interface ModIntegrationRequestsChangedEvent {
   environmentId: string;
 }
@@ -287,6 +289,12 @@ export async function onModMetadataRefreshStatus(
   handler: (data: ModMetadataRefreshStatusEvent) => void
 ): Promise<() => void> {
   return await listen<ModMetadataRefreshStatusEvent>('mod_metadata_refresh_status', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onMelonLoaderUpdateAvailable(handler: (data: MelonLoaderUpdateAvailableEvent) => void): Promise<() => void> {
+  return await listen<MelonLoaderUpdateAvailableEvent>('melonloader_update_available', (event) => {
     handler(event.payload);
   });
 }

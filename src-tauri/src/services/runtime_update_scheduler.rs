@@ -88,7 +88,7 @@ pub fn start(pool: Arc<SqlitePool>, app: AppHandle, runtime_settings: RuntimeSet
                     pool.clone(),
                     app.clone(),
                     false,
-                    settings.clone(),
+                    runtime_settings.clone(),
                 )
                 .await
                 {

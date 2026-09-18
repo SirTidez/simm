@@ -9,7 +9,10 @@ use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::services::telemetry_upload::TelemetryUploadService;
 use crate::services::thunderstore::{shared_thunderstore_service, ThunderStoreService};
 use crate::services::update_check::UpdateCheckService;
-use crate::types::{ModMetadata, ModSource, UpdateCheckResult};
+use crate::types::{
+    Environment, EnvironmentStatus, MelonLoaderUpdateNotice, MelonLoaderUpdateTarget, ModMetadata,
+    ModSource, UpdateCheckResult,
+};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -26,6 +29,7 @@ static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
 static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 static UPDATE_CHECK_RUN_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+const MELONLOADER_STABLE_CHECK_INTERVAL_HOURS: i64 = 24;
 
 async fn acquire_update_check_run(kind: &str) -> tokio::sync::MutexGuard<'static, ()> {
     if let Ok(guard) = UPDATE_CHECK_RUN_LOCK.try_lock() {
@@ -197,14 +201,230 @@ async fn refresh_discovery_catalogs(nexus_game_id: &str) {
     }
 }
 
+fn melonloader_stable_check_is_due(
+    last_checked_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(last_checked_at) = last_checked_at else {
+        return true;
+    };
+    let Ok(last_checked_at) = chrono::DateTime::parse_from_rfc3339(last_checked_at) else {
+        return true;
+    };
+
+    now.signed_duration_since(last_checked_at.with_timezone(&chrono::Utc))
+        >= chrono::Duration::hours(MELONLOADER_STABLE_CHECK_INTERVAL_HOURS)
+}
+
+fn compare_melonloader_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left_parts = extract_numeric_version_parts(left);
+    let right_parts = extract_numeric_version_parts(right);
+    if left_parts.is_empty() || right_parts.is_empty() {
+        return None;
+    }
+
+    let max_len = left_parts.len().max(right_parts.len());
+    for index in 0..max_len {
+        match left_parts
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right_parts.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return Some(ordering),
+        }
+    }
+
+    Some(std::cmp::Ordering::Equal)
+}
+
+fn build_melonloader_update_notice(
+    release: &serde_json::Value,
+    environments: &[Environment],
+) -> Option<MelonLoaderUpdateNotice> {
+    if release
+        .get("draft")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || release
+            .get("prerelease")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        || release
+            .get("isNightly")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let latest_version = release.get("tag_name")?.as_str()?.trim();
+    if latest_version.is_empty() || latest_version.to_ascii_lowercase().contains("-ci.") {
+        return None;
+    }
+
+    let targets = environments
+        .iter()
+        .filter(|environment| matches!(environment.status, EnvironmentStatus::Completed))
+        .filter_map(|environment| {
+            let current_version = environment
+                .melon_loader_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| !version.is_empty())?;
+            if !matches!(
+                compare_melonloader_versions(current_version, latest_version),
+                Some(std::cmp::Ordering::Less)
+            ) {
+                return None;
+            }
+
+            Some(MelonLoaderUpdateTarget {
+                environment_id: environment.id.clone(),
+                environment_name: environment.name.clone(),
+                current_version: current_version.to_string(),
+                runtime: environment.runtime.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if targets.is_empty() {
+        return None;
+    }
+
+    Some(MelonLoaderUpdateNotice {
+        latest_version: latest_version.to_string(),
+        release_name: release
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(latest_version)
+            .to_string(),
+        published_at: release
+            .get("published_at")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        release_url: release
+            .get("html_url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or("https://github.com/LavaGang/MelonLoader/releases")
+            .to_string(),
+        targets,
+    })
+}
+
+async fn check_melonloader_stable_update(
+    pool: &SqlitePool,
+    runtime_settings: &RuntimeSettingsState,
+    app: &AppHandle,
+    environments: &[Environment],
+) {
+    if !environments.iter().any(|environment| {
+        matches!(environment.status, EnvironmentStatus::Completed)
+            && environment
+                .melon_loader_version
+                .as_deref()
+                .is_some_and(|version| !version.trim().is_empty())
+    }) {
+        return;
+    }
+
+    let settings = runtime_settings.snapshot().await;
+    let now = chrono::Utc::now();
+    if !melonloader_stable_check_is_due(
+        settings
+            .melon_loader_update
+            .as_ref()
+            .and_then(|state| state.last_checked_at.as_deref()),
+        now,
+    ) {
+        return;
+    }
+
+    let checked_at = now.to_rfc3339();
+    let service = match get_github_service(Arc::new(pool.clone())).await {
+        Ok(service) => service,
+        Err(error) => {
+            log::warn!(
+                "[UpdateCheck] Could not initialize MelonLoader stable release check: {}",
+                error
+            );
+            return;
+        }
+    };
+
+    let release = match service
+        .get_latest_release("LavaGang", "MelonLoader", false)
+        .await
+    {
+        Ok(release) => release,
+        Err(error) => {
+            log::warn!(
+                "[UpdateCheck] MelonLoader stable release check failed: {:#}",
+                error
+            );
+            if let Err(save_error) = runtime_settings
+                .save_settings(
+                    pool,
+                    serde_json::json!({
+                        "melonLoaderUpdate": { "lastCheckedAt": checked_at }
+                    }),
+                )
+                .await
+            {
+                log::warn!(
+                    "[UpdateCheck] Could not persist the MelonLoader check time: {:#}",
+                    save_error
+                );
+            }
+            return;
+        }
+    };
+
+    let notice = release
+        .as_ref()
+        .and_then(|release| build_melonloader_update_notice(release, environments));
+    if let Err(error) = runtime_settings
+        .save_settings(
+            pool,
+            serde_json::json!({
+                "melonLoaderUpdate": {
+                    "lastCheckedAt": checked_at,
+                    "available": notice
+                }
+            }),
+        )
+        .await
+    {
+        log::warn!(
+            "[UpdateCheck] Could not persist MelonLoader update state: {:#}",
+            error
+        );
+    }
+
+    if let Some(notice) = notice {
+        log::info!(
+            "[UpdateCheck] MelonLoader stable {} is available for {} environment(s)",
+            notice.latest_version,
+            notice.targets.len()
+        );
+        let _ = events::emit_melonloader_update_available(app, notice);
+    }
+}
+
 pub async fn run_background_update_checks(
     pool: Arc<SqlitePool>,
     app: AppHandle,
     manual: bool,
-    settings: crate::types::Settings,
+    runtime_settings: RuntimeSettingsState,
 ) -> Result<(), String> {
     let _run_guard = acquire_update_check_run("background/tray").await;
     let started_at = std::time::Instant::now();
+    let settings = runtime_settings.snapshot().await;
     if !background_checks_enabled(&settings, manual) {
         log::debug!("[UpdateCheck] Background run skipped because automatic checks are disabled");
         return Ok(());
@@ -217,11 +437,13 @@ pub async fn run_background_update_checks(
         .await
         .map_err(|error| error.to_string())?;
     let environment_count = environments.len();
+    check_melonloader_stable_update(pool.as_ref(), &runtime_settings, &app, &environments).await;
     let interval_minutes = settings.update_check_interval.unwrap_or(60).max(1) as i64;
     let nexus_game_id = normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref());
     let now = chrono::Utc::now();
     let due = environments
-        .into_iter()
+        .iter()
+        .cloned()
         .filter(|environment| {
             manual
                 || environment
@@ -290,6 +512,33 @@ pub async fn run_background_update_checks(
 mod background_scheduler_tests {
     use super::*;
     use crate::services::settings::SettingsService;
+    use crate::types::Runtime;
+
+    fn environment_with_melonloader(version: &str) -> Environment {
+        Environment {
+            id: "env-1".to_string(),
+            name: "Beta".to_string(),
+            description: None,
+            app_id: "3164500".to_string(),
+            branch: "beta".to_string(),
+            output_dir: "C:/SIMM/beta".to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: Some(version.to_string()),
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: None,
+        }
+    }
 
     #[test]
     fn disabled_automatic_checks_are_rejected_before_environment_loading() {
@@ -298,6 +547,58 @@ mod background_scheduler_tests {
 
         assert!(!background_checks_enabled(&settings, false));
         assert!(background_checks_enabled(&settings, true));
+    }
+
+    #[test]
+    fn melonloader_stable_check_runs_at_most_once_per_day() {
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::hours(23)).to_rfc3339();
+        let stale = (now - chrono::Duration::hours(24)).to_rfc3339();
+
+        assert!(!melonloader_stable_check_is_due(Some(&recent), now));
+        assert!(melonloader_stable_check_is_due(Some(&stale), now));
+        assert!(melonloader_stable_check_is_due(None, now));
+        assert!(melonloader_stable_check_is_due(Some("not-a-date"), now));
+    }
+
+    #[test]
+    fn melonloader_notice_only_includes_outdated_installed_environments() {
+        let release = serde_json::json!({
+            "tag_name": "v0.7.4",
+            "name": "MelonLoader v0.7.4",
+            "published_at": "2026-09-17T00:00:00Z",
+            "prerelease": false,
+            "draft": false,
+            "html_url": "https://github.com/LavaGang/MelonLoader/releases/tag/v0.7.4"
+        });
+        let mut current = environment_with_melonloader("0.7.4");
+        current.id = "env-current".to_string();
+        let notice = build_melonloader_update_notice(
+            &release,
+            &[environment_with_melonloader("0.7.3"), current],
+        )
+        .expect("older stable installation should be reported");
+
+        assert_eq!(notice.latest_version, "v0.7.4");
+        assert_eq!(notice.targets.len(), 1);
+        assert_eq!(notice.targets[0].environment_id, "env-1");
+    }
+
+    #[test]
+    fn melonloader_notice_rejects_nightly_and_prerelease_builds() {
+        let environments = [environment_with_melonloader("0.7.3")];
+        let nightly = serde_json::json!({
+            "tag_name": "v0.7.4-ci.2581",
+            "prerelease": true,
+            "isNightly": true
+        });
+        let prerelease = serde_json::json!({
+            "tag_name": "v0.7.4-rc.1",
+            "prerelease": true
+        });
+
+        assert!(build_melonloader_update_notice(&nightly, &environments).is_none());
+        assert!(build_melonloader_update_notice(&prerelease, &environments).is_none());
     }
 }
 
@@ -651,6 +952,17 @@ pub async fn check_update(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
+    let peer_environments = env_service
+        .get_environments()
+        .await
+        .map_err(|e| e.to_string())?;
+    check_melonloader_stable_update(
+        db.inner().as_ref(),
+        runtime_settings.inner(),
+        &app,
+        &peer_environments,
+    )
+    .await;
 
     if !manual {
         let settings = runtime_settings.snapshot().await;
@@ -686,10 +998,6 @@ pub async fn check_update(
     // A direct update action still needs the Steam installation as a version
     // witness. Steam and managed environments can share a manifest while the
     // managed copy is on an older game version.
-    let peer_environments = env_service
-        .get_environments()
-        .await
-        .map_err(|e| e.to_string())?;
     let mut results = update_service
         .check_all_environments(&peer_environments)
         .await
@@ -747,6 +1055,8 @@ pub async fn check_all_updates(
         .get_environments()
         .await
         .map_err(|e| e.to_string())?;
+    check_melonloader_stable_update(db.inner().as_ref(), runtime_settings.inner(), &app, &envs)
+        .await;
 
     let manual = manual.unwrap_or(false);
     let settings = runtime_settings.snapshot().await;

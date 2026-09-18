@@ -136,7 +136,7 @@ fn main() {
                                     pool,
                                     app,
                                     true,
-                                    runtime_settings.snapshot().await,
+                                    runtime_settings,
                                 )
                                 .await
                             {

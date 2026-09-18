@@ -7118,6 +7118,73 @@ body {
   flex-wrap: wrap;
 }
 
+.melonloader-update-toast {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 2.6rem;
+  z-index: 4210;
+  width: min(25rem, calc(100vw - 2rem));
+  padding: 1rem;
+  border-radius: 1rem;
+  border: 1px solid color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 38%, rgba(255, 255, 255, 0.14));
+  background:
+    linear-gradient(180deg, rgba(22, 34, 50, 0.98), rgba(14, 23, 35, 0.98)),
+    radial-gradient(circle at top right, rgba(104, 154, 230, 0.2), transparent 38%);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.34);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.melonloader-update-toast__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.melonloader-update-toast__header strong {
+  display: block;
+  color: #f3f8ff;
+  font-size: 1rem;
+}
+
+.melonloader-update-toast__eyebrow {
+  display: inline-block;
+  margin-bottom: 0.2rem;
+  color: #8fb9f6;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.melonloader-update-toast__dismiss {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 999px;
+}
+
+.melonloader-update-toast p {
+  margin: 0;
+  color: #b6c8dd;
+  line-height: 1.45;
+}
+
+.melonloader-update-toast__targets {
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.72rem;
+  border: 1px solid rgba(126, 161, 211, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e4eefb;
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.melonloader-update-toast__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .app-runtime-dialog {
   max-width: 38rem;
 }

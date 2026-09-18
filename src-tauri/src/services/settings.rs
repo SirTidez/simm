@@ -16,7 +16,8 @@ use aes_gcm::{
 use sha2::{Digest, Sha256};
 
 use crate::types::{
-    AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings, WindowCloseBehavior,
+    AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, MelonLoaderUpdateSettings,
+    Settings, WindowCloseBehavior,
 };
 
 pub struct SettingsService {
@@ -206,6 +207,7 @@ impl SettingsService {
                 channel: Some(AppUpdateChannel::Stable),
                 by_channel: None,
             }),
+            melon_loader_update: Some(MelonLoaderUpdateSettings::default()),
             experience_mode: Some(crate::types::ExperienceMode::Player),
             show_advanced_game_tools: Some(false),
             window_close_behavior: Some(WindowCloseBehavior::Ask),
