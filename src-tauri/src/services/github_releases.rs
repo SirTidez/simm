@@ -1,8 +1,11 @@
 use crate::utils::http_identity;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::time::Duration;
 
 const DEFAULT_RELEASE_API_BASE_URL: &str = "https://api.lockwirelabs.dev";
+const MELONLOADER_NIGHTLY_RUNS_URL: &str = "https://api.github.com/repos/LavaGang/MelonLoader/actions/workflows/5411546/runs?branch=alpha-development&event=push&status=success&per_page=5";
+const MELONLOADER_NIGHTLY_ARTIFACT_NAME: &str = "MelonLoader.Windows.x64.CI.Release.zip";
 const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -73,29 +76,82 @@ impl GitHubReleasesService {
 
     async fn get_json(&self, endpoint: &str) -> Result<serde_json::Value> {
         let url = format!("{}{}", self.base_url, endpoint);
+        self.get_absolute_json(&url, endpoint).await
+    }
+
+    async fn get_absolute_json(&self, url: &str, description: &str) -> Result<serde_json::Value> {
         let response = self
             .client
-            .get(&url)
+            .get(url)
             .send()
             .await
-            .with_context(|| format!("Failed to fetch release API endpoint {}", endpoint))?;
+            .with_context(|| format!("Failed to fetch {}", description))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .with_context(|| format!("Failed to read response body for {}", endpoint))?;
+            .with_context(|| format!("Failed to read response body for {}", description))?;
 
         if !status.is_success() {
             return Err(anyhow::anyhow!(
                 "Release API request failed ({} {})",
                 status.as_u16(),
-                endpoint
+                description
             ));
         }
 
         serde_json::from_str::<serde_json::Value>(&body)
-            .with_context(|| format!("Invalid JSON from release API endpoint {}", endpoint))
+            .with_context(|| format!("Invalid JSON from {}", description))
+    }
+
+    fn melonloader_nightly_release(run: &serde_json::Value) -> Option<serde_json::Value> {
+        let run_id = run.get("id")?.as_u64()?;
+        let run_name = run.get("name")?.as_str()?.trim();
+        let tag_name = run_name
+            .split_once('|')
+            .map(|(tag, _)| tag)
+            .unwrap_or(run_name)
+            .trim();
+
+        if tag_name.is_empty() || !tag_name.to_ascii_lowercase().contains("-ci.") {
+            return None;
+        }
+
+        let name = run_name
+            .split_once('|')
+            .map(|(_, description)| description.trim())
+            .filter(|description| !description.is_empty())
+            .unwrap_or("MelonLoader nightly build");
+        let published_at = run
+            .get("created_at")
+            .or_else(|| run.get("updated_at"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let html_url = run
+            .get("html_url")
+            .and_then(|value| value.as_str())
+            .unwrap_or("https://github.com/LavaGang/MelonLoader/actions");
+        let download_url = format!(
+            "https://nightly.link/LavaGang/MelonLoader/actions/runs/{}/{}",
+            run_id, MELONLOADER_NIGHTLY_ARTIFACT_NAME
+        );
+
+        Some(serde_json::json!({
+            "tag_name": tag_name,
+            "name": name,
+            "body": format!("Nightly build from successful workflow run {}.", run_id),
+            "published_at": published_at,
+            "prerelease": true,
+            "draft": false,
+            "isNightly": true,
+            "html_url": html_url,
+            "workflow_run_id": run_id,
+            "assets": [{
+                "name": MELONLOADER_NIGHTLY_ARTIFACT_NAME,
+                "browser_download_url": download_url
+            }]
+        }))
     }
 
     fn extract_release(value: serde_json::Value) -> Option<serde_json::Value> {
@@ -221,6 +277,48 @@ impl GitHubReleasesService {
         Ok(Self::normalize_release_list(releases, include_prereleases))
     }
 
+    pub async fn get_melonloader_nightly_builds(&self) -> Result<Vec<serde_json::Value>> {
+        let payload = self
+            .get_absolute_json(
+                MELONLOADER_NIGHTLY_RUNS_URL,
+                "MelonLoader nightly workflow runs",
+            )
+            .await?;
+        let runs = payload
+            .get("workflow_runs")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| {
+                anyhow::anyhow!("MelonLoader nightly response did not contain workflow runs")
+            })?;
+
+        let mut seen_tags = HashSet::new();
+        let mut releases = runs
+            .iter()
+            .filter_map(Self::melonloader_nightly_release)
+            .filter(|release| {
+                release
+                    .get("tag_name")
+                    .and_then(|value| value.as_str())
+                    .map(|tag| seen_tags.insert(tag.to_string()))
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+
+        releases.sort_by(|a, b| {
+            let a_time = a
+                .get("published_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let b_time = b
+                .get("published_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            b_time.cmp(a_time)
+        });
+
+        Ok(releases)
+    }
+
     pub async fn download_release_asset(&self, url: &str) -> Result<Vec<u8>> {
         let response = self
             .client
@@ -339,5 +437,36 @@ mod tests {
             GitHubReleasesService::all_endpoint("ifBars", "S1API").expect("all endpoint"),
             "/releases/s1api/all"
         );
+    }
+
+    #[test]
+    fn melonloader_nightly_release_maps_successful_workflow_metadata() {
+        let release = GitHubReleasesService::melonloader_nightly_release(&serde_json::json!({
+            "id": 33964714377_u64,
+            "name": "0.7.4-ci.2581 | Backported Changes to v0.7.4 Hotfix",
+            "created_at": "2026-09-05T11:57:49Z",
+            "html_url": "https://github.com/LavaGang/MelonLoader/actions/runs/33964714377"
+        }))
+        .expect("nightly release");
+
+        assert_eq!(release["tag_name"], "0.7.4-ci.2581");
+        assert_eq!(release["name"], "Backported Changes to v0.7.4 Hotfix");
+        assert_eq!(release["prerelease"], true);
+        assert_eq!(release["isNightly"], true);
+        assert_eq!(
+            release["assets"][0]["browser_download_url"],
+            "https://nightly.link/LavaGang/MelonLoader/actions/runs/33964714377/MelonLoader.Windows.x64.CI.Release.zip"
+        );
+    }
+
+    #[test]
+    fn melonloader_nightly_release_rejects_unversioned_workflow_runs() {
+        let release = GitHubReleasesService::melonloader_nightly_release(&serde_json::json!({
+            "id": 42,
+            "name": "Documentation build",
+            "created_at": "2026-09-05T11:57:49Z"
+        }));
+
+        assert!(release.is_none());
     }
 }

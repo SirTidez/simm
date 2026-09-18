@@ -969,7 +969,7 @@ export class ApiService {
     return invoke('get_melon_loader_status', { environmentId });
   }
 
-  static async getMelonLoaderReleases(_environmentId: string): Promise<Array<{
+  static async getMelonLoaderReleases(_environmentId: string, includeNightly = false): Promise<Array<{
     tag_name: string;
     name: string;
     published_at: string;
@@ -978,13 +978,13 @@ export class ApiService {
     download_url: string | null;
     body?: string;
   }>> {
-    const releases = await invoke<Array<any>>('get_all_melon_loader_releases');
+    const releases = await invoke<Array<any>>('get_all_melon_loader_releases', { includeNightly });
     return releases.map(r => ({
       tag_name: r.tag_name,
       name: r.name,
       published_at: r.published_at,
       prerelease: r.prerelease,
-      isNightly: false,
+      isNightly: r.isNightly === true,
       download_url: r.assets?.[0]?.browser_download_url || null,
       body: r.body,
     }));

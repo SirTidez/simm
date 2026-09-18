@@ -2359,6 +2359,9 @@ body::before {
 
 .melonloader-dialog {
   max-width: 600px;
+  height: min(46rem, calc(100dvh - max(clamp(8rem, 16vw, 10rem), 140px)));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -2401,6 +2404,24 @@ body::before {
   display: grid;
   gap: 0.55rem;
   min-width: 12rem;
+}
+
+.melonloader-dialog__source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.melonloader-dialog__nightly-control {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #c5d3e6;
+  font-size: 0.68rem;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 .melonloader-dialog__stat-card {
@@ -2582,6 +2603,20 @@ body::before {
 
 .melonloader-dialog__footer .btn {
   white-space: nowrap;
+}
+
+@media (max-height: 42.5rem) {
+  .simm-dialog-content.melonloader-dialog {
+    top: 0.5rem;
+    height: calc(100dvh - 1rem);
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .melonloader-dialog__body {
+    padding: 0.75rem 0.9rem 0.85rem;
+    gap: 0.7rem;
+  }
+
 }
 
 .wizard-entry-grid {

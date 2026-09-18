@@ -90,9 +90,35 @@ pub async fn get_latest_melon_loader_release(
 #[tauri::command]
 pub async fn get_all_melon_loader_releases(
     db: State<'_, Arc<SqlitePool>>,
+    include_nightly: Option<bool>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db);
-    get_all_releases_logged(service, "LavaGang", "MelonLoader").await
+    let mut releases = get_all_releases_logged(service, "LavaGang", "MelonLoader").await?;
+
+    if include_nightly.unwrap_or(false) {
+        let nightlies = service
+            .get_melonloader_nightly_builds()
+            .await
+            .map_err(|error| {
+                log::error!("Failed to fetch MelonLoader nightly builds: {}", error);
+                error.to_string()
+            })?;
+        log::debug!("Resolved {} MelonLoader nightly builds", nightlies.len());
+        releases.extend(nightlies);
+        releases.sort_by(|a, b| {
+            let a_time = a
+                .get("published_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let b_time = b
+                .get("published_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            b_time.cmp(a_time)
+        });
+    }
+
+    Ok(releases)
 }
 
 #[tauri::command]

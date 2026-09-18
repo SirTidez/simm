@@ -141,17 +141,43 @@ pub async fn install_melon_loader(
         Err(e) => return error_json(format!("Failed to fetch MelonLoader releases: {}", e)),
     };
 
-    // Find the release matching the version tag
+    // Find the release matching the version tag. Stable releases remain the
+    // default source; an exact nightly tag falls back to successful official
+    // workflow runs so the backend still owns artifact resolution.
     eprintln!(
         "[install_melon_loader] Looking for version tag: {}",
         version_tag
     );
-    let release = match releases.iter().find(|r| {
+    let mut release = releases.into_iter().find(|r| {
         r.get("tag_name")
             .and_then(|t| t.as_str())
             .map(|t| t == version_tag)
             .unwrap_or(false)
-    }) {
+    });
+
+    if release.is_none() {
+        eprintln!(
+            "[install_melon_loader] Stable release not found; checking official nightly builds"
+        );
+        let nightlies = match github_service.get_melonloader_nightly_builds().await {
+            Ok(nightlies) => nightlies,
+            Err(error) => {
+                return error_json(format!(
+                    "Failed to fetch MelonLoader nightly builds: {}",
+                    error
+                ));
+            }
+        };
+        release = nightlies.into_iter().find(|candidate| {
+            candidate
+                .get("tag_name")
+                .and_then(|tag| tag.as_str())
+                .map(|tag| tag == version_tag)
+                .unwrap_or(false)
+        });
+    }
+
+    let release = match release {
         Some(release) => {
             eprintln!(
                 "[install_melon_loader] Found release: {:?}",
@@ -164,7 +190,7 @@ pub async fn install_melon_loader(
 
     // Get the Windows x64 ZIP asset URL
     eprintln!("[install_melon_loader] Getting Windows x64 ZIP asset URL...");
-    let zip_url = match github_service.get_melonloader_x64_asset_url(release) {
+    let zip_url = match github_service.get_melonloader_x64_asset_url(&release) {
         Some(url) => {
             eprintln!("[install_melon_loader] Windows x64 ZIP URL: {}", url);
             url

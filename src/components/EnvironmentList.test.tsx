@@ -381,6 +381,48 @@ describe('EnvironmentList', () => {
     expect(apiMocks.listModIntegrationRequests).toHaveBeenCalledWith('env-1');
   });
 
+  it('keeps MelonLoader nightlies opt-in and installs the selected nightly tag', async () => {
+    const stableRelease = {
+      tag_name: 'v0.7.2',
+      name: 'MelonLoader v0.7.2',
+      published_at: '2026-08-01T00:00:00Z',
+      prerelease: false,
+      isNightly: false,
+      download_url: 'https://example.com/stable.zip',
+    };
+    const nightlyRelease = {
+      tag_name: '0.8.0-ci.2580',
+      name: 'Nightly changes',
+      published_at: '2026-09-05T10:00:00Z',
+      prerelease: true,
+      isNightly: true,
+      download_url: 'https://nightly.link/example.zip',
+    };
+    apiMocks.getMelonLoaderReleases
+      .mockResolvedValueOnce([stableRelease])
+      .mockResolvedValueOnce([nightlyRelease, stableRelease]);
+
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install ML' }));
+    expect(await screen.findByRole('heading', { name: 'Select MelonLoader Version' })).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.getMelonLoaderReleases).toHaveBeenNthCalledWith(1, 'env-1', false);
+    });
+    expect(screen.queryByText('0.8.0-ci.2580')).toBeNull();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Show MelonLoader nightly builds' }));
+    await waitFor(() => {
+      expect(apiMocks.getMelonLoaderReleases).toHaveBeenNthCalledWith(2, 'env-1', true);
+    });
+    fireEvent.click(await screen.findByText('0.8.0-ci.2580'));
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }));
+
+    await waitFor(() => {
+      expect(apiMocks.installMelonLoader).toHaveBeenCalledWith('env-1', '0.8.0-ci.2580');
+    });
+  });
+
   afterEach(() => {
     cleanup();
   });

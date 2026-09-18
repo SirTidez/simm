@@ -49,6 +49,32 @@ describe('ApiService', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
   });
 
+  it('requests MelonLoader nightlies only when explicitly enabled', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        tag_name: '0.8.0-ci.2580',
+        name: 'Nightly changes',
+        published_at: '2026-09-05T10:00:00Z',
+        prerelease: true,
+        isNightly: true,
+        assets: [{ browser_download_url: 'https://nightly.link/example.zip' }],
+      },
+    ]);
+
+    const releases = await ApiService.getMelonLoaderReleases('env-1', true);
+
+    expect(invokeMock).toHaveBeenCalledWith('get_all_melon_loader_releases', {
+      includeNightly: true,
+    });
+    expect(releases).toEqual([
+      expect.objectContaining({
+        tag_name: '0.8.0-ci.2580',
+        isNightly: true,
+        download_url: 'https://nightly.link/example.zip',
+      }),
+    ]);
+  });
+
   it('forwards one-time download credentials while preserving the legacy no-credential payload', async () => {
     const oneTimeCredentials = {
       username: 'steam-user',

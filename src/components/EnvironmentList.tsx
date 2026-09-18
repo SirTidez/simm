@@ -28,6 +28,7 @@ import {
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
 import { ModIntegrationDialog } from './ModIntegrationDialog';
@@ -459,6 +460,7 @@ export function EnvironmentList({
   }>>>(new Map());
   const [loadingMelonLoaderReleases, setLoadingMelonLoaderReleases] = useState<Set<string>>(new Set());
   const [showMelonLoaderVersionSelector, setShowMelonLoaderVersionSelector] = useState<string | null>(null);
+  const [showNightlyMelonLoaderBuilds, setShowNightlyMelonLoaderBuilds] = useState(false);
   const [selectedMelonLoaderVersion, setSelectedMelonLoaderVersion] = useState<Map<string, string>>(new Map());
   const [installingMelonLoader, setInstallingMelonLoader] = useState<Set<string>>(new Set());
   const [launchingEnvironmentIds, setLaunchingEnvironmentIds] = useState<Set<string>>(new Set());
@@ -1144,10 +1146,10 @@ export function EnvironmentList({
     }
   };
 
-  const loadMelonLoaderReleases = useCallback(async (envId: string) => {
+  const loadMelonLoaderReleases = useCallback(async (envId: string, includeNightly = false) => {
     setLoadingMelonLoaderReleases(prev => new Set(prev).add(envId));
     try {
-      const releases = await ApiService.getMelonLoaderReleases(envId);
+      const releases = await ApiService.getMelonLoaderReleases(envId, includeNightly);
       setMelonLoaderReleases(prev => {
         const next = new Map(prev);
         next.set(envId, releases);
@@ -1163,14 +1165,18 @@ export function EnvironmentList({
           return next;
         });
       }
+      return true;
     } catch (err) {
       console.error('Failed to load MelonLoader releases:', err);
       setMessageOverlay({
         isOpen: true,
         title: 'Error',
-        message: 'Failed to load MelonLoader releases',
+        message: includeNightly
+          ? 'Failed to load MelonLoader nightly builds. Stable releases remain available.'
+          : 'Failed to load MelonLoader releases',
         type: 'error'
       });
+      return false;
     } finally {
       setLoadingMelonLoaderReleases(prev => {
         const next = new Set(prev);
@@ -1630,8 +1636,17 @@ export function EnvironmentList({
 
   const handleInstallMelonLoader = (env: Environment) => {
     // Load releases and show version selector
-    loadMelonLoaderReleases(env.id);
+    setShowNightlyMelonLoaderBuilds(false);
+    void loadMelonLoaderReleases(env.id, false);
     setShowMelonLoaderVersionSelector(env.id);
+  };
+
+  const handleNightlyMelonLoaderToggle = async (envId: string, checked: boolean) => {
+    setShowNightlyMelonLoaderBuilds(checked);
+    const loaded = await loadMelonLoaderReleases(envId, checked);
+    if (!loaded && checked) {
+      setShowNightlyMelonLoaderBuilds(false);
+    }
   };
 
   const autoInstallMelonLoader = useCallback(async (environmentId: string) => {
@@ -1712,6 +1727,7 @@ export function EnvironmentList({
 
   const closeMelonLoaderVersionSelector = useCallback(() => {
     setShowMelonLoaderVersionSelector(null);
+    setShowNightlyMelonLoaderBuilds(false);
     setSelectedMelonLoaderVersion(prev => {
       const next = new Map(prev);
       if (showMelonLoaderVersionSelector) {
@@ -2588,7 +2604,24 @@ export function EnvironmentList({
                     </div>
                     <div className="melonloader-dialog__stat-card">
                       <span className="melonloader-dialog__stat-label">Source</span>
-                      <strong className="melonloader-dialog__stat-value">GitHub</strong>
+                      <div className="melonloader-dialog__source-row">
+                        <strong className="melonloader-dialog__stat-value">GitHub</strong>
+                        <div
+                          className="melonloader-dialog__nightly-control"
+                          title="Nightly builds are experimental and unreleased."
+                        >
+                          <span>Nightlies</span>
+                          <Switch
+                            size="sm"
+                            checked={showNightlyMelonLoaderBuilds}
+                            onCheckedChange={(checked) => {
+                              void handleNightlyMelonLoaderToggle(showMelonLoaderVersionSelector, Boolean(checked));
+                            }}
+                            aria-label="Show MelonLoader nightly builds"
+                            disabled={loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector)}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -2636,7 +2669,7 @@ export function EnvironmentList({
                               )}
                               {release.isNightly ? (
                                 <span className="melonloader-dialog__tag melonloader-dialog__tag--nightly">
-                                  Alpha-Nightly
+                                  Nightly
                                 </span>
                               ) : release.prerelease && release.tag_name !== latestStableMelonLoaderTag && (
                                 <span className="melonloader-dialog__tag melonloader-dialog__tag--beta">
