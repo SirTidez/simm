@@ -882,7 +882,7 @@ describe("ModLibraryOverlay", () => {
             mod_id: 1629,
             name: "Pack Rat",
             summary: "Carry more stuff.",
-            description: "Carry more stuff.",
+            description: "[h1]Carry more[/h1][b]Safely organized[/b] [url=https://example.com/guide]Read the guide[/url]",
             picture_url: "https://example.com/packrat.png",
             version: "1.0.0",
             author: "ActualUploader",
@@ -966,6 +966,12 @@ describe("ModLibraryOverlay", () => {
         "Nexus Mods • ActualUploader • Original creator: ExampleAuthor",
       ),
     ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Carry more" })).toBeTruthy();
+    expect(screen.getByText("Safely organized").tagName).toBe("STRONG");
+    expect(screen.getByRole("link", { name: "Read the guide" })).toHaveAttribute(
+      "href",
+      "https://example.com/guide",
+    );
   });
 
   it("loads published Nexus dependencies for the selected library update", async () => {

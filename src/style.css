@@ -10240,6 +10240,203 @@ body {
   word-break: normal;
 }
 
+.nexus-bbcode {
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.nexus-description {
+  min-width: 0;
+}
+
+.nexus-description__content {
+  position: relative;
+  min-width: 0;
+}
+
+.nexus-description__content--collapsed {
+  max-height: 12rem;
+  overflow: hidden;
+}
+
+.nexus-description__content--expanded {
+  max-height: none;
+  overflow: visible;
+}
+
+.nexus-description__content--clamped::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 3.5rem;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--workspace-panel-color, #192638) 96%, transparent)
+  );
+}
+
+.nexus-description__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.9rem;
+  margin-top: 0.42rem;
+  padding: 0.32rem 0.62rem;
+  border: 1px solid var(--workspace-stroke-soft);
+  border-radius: 0.38rem;
+  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 90%, transparent);
+  color: var(--workspace-title-color);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.nexus-description__toggle:hover,
+.nexus-description__toggle:focus-visible {
+  border-color: color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 75%, white 10%);
+  background: color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 24%, var(--workspace-surface-muted-soft, #1d2b3f));
+}
+
+.nexus-description__toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 68%, white 16%);
+  outline-offset: 2px;
+}
+
+.nexus-bbcode > :first-child {
+  margin-top: 0;
+}
+
+.nexus-bbcode > :last-child {
+  margin-bottom: 0;
+}
+
+.nexus-bbcode h2,
+.nexus-bbcode h3,
+.nexus-bbcode h4 {
+  margin: 0.8rem 0 0.35rem;
+  color: var(--workspace-title-color);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.nexus-bbcode h2 {
+  font-size: 1.08rem;
+}
+
+.nexus-bbcode h3 {
+  font-size: 1rem;
+}
+
+.nexus-bbcode h4 {
+  font-size: 0.93rem;
+}
+
+.nexus-bbcode a {
+  color: var(--workspace-link-color, #75b9ff);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 0.14em;
+}
+
+.nexus-bbcode ul,
+.nexus-bbcode ol {
+  margin: 0.45rem 0;
+  padding-left: 1.35rem;
+}
+
+.nexus-bbcode li + li {
+  margin-top: 0.22rem;
+}
+
+.nexus-bbcode blockquote {
+  margin: 0.6rem 0;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 72%, transparent);
+  border-radius: 0 0.38rem 0.38rem 0;
+  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 86%, transparent);
+}
+
+.nexus-bbcode blockquote cite {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: var(--workspace-title-color);
+  font-style: normal;
+  font-weight: 700;
+}
+
+.nexus-bbcode pre {
+  max-width: 100%;
+  margin: 0.6rem 0;
+  padding: 0.6rem 0.7rem;
+  overflow: auto;
+  border: 1px solid var(--workspace-stroke-soft);
+  border-radius: 0.38rem;
+  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 88%, #05080d);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.nexus-bbcode details {
+  margin: 0.55rem 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--workspace-stroke-soft);
+  border-radius: 0.38rem;
+  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 90%, transparent);
+}
+
+.nexus-bbcode summary {
+  color: var(--workspace-title-color);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.nexus-bbcode__spoiler-content {
+  margin-top: 0.45rem;
+}
+
+.nexus-bbcode hr {
+  margin: 0.7rem 0;
+  border: 0;
+  border-top: 1px solid var(--workspace-stroke-soft);
+}
+
+.nexus-bbcode__align--center {
+  text-align: center;
+}
+
+.nexus-bbcode__align--right {
+  text-align: right;
+}
+
+.nexus-bbcode__align--left {
+  text-align: left;
+}
+
+.nexus-bbcode__size--1 {
+  font-size: 0.72em;
+}
+
+.nexus-bbcode__size--2 {
+  font-size: 0.85em;
+}
+
+.nexus-bbcode__size--4 {
+  font-size: 1.08em;
+}
+
+.nexus-bbcode__size--5 {
+  font-size: 1.2em;
+}
+
+.nexus-bbcode__size--6 {
+  font-size: 1.32em;
+}
+
 .workspace-inspector-card__metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 110px), 1fr));

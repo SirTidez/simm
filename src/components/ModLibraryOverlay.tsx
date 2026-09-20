@@ -31,6 +31,7 @@ import { cn } from "@/lib/utils";
 import { ApiService } from "../services/api";
 import { logger } from "../services/logger";
 import { ConfirmOverlay } from "./ConfirmOverlay";
+import { NexusDescription } from "./NexusBbCode";
 import {
   handleCardActivationKeyDown,
   resolveImageSource,
@@ -11078,11 +11079,13 @@ export function ModLibraryOverlay({
                     </div>
                   </div>
                 </div>
-                <p className="workspace-inspector-card__summary">
-                  {selectedNexusResult.description ||
-                    selectedNexusResult.summary ||
-                    "No description provided for this mod."}
-                </p>
+                <div className="workspace-inspector-card__summary">
+                  <NexusDescription key={selectedNexusResult.mod_id}>
+                    {selectedNexusResult.description ||
+                      selectedNexusResult.summary ||
+                      "No description provided for this mod."}
+                  </NexusDescription>
+                </div>
                 <div className="workspace-inspector-card__metrics">
                   <div>
                     <span>Latest</span>

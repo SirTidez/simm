@@ -2,6 +2,7 @@
 
 ## [0.8.7]
 
+- Added safe basic Nexus BBCode formatting to discovered mod descriptions, including compact headings, emphasis, lists, quotes, spoilers, code, HTTPS links, HTML-style line-break cleanup, and a collapsible preview without executing raw HTML or automatically loading remote images.
 - Added Steam-style game-file verification to managed environments and hardened DepotDownloader operations with serialized update probes, recoverable cancellation and shutdown state, backend progress reconciliation while SIMM is unfocused, and clearer completed-operation handling.
 - Replaced file-count game-download progress with live byte-weighted progress, transferred-size, speed, and ETA reporting; large-file downloads now advance continuously without counting manifest/setup writes or exceeding the estimated total.
 - Clarified the successful branch-update prompt with explicit Update Description and Keep Current Description choices so declining the optional description edit no longer looks like cancelling the completed update.
