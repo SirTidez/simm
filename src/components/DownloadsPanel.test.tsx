@@ -26,7 +26,9 @@ describe('DownloadsPanel', () => {
           label: 'Main Branch',
           contextLabel: 'Game download',
           status: 'downloading',
-          progress: 40,
+          progress: 25,
+          downloadedBytes: 512 * 1024 * 1024,
+          totalBytes: 2 * 1024 * 1024 * 1024,
           downloadedFiles: 4,
           totalFiles: 10,
           iconUrl: 'https://example.com/main-branch.png',
@@ -56,7 +58,25 @@ describe('DownloadsPanel', () => {
     expect(screen.getByText('Main Branch')).toBeTruthy();
     expect(screen.getByText('ExampleMod.zip')).toBeTruthy();
     expect(document.querySelector('.downloads-panel__icon-image')).not.toBeNull();
-    expect(screen.getByText('40% - 4 / 10 files')).toBeTruthy();
+    expect(screen.getByText('25% - 512 MB / 2.00 GB')).toBeTruthy();
+  });
+
+  it('keeps a game download visibly active until byte totals are known', () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [{
+        id: 'game-large-file',
+        kind: 'game',
+        label: 'Alternate Beta',
+        contextLabel: 'Game download',
+        status: 'downloading',
+        progress: 0,
+        startedAt: Date.now(),
+      }],
+    });
+
+    render(<DownloadsPanel />);
+
+    expect(document.querySelector('.downloads-panel__progress-bar--indeterminate')).not.toBeNull();
   });
 
   it('renders an indeterminate bar for active non-game downloads', () => {

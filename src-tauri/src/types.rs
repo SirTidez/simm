@@ -38,8 +38,20 @@ pub struct DownloadProgress {
     /// Frontends use this to distinguish an immediate retry from a duplicate
     /// event emitted by the preceding attempt.
     pub operation_id: String,
+    /// Distinguishes a normal install/update from an in-place integrity check.
+    /// Both operations intentionally share the same serialized DepotDownloader
+    /// queue and progress channel.
+    #[serde(default)]
+    pub operation: DepotOperation,
     pub status: DownloadStatus,
     pub progress: f64, // 0-100
+    /// Byte-weighted amount processed by the active DepotDownloader operation.
+    /// Unlike file counts, this continues advancing while one large asset is
+    /// being transferred.
+    pub downloaded_bytes: Option<u64>,
+    /// Estimated operation size, seeded from the current install and
+    /// calibrated against DepotDownloader's own byte-weighted output.
+    pub total_bytes: Option<u64>,
     pub downloaded_files: Option<u64>,
     pub total_files: Option<u64>,
     pub speed: Option<String>,
@@ -79,6 +91,8 @@ pub struct TrackedDownload {
     pub context_label: String,
     pub status: DownloadStatus,
     pub progress: f64,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
     pub downloaded_files: Option<u64>,
     pub total_files: Option<u64>,
     pub icon_url: Option<String>,
@@ -298,6 +312,14 @@ pub struct AppUpdateSettings {
     /// written by older releases and are used as a migration fallback.
     #[serde(default)]
     pub by_channel: Option<HashMap<AppUpdateChannel, AppUpdateChannelPreferences>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DepotOperation {
+    #[default]
+    Download,
+    Verify,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1801,6 +1823,8 @@ mod tests {
             context_label: "Thunderstore".to_string(),
             status: DownloadStatus::Downloading,
             progress: 0.0,
+            downloaded_bytes: None,
+            total_bytes: None,
             downloaded_files: Some(0),
             total_files: Some(1),
             icon_url: Some("https://example.com/icon.png".to_string()),
@@ -1813,6 +1837,8 @@ mod tests {
 
         let json = serde_json::to_value(entry).expect("serialize");
         assert!(json.get("contextLabel").is_some());
+        assert!(json.get("downloadedBytes").is_some());
+        assert!(json.get("totalBytes").is_some());
         assert!(json.get("downloadedFiles").is_some());
         assert!(json.get("totalFiles").is_some());
         assert!(json.get("iconUrl").is_some());

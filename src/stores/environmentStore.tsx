@@ -33,6 +33,7 @@ interface EnvironmentStoreContextValue {
   updateEnvironment: (id: string, updates: Partial<Environment>) => Promise<void>;
   deleteEnvironment: (id: string, deleteFiles?: boolean) => Promise<void>;
   startDownload: (environmentId: string, oneTimeCredentials?: OneTimeDownloadCredentials) => Promise<void>;
+  verifyEnvironmentFiles: (environmentId: string, oneTimeCredentials?: OneTimeDownloadCredentials) => Promise<void>;
   cancelDownload: (downloadId: string) => Promise<void>;
   checkUpdate: (environmentId: string, manual?: boolean) => Promise<void>;
   refreshGameVersion: (environmentId: string) => Promise<string | null>;
@@ -75,6 +76,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     state: 'active' | 'terminal';
   }>>(new Map());
   const pendingOperationReplacementRef = useRef<Set<string>>(new Set());
+  const progressReconciliationInFlightRef = useRef(false);
   const environmentsRef = useRef<Environment[]>([]);
   const snapshotGenerationRef = useRef(0);
   const commitEnvironmentSnapshot = useCallback((updater: (current: Environment[]) => Environment[]) => {
@@ -159,7 +161,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
   const activeGameDownloadId = useMemo(() => {
     const activeProgress = Array.from(progress.values()).find(
-      (entry) => entry.status === 'downloading' || entry.status === 'validating',
+      (entry) => entry.status === 'queued' || entry.status === 'downloading' || entry.status === 'validating',
     );
     return activeProgress?.downloadId
       ?? environments.find((environment) => environment.status === 'downloading')?.id
@@ -296,8 +298,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, [commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
 
-  const startDownload = useCallback(async (
+  const startGameOperation = useCallback(async (
     environmentId: string,
+    operation: 'download' | 'verify',
     oneTimeCredentials?: OneTimeDownloadCredentials,
   ) => {
     const activeDownloadId = activeGameDownloadId ?? startingGameDownloadRef.current;
@@ -307,21 +310,46 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
     startingGameDownloadRef.current = environmentId;
     pendingOperationReplacementRef.current.add(environmentId);
+    commitEnvironmentSnapshot(current => current.map(environment => (
+      environment.id === environmentId
+        ? { ...environment, status: 'downloading' }
+        : environment
+    )));
     try {
-      if (oneTimeCredentials) {
-        await ApiService.startDownload(environmentId, oneTimeCredentials);
+      if (operation === 'verify') {
+        if (oneTimeCredentials) {
+          await ApiService.verifyEnvironmentFiles(environmentId, oneTimeCredentials);
+        } else {
+          await ApiService.verifyEnvironmentFiles(environmentId);
+        }
       } else {
-        await ApiService.startDownload(environmentId);
+        if (oneTimeCredentials) {
+          await ApiService.startDownload(environmentId, oneTimeCredentials);
+        } else {
+          await ApiService.startDownload(environmentId);
+        }
       }
     } catch (err) {
       pendingOperationReplacementRef.current.delete(environmentId);
+      invalidateEnvironmentSnapshot();
+      await refreshEnvironments();
       throw err;
     } finally {
       if (startingGameDownloadRef.current === environmentId) {
         startingGameDownloadRef.current = null;
       }
     }
-  }, [activeGameDownloadId]);
+  }, [activeGameDownloadId, commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
+
+  const startDownload = useCallback((
+    environmentId: string,
+    oneTimeCredentials?: OneTimeDownloadCredentials,
+  ) => startGameOperation(environmentId, 'download', oneTimeCredentials), [startGameOperation]);
+
+  const verifyEnvironmentFiles = useCallback((
+    environmentId: string,
+    oneTimeCredentials?: OneTimeDownloadCredentials,
+  ) => startGameOperation(environmentId, 'verify', oneTimeCredentials), [startGameOperation]);
 
   const cancelDownload = useCallback(async (downloadId: string) => {
     try {
@@ -404,10 +432,83 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }));
   }, [commitEnvironmentSnapshot]);
 
+  const reconcileGameOperationProgress = useCallback(async () => {
+    if (progressReconciliationInFlightRef.current) return;
+    const downloadIds = new Set<string>();
+    for (const entry of progress.values()) {
+      if (!isTerminalDownloadStatus(entry.status)) downloadIds.add(entry.downloadId);
+    }
+    for (const environment of environmentsRef.current) {
+      if (environment.status === 'downloading') downloadIds.add(environment.id);
+    }
+    if (downloadIds.size === 0) return;
+
+    progressReconciliationInFlightRef.current = true;
+    let refreshRequired = false;
+    const terminalDownloadIds: string[] = [];
+    try {
+      for (const downloadId of downloadIds) {
+        try {
+          const snapshot = await ApiService.getProgress(downloadId);
+          if (!snapshot) {
+            continue;
+          }
+          if (!acceptProgressOperation(snapshot)) continue;
+          if (isTerminalDownloadStatus(snapshot.status)) {
+            refreshRequired = true;
+            terminalDownloadIds.push(downloadId);
+          }
+          setProgress(current => {
+            const next = new Map(current);
+            next.set(downloadId, snapshot);
+            return next;
+          });
+        } catch (reconciliationError) {
+          console.warn('Failed to reconcile game download progress:', reconciliationError);
+        }
+      }
+      if (refreshRequired) {
+        invalidateEnvironmentSnapshot();
+        await refreshEnvironments();
+        setProgress(current => {
+          const next = new Map(current);
+          for (const downloadId of terminalDownloadIds) {
+            next.delete(downloadId);
+          }
+          return next;
+        });
+      }
+    } finally {
+      progressReconciliationInFlightRef.current = false;
+    }
+  }, [acceptProgressOperation, invalidateEnvironmentSnapshot, progress, refreshEnvironments]);
+
   // Load environments on mount
   useEffect(() => {
     refreshEnvironments();
   }, [refreshEnvironments]);
+
+  // Tauri owns the external process, so downloads continue when the webview is
+  // unfocused. Reconcile from the backend periodically and immediately when
+  // the user returns in case the platform delayed UI event delivery.
+  useEffect(() => {
+    if (!activeGameDownloadId) return;
+    const reconcile = () => {
+      void reconcileGameOperationProgress();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') reconcile();
+    };
+    reconcile();
+    const interval = window.setInterval(reconcile, 1_000);
+    window.addEventListener('focus', reconcile);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', reconcile);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [activeGameDownloadId, reconcileGameOperationProgress]);
 
   // Set up Tauri event listeners
   useEffect(() => {
@@ -425,8 +526,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           });
 
           if (data.status === 'error') {
-            void updateEnvironment(data.downloadId, { status: 'error' }).catch((err) => {
-              console.error('Failed to apply error status update from progress event:', err);
+            invalidateEnvironmentSnapshot();
+            void refreshEnvironments().catch((err) => {
+              console.error('Failed to reconcile backend error status from progress event:', err);
             });
           }
         }));
@@ -472,13 +574,14 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
         }));
 
-    listeners.register(() => onError(async ({ downloadId, operationId }: { downloadId: string; operationId: string }) => {
+    listeners.register(() => onError(async ({ downloadId, operationId }: { downloadId: string; operationId: string; operation?: 'download' | 'verify' }) => {
           if (!listeners.isActive()) return;
           if (!acceptTerminalOperation(downloadId, operationId)) return;
           try {
-            await updateEnvironment(downloadId, { status: 'error' });
+            invalidateEnvironmentSnapshot();
+            await refreshEnvironments();
           } catch (err) {
-            console.error('Failed to apply error status update from event:', err);
+            console.error('Failed to reconcile backend error status from event:', err);
           }
         }));
 
@@ -528,6 +631,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         updateEnvironment,
         deleteEnvironment,
         startDownload,
+        verifyEnvironmentFiles,
         cancelDownload,
         checkUpdate,
         refreshGameVersion,

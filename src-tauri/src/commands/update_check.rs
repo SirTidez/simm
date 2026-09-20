@@ -1,5 +1,6 @@
 use crate::commands::nexus_mods::normalize_nexus_game_id;
 use crate::events;
+use crate::services::depot_downloader::depot_process_busy;
 use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mod_update::ModUpdateService;
@@ -427,6 +428,12 @@ pub async fn run_background_update_checks(
     let settings = runtime_settings.snapshot().await;
     if !background_checks_enabled(&settings, manual) {
         log::debug!("[UpdateCheck] Background run skipped because automatic checks are disabled");
+        return Ok(());
+    }
+    if !manual && depot_process_busy() {
+        log::info!(
+            "[UpdateCheck] Background game update probes deferred while DepotDownloader is busy"
+        );
         return Ok(());
     }
 

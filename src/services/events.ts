@@ -55,12 +55,14 @@ export interface ProgressEvent {
 export interface CompleteEvent {
   downloadId: string;
   operationId: string;
+  operation?: 'download' | 'verify';
   manifestId?: string;
 }
 
 export interface ErrorEvent {
   downloadId: string;
   operationId: string;
+  operation?: 'download' | 'verify';
   error: string;
 }
 

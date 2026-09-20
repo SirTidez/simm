@@ -271,10 +271,10 @@ describe('ApiService', () => {
     });
   });
 
-  it('getProgress throws when download is missing', async () => {
+  it('getProgress returns null when the backend has no operation snapshot', async () => {
     invokeMock.mockResolvedValueOnce(null);
 
-    await expect(ApiService.getProgress('download-1')).rejects.toThrow('Download not found');
+    await expect(ApiService.getProgress('download-1')).resolves.toBeNull();
     expect(invokeMock).toHaveBeenCalledWith('get_download_progress', {
       downloadId: 'download-1',
     });
@@ -495,6 +495,27 @@ describe('ApiService', () => {
         uploaded_time: '2025-04-01T12:00:00Z',
       }),
     );
+  });
+
+  it('uses a distinct verification command with the same one-time credential contract', async () => {
+    const oneTimeCredentials = {
+      username: 'steam-user',
+      password: 'one-time-password',
+      steamGuard: '12345',
+      saveCredentials: false,
+    };
+    invokeMock.mockResolvedValue({ success: true, downloadId: 'env-1', operation: 'verify' });
+
+    await ApiService.verifyEnvironmentFiles('env-1', oneTimeCredentials);
+    await ApiService.verifyEnvironmentFiles('env-2');
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'verify_environment_files', {
+      environmentId: 'env-1',
+      oneTimeCredentials,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'verify_environment_files', {
+      environmentId: 'env-2',
+    });
   });
 
   it('browseNexusModsPage preserves paging and rich catalog metadata', async () => {

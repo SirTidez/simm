@@ -1,6 +1,6 @@
 use crate::types::{
-    DownloadProgress, MelonLoaderUpdateNotice, RuntimeSwitchResult, TrackedDownload,
-    UpdateCheckResult,
+    DepotOperation, DownloadProgress, MelonLoaderUpdateNotice, RuntimeSwitchResult,
+    TrackedDownload, UpdateCheckResult,
 };
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -21,6 +21,7 @@ pub fn emit_complete<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
     operation_id: String,
+    operation: DepotOperation,
     manifest_id: Option<String>,
 ) -> Result<(), tauri::Error> {
     app.emit(
@@ -28,6 +29,7 @@ pub fn emit_complete<R: Runtime>(
         serde_json::json!({
             "downloadId": download_id,
             "operationId": operation_id,
+            "operation": operation,
             "manifestId": manifest_id
         }),
     )
@@ -37,11 +39,17 @@ pub fn emit_error<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
     operation_id: String,
+    operation: DepotOperation,
     error: String,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "download_error",
-        serde_json::json!({ "downloadId": download_id, "operationId": operation_id, "error": error }),
+        serde_json::json!({
+            "downloadId": download_id,
+            "operationId": operation_id,
+            "operation": operation,
+            "error": error
+        }),
     )
 }
 

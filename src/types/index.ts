@@ -17,8 +17,12 @@ export interface DownloadProgress {
   downloadId: string;
   /** Unique backend operation generation; changes when the same environment is retried. */
   operationId: string;
+  /** Whether DepotDownloader is installing/updating or verifying an existing install. */
+  operation?: 'download' | 'verify';
   status: 'queued' | 'downloading' | 'validating' | 'completed' | 'error' | 'cancelled';
   progress: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
   downloadedFiles?: number;
   totalFiles?: number;
   speed?: string;
@@ -49,6 +53,8 @@ export interface TrackedDownload {
   contextLabel: string;
   status: 'queued' | 'downloading' | 'validating' | 'completed' | 'error' | 'cancelled';
   progress: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
   downloadedFiles?: number;
   totalFiles?: number;
   iconUrl?: string;

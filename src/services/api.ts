@@ -408,19 +408,24 @@ export class ApiService {
       : { environmentId });
   }
 
+  static async verifyEnvironmentFiles(
+    environmentId: string,
+    oneTimeCredentials?: OneTimeDownloadCredentials,
+  ): Promise<{ success: boolean; downloadId: string; operation: 'verify' }> {
+    return invoke('verify_environment_files', oneTimeCredentials
+      ? { environmentId, oneTimeCredentials }
+      : { environmentId });
+  }
+
   static async cancelDownload(downloadId: string): Promise<{ success: boolean }> {
     const result = await invoke<boolean>('cancel_download', { downloadId });
     return { success: result };
   }
 
-  static async getProgress(downloadId: string): Promise<DownloadProgress> {
-    const progress = await invoke<DownloadProgress | null>('get_download_progress', {
+  static async getProgress(downloadId: string): Promise<DownloadProgress | null> {
+    return invoke<DownloadProgress | null>('get_download_progress', {
       downloadId,
     });
-    if (!progress) {
-      throw new Error('Download not found');
-    }
-    return progress;
   }
 
   // Game configs

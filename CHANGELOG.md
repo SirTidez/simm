@@ -2,6 +2,9 @@
 
 ## [0.8.7]
 
+- Added Steam-style game-file verification to managed environments and hardened DepotDownloader operations with serialized update probes, recoverable cancellation and shutdown state, backend progress reconciliation while SIMM is unfocused, and clearer completed-operation handling.
+- Replaced file-count game-download progress with live byte-weighted progress, transferred-size, speed, and ETA reporting; large-file downloads now advance continuously without counting manifest/setup writes or exceeding the estimated total.
+- Clarified the successful branch-update prompt with explicit Update Description and Keep Current Description choices so declining the optional description edit no longer looks like cancelling the completed update.
 - Restored the Profile Library import control so exported profile JSON files can be imported without crowding the existing profile apply and launch actions.
 - Ignored license-only archive and FOMOD mappings during mod installation so packages such as Bars Graphics can install their actual Mods and UserLibs payloads without treating license text as game content.
 - Prevented partial or forward-compatible settings updates from panicking when they introduce a key that is not already present in the current settings snapshot.

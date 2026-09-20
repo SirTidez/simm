@@ -216,6 +216,7 @@ fn main() {
             commands::environments::import_local_environment,
             // Downloads
             commands::downloads::start_download,
+            commands::downloads::verify_environment_files,
             commands::downloads::cancel_download,
             commands::downloads::get_download_progress,
             // Auth

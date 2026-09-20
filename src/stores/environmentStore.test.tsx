@@ -10,7 +10,9 @@ const apiMocks = vi.hoisted(() => ({
   createEnvironment: vi.fn(),
   deleteEnvironment: vi.fn(),
   startDownload: vi.fn(),
+  verifyEnvironmentFiles: vi.fn(),
   cancelDownload: vi.fn(),
+  getProgress: vi.fn(),
   checkUpdate: vi.fn(),
   checkAllUpdates: vi.fn(),
   extractGameVersion: vi.fn(),
@@ -62,7 +64,7 @@ const baseEnv: Environment = {
 };
 
 function Consumer() {
-  const { environments, loading, progress, startDownload, cancelDownload, checkAllUpdates, ensureEnvironments, createEnvironment, deleteEnvironment } = useEnvironmentStore();
+  const { environments, loading, progress, startDownload, verifyEnvironmentFiles, cancelDownload, checkAllUpdates, ensureEnvironments, createEnvironment, deleteEnvironment } = useEnvironmentStore();
   const [cachedRuntime, setCachedRuntime] = React.useState('none');
   return (
     <div>
@@ -92,6 +94,12 @@ function Consumer() {
         })}
       >
         Start one-time
+      </button>
+      <button
+        data-testid="verify-files"
+        onClick={() => environments[0] && verifyEnvironmentFiles(environments[0].id)}
+      >
+        Verify
       </button>
       <button
         data-testid="cancel-download"
@@ -138,7 +146,10 @@ describe('EnvironmentStore', () => {
     apiMocks.createEnvironment.mockReset();
     apiMocks.deleteEnvironment.mockReset();
     apiMocks.startDownload.mockReset();
+    apiMocks.verifyEnvironmentFiles.mockReset();
     apiMocks.cancelDownload.mockReset();
+    apiMocks.getProgress.mockReset();
+    apiMocks.getProgress.mockResolvedValue(null);
     apiMocks.checkUpdate.mockReset();
     apiMocks.checkAllUpdates.mockReset();
     apiMocks.extractGameVersion.mockReset();
@@ -247,6 +258,31 @@ describe('EnvironmentStore', () => {
     });
   });
 
+  it('starts verification through the dedicated DepotDownloader operation', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+    apiMocks.verifyEnvironmentFiles.mockResolvedValueOnce({
+      success: true,
+      downloadId: 'env-1',
+      operation: 'verify',
+    });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    fireEvent.click(screen.getByTestId('verify-files'));
+
+    await waitFor(() => {
+      expect(apiMocks.verifyEnvironmentFiles).toHaveBeenCalledWith('env-1');
+    });
+    expect(apiMocks.startDownload).not.toHaveBeenCalled();
+  });
+
   it('does not regress a completed event when start resolves afterwards', async () => {
     let resolveStart: (() => void) | undefined;
     apiMocks.getEnvironments
@@ -305,6 +341,74 @@ describe('EnvironmentStore', () => {
       'env-1',
       expect.objectContaining({ status: 'not_downloaded' }),
     );
+  });
+
+  it('reconciles backend progress immediately when the app regains focus', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([{ ...baseEnv, status: 'downloading' }]);
+    apiMocks.getProgress.mockResolvedValueOnce({
+      downloadId: 'env-1',
+      operationId: 'operation-focus',
+      operation: 'download',
+      status: 'downloading',
+      progress: 42,
+    });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('false'));
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => {
+      expect(apiMocks.getProgress).toHaveBeenCalledWith('env-1');
+      expect(screen.getByTestId('progress-operation').textContent).toBe('operation-focus');
+      expect(screen.getByTestId('progress-status').textContent).toBe('downloading');
+    });
+  });
+
+  it('clears a terminal progress snapshot after backend completion is reconciled', async () => {
+    apiMocks.getEnvironments
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'downloading' }])
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'completed' }]);
+    apiMocks.getProgress
+      .mockResolvedValueOnce({
+        downloadId: 'env-1',
+        operationId: 'operation-completed',
+        operation: 'download',
+        status: 'downloading',
+        progress: 95,
+      })
+      .mockResolvedValueOnce({
+        downloadId: 'env-1',
+        operationId: 'operation-completed',
+        operation: 'download',
+        status: 'completed',
+        progress: 100,
+        message: 'Disconnected from Steam',
+      });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+      expect(screen.getByTestId('progress-status').textContent).toBe('downloading');
+    });
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => {
+      expect(apiMocks.getProgress).toHaveBeenCalledWith('env-1');
+      expect(apiMocks.getProgress).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('env-status').textContent).toBe('completed');
+      expect(screen.getByTestId('progress-count').textContent).toBe('0');
+    });
   });
 
   it('coalesces duplicate initial environment refreshes while one request is pending', async () => {
@@ -460,8 +564,7 @@ describe('EnvironmentStore', () => {
       downloadId: 'env-1', operationId: 'operation-1', status: 'error', progress: 40,
       error: 'First attempt failed',
     }));
-    await waitFor(() => expect(apiMocks.updateEnvironment).toHaveBeenCalledTimes(1));
-    apiMocks.updateEnvironment.mockClear();
+    await waitFor(() => expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByTestId('start-download'));
     await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1'));
     act(() => progressHandler?.({
@@ -477,6 +580,7 @@ describe('EnvironmentStore', () => {
     expect(screen.getByTestId('progress-operation').textContent).toBe('operation-2');
     expect(screen.getByTestId('progress-status').textContent).toBe('downloading');
     expect(apiMocks.updateEnvironment).not.toHaveBeenCalled();
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
   });
 
   it('accepts completion from the current immediate-retry operation', async () => {

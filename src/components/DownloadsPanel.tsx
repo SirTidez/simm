@@ -50,9 +50,15 @@ function isActiveStatus(status: TrackedDownload['status']) {
 }
 
 function isIndeterminate(download: TrackedDownload) {
+  const active = download.status === 'downloading' || download.status === 'queued' || download.status === 'validating';
   return (
-    download.kind !== 'game' &&
-    (download.status === 'downloading' || download.status === 'queued' || download.status === 'validating')
+    active && (
+      download.kind !== 'game'
+      || (
+        download.progress <= 0
+        && !(typeof download.downloadedBytes === 'number' && download.downloadedBytes > 0)
+      )
+    )
   );
 }
 
@@ -64,8 +70,14 @@ interface DownloadsPanelProps {
 
 function progressText(download: TrackedDownload) {
   if (download.kind === 'game') {
+    if (hasUsableByteCounts(download)) {
+      return `${Math.round(download.progress)}% - ${formatBytes(download.downloadedBytes!)} / ${formatBytes(download.totalBytes!)}`;
+    }
+    if (typeof download.downloadedBytes === 'number' && download.downloadedBytes > 0) {
+      return `${formatBytes(download.downloadedBytes)} downloaded`;
+    }
     if (hasUsableFileCounts(download)) {
-      return `${Math.round(download.progress)}% - ${download.downloadedFiles} / ${download.totalFiles} files`;
+      return `${Math.round(download.progress)}%`;
     }
     return `${Math.round(download.progress)}%`;
   }
@@ -75,6 +87,24 @@ function progressText(download: TrackedDownload) {
   }
 
   return download.message || statusLabel(download.status);
+}
+
+function formatBytes(bytes: number) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Math.max(0, bytes);
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function hasUsableByteCounts(download: Pick<TrackedDownload, 'downloadedBytes' | 'totalBytes'>) {
+  const downloaded = typeof download.downloadedBytes === 'number' ? download.downloadedBytes : Number.NaN;
+  const total = typeof download.totalBytes === 'number' ? download.totalBytes : Number.NaN;
+  return Number.isFinite(downloaded) && Number.isFinite(total) && downloaded >= 0 && total > 0;
 }
 
 function hasUsableFileCounts(download: Pick<TrackedDownload, 'downloadedFiles' | 'totalFiles'>) {

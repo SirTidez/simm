@@ -138,12 +138,15 @@ vi.mock('./MessageOverlay', () => ({
     ) : null,
 }));
 vi.mock('./ConfirmOverlay', () => ({
-  ConfirmOverlay: ({ isOpen, title, message, confirmText = 'Confirm', onConfirm, bodyContent }: any) =>
+  ConfirmOverlay: ({ isOpen, title, message, confirmText = 'Confirm', cancelText = 'Cancel', onClose, onConfirm, bodyContent }: any) =>
     isOpen ? (
       <div data-testid="confirm-overlay">
         <h2>{title}</h2>
         <p>{message}</p>
         {bodyContent}
+        <button type="button" onClick={onClose}>
+          {cancelText}
+        </button>
         <button type="button" onClick={onConfirm}>
           {confirmText}
         </button>
@@ -328,6 +331,7 @@ describe('EnvironmentList', () => {
       error: null,
       progress: new Map(),
       startDownload: vi.fn().mockResolvedValue(undefined),
+      verifyEnvironmentFiles: vi.fn().mockResolvedValue(undefined),
       cancelDownload: vi.fn().mockResolvedValue(undefined),
       deleteEnvironment: vi.fn().mockResolvedValue(undefined),
       checkUpdate: vi.fn().mockResolvedValue(undefined),
@@ -367,6 +371,75 @@ describe('EnvironmentList', () => {
     await waitFor(() => expect(card).toHaveAttribute('aria-expanded', 'true'));
     expect(card).toHaveAttribute('aria-controls', `environment-actions-${completedEnv.id}`);
     expect(document.getElementById(`environment-actions-${completedEnv.id}`)).not.toBeNull();
+  });
+
+  it('does not render terminal download progress on a completed environment card', async () => {
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [completedEnv],
+      loading: false,
+      error: null,
+      progress: new Map([['env-1', {
+        downloadId: 'env-1',
+        operationId: 'operation-completed',
+        operation: 'download',
+        status: 'completed',
+        progress: 100,
+        message: 'Disconnected from Steam',
+      }]]),
+      activeGameDownloadId: null,
+      startDownload: vi.fn().mockResolvedValue(undefined),
+      verifyEnvironmentFiles: vi.fn().mockResolvedValue(undefined),
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+      ensureEnvironments: vi.fn().mockResolvedValue([completedEnv]),
+    });
+
+    const { container } = render(<EnvironmentList />);
+
+    expect(await screen.findByRole('button', { name: 'Launch' })).toBeTruthy();
+    expect(container.querySelector('.environment-card__progress')).toBeNull();
+    expect(screen.queryByText(/Disconnected from Steam/i)).toBeNull();
+  });
+
+  it('renders game progress using transferred bytes instead of file counts', async () => {
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [completedEnv],
+      loading: false,
+      error: null,
+      progress: new Map([['env-1', {
+        downloadId: 'env-1',
+        operationId: 'operation-downloading',
+        operation: 'download',
+        status: 'downloading',
+        progress: 25,
+        downloadedBytes: 512 * 1024 * 1024,
+        totalBytes: 2 * 1024 * 1024 * 1024,
+        downloadedFiles: 4,
+        totalFiles: 10,
+        speed: '12.0 MB/s',
+        eta: '2m 8s',
+        message: 'Downloading sharedassets0.assets',
+      }]]),
+      activeGameDownloadId: 'env-1',
+      startDownload: vi.fn().mockResolvedValue(undefined),
+      verifyEnvironmentFiles: vi.fn().mockResolvedValue(undefined),
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+      ensureEnvironments: vi.fn().mockResolvedValue([completedEnv]),
+    });
+
+    render(<EnvironmentList />);
+
+    expect(await screen.findByText(/Downloaded: 512 MB \/ 2\.00 GB/)).toBeTruthy();
+    expect(screen.queryByText(/Files: 4 \/ 10/)).toBeNull();
   });
 
   it('opens per-install mod integration settings from the environment actions', async () => {
@@ -425,6 +498,29 @@ describe('EnvironmentList', () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it('confirms and starts an in-place game file verification for an installed environment', async () => {
+    const verifyEnvironmentFiles = vi.fn().mockResolvedValue(undefined);
+    const currentStore = storeMocks.useEnvironmentStore();
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      ...currentStore,
+      verifyEnvironmentFiles,
+    });
+
+    render(<EnvironmentList />);
+
+    expect(screen.queryByRole('button', { name: 'Verify' })).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions for Env One' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Verify Game Files' }));
+    expect(await screen.findByText('Verify Game Files: Env One')).toBeTruthy();
+    expect(screen.getByText(/reacquire missing or damaged official game files/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Verify Files' }));
+
+    await waitFor(() => {
+      expect(verifyEnvironmentFiles).toHaveBeenCalledWith('env-1');
+    });
   });
 
   it('triggers manual update check from card action', async () => {
@@ -1069,6 +1165,49 @@ describe('EnvironmentList', () => {
       expect(apiMocks.installMelonLoader).toHaveBeenCalledWith('env-1', 'v1.0.0');
       expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledWith('env-1');
     });
+  });
+
+  it('makes the post-update description choice explicit without offering cancellation', async () => {
+    const updatingEnvironment = {
+      ...completedEnv,
+      description: 'Current branch notes',
+      updateAvailable: true,
+    };
+    const refreshedEnvironment = {
+      ...updatingEnvironment,
+      updateAvailable: false,
+    };
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [updatingEnvironment],
+      loading: false,
+      error: null,
+      progress: new Map(),
+      startDownload: vi.fn().mockResolvedValue(undefined),
+      verifyEnvironmentFiles: vi.fn().mockResolvedValue(undefined),
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+      ensureEnvironments: vi.fn().mockResolvedValue([refreshedEnvironment]),
+    });
+
+    render(<EnvironmentList />);
+
+    await waitFor(() => {
+      expect(completeHandler).not.toBeNull();
+    });
+    await act(async () => {
+      await completeHandler?.({ downloadId: updatingEnvironment.id });
+    });
+
+    const prompt = await screen.findByTestId('confirm-overlay', {}, { timeout: 2500 });
+    expect(prompt).toHaveTextContent('Branch Updated');
+    expect(prompt).toHaveTextContent('The branch update completed successfully.');
+    expect(screen.getByRole('button', { name: 'Update Description' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Keep Current Description' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
   });
 
   it('reports Linux setup blockers without calling the install failed', async () => {

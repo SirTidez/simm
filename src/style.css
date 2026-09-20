@@ -903,6 +903,17 @@ body::before {
   color: var(--app-text-color, #edf4ff);
 }
 
+.progress-bar--indeterminate .progress-fill {
+  width: 45% !important;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 20%, transparent),
+    var(--primary-btn-hover, #5c98e6),
+    color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 20%, transparent)
+  );
+  animation: downloads-panel-progress 1.1s ease-in-out infinite;
+}
+
 .simm-dialog-content > [data-slot="dialog-header"].modal-header {
   flex: 0 0 auto;
   margin: -1rem -1rem 0;

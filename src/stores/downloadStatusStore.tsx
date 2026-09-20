@@ -31,7 +31,7 @@ function sortDownloads(a: TrackedDownload, b: TrackedDownload) {
 }
 
 export function DownloadStatusStoreProvider({ children }: { children: React.ReactNode }) {
-  const { environments } = useEnvironmentStore();
+  const { environments, progress: gameProgress } = useEnvironmentStore();
   const [downloadsById, setDownloadsById] = useState<Map<string, TrackedDownload>>(new Map());
   const downloadsRef = useRef(downloadsById);
   const removalTimersRef = useRef<Map<string, number>>(new Map());
@@ -134,6 +134,8 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
         contextLabel: currentOperation?.contextLabel ?? 'Game download',
         status: currentOperation?.status ?? 'downloading',
         progress: currentOperation?.progress ?? 0,
+        downloadedBytes: currentOperation?.downloadedBytes,
+        totalBytes: currentOperation?.totalBytes,
         downloadedFiles: currentOperation?.downloadedFiles,
         totalFiles: currentOperation?.totalFiles,
         message: currentOperation?.message,
@@ -191,6 +193,27 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
     }
   }, [resolveGameLabel]);
 
+  // The environment store also polls the backend while a game operation is
+  // active. Mirroring those snapshots keeps the downloads pane current even
+  // if a backgrounded webview delayed the original Tauri event.
+  useEffect(() => {
+    for (const progress of gameProgress.values()) {
+      updateGameDownload(progress.downloadId, {
+        operationId: progress.operationId,
+        contextLabel: progress.operation === 'verify' ? 'Game file verification' : 'Game download',
+        status: progress.status,
+        progress: progress.progress,
+        downloadedBytes: progress.downloadedBytes,
+        totalBytes: progress.totalBytes,
+        downloadedFiles: progress.downloadedFiles,
+        totalFiles: progress.totalFiles,
+        message: progress.message,
+        error: progress.error,
+        finishedAt: isTerminal(progress.status) ? Date.now() : null,
+      });
+    }
+  }, [gameProgress, updateGameDownload]);
+
   useEffect(() => {
     setDownloadsById((previous) => {
       if (previous.size === 0) {
@@ -228,8 +251,11 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
     listeners.register(() => onProgress((progress) => {
         updateGameDownload(progress.downloadId, {
           operationId: progress.operationId,
+          contextLabel: progress.operation === 'verify' ? 'Game file verification' : 'Game download',
           status: progress.status,
           progress: progress.progress,
+          downloadedBytes: progress.downloadedBytes,
+          totalBytes: progress.totalBytes,
           downloadedFiles: progress.downloadedFiles,
           totalFiles: progress.totalFiles,
           message: progress.message,
@@ -238,26 +264,28 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
         });
       }));
 
-    listeners.register(() => onComplete(({ downloadId, operationId }) => {
+    listeners.register(() => onComplete(({ downloadId, operationId, operation }) => {
         const current = downloadsRef.current.get(`game:${downloadId}`);
         updateGameDownload(downloadId, {
           operationId,
+          contextLabel: operation === 'verify' ? 'Game file verification' : 'Game download',
           status: 'completed',
           progress: 100,
           downloadedFiles: current?.totalFiles ?? current?.downloadedFiles,
           totalFiles: current?.totalFiles,
-          message: current?.message ?? 'Download completed',
+          message: current?.message ?? (operation === 'verify' ? 'Verification completed' : 'Download completed'),
           error: undefined,
           finishedAt: Date.now(),
         });
       }));
 
-    listeners.register(() => onError(({ downloadId, operationId, error }) => {
+    listeners.register(() => onError(({ downloadId, operationId, operation, error }) => {
         updateGameDownload(downloadId, {
           operationId,
+          contextLabel: operation === 'verify' ? 'Game file verification' : 'Game download',
           status: 'error',
           error,
-          message: 'Download failed',
+          message: operation === 'verify' ? 'Verification failed' : 'Download failed',
           finishedAt: Date.now(),
         });
       }));
