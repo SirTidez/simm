@@ -53,15 +53,28 @@ describe("NexusBbCode", () => {
     expect(container.textContent).not.toContain("<br");
   });
 
-  it("links remote images without loading them automatically", () => {
+  it("renders safe remote images with privacy and layout safeguards", () => {
     const { container } = render(
       <NexusBbCode>{"[img]https://example.com/banner.png[/img]"}</NexusBbCode>,
     );
 
-    expect(screen.getByRole("link", { name: "View image" })).toHaveAttribute(
-      "href",
+    const image = screen.getByRole("img", { name: "Nexus mod description" });
+    expect(image).toHaveAttribute(
+      "src",
       "https://example.com/banner.png",
     );
+    expect(image).toHaveAttribute("loading", "lazy");
+    expect(image).toHaveAttribute("decoding", "async");
+    expect(image).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(image.classList.contains("nexus-bbcode__image")).toBe(true);
+    expect(container.textContent).not.toContain("View image");
+  });
+
+  it("does not load unsafe image destinations", () => {
+    const { container } = render(
+      <NexusBbCode>{"[img]javascript:alert(1)[/img]"}</NexusBbCode>,
+    );
+
     expect(container.querySelector("img")).toBeNull();
   });
 

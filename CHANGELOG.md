@@ -1,11 +1,25 @@
 # Changelog
 
+## [0.8.8]
+
+- Added Nexus collection discovery and a source-neutral collection catalog to Mod Library, with revision details, dependencies, version information, direct collection flows, and clearer collection overview pages.
+- Added collection profile staging with exact revision tracking, optional-item selection, reusable library matches, exact Thunderstore name/author/version matching, Nexus file handoff, runtime mismatch warnings, background downloads, and retryable per-item progress states.
+- Added exact collection-profile synchronization across environments so profiles preserve collection item readiness, source choices, failures, and pending actions without overwriting existing profiles.
+- Added user-controlled mod source adoption and bulk mod actions, including enable, disable, uninstall, and linking unmanaged installed assemblies to a selected Nexus or Thunderstore source.
+- Added a local Mod Integration SDK and Mono/IL2CPP game bridge so mods can check for updates, request updates, or ask SIMM to manage an existing installation through loopback-only authenticated requests with per-environment ports and explicit user approval.
+- Added SIMM command-line queries and launch commands for listing environments, inspecting game and installation state, returning stable JSON for automation, and selecting platform-aware launch methods.
+- Added optional MelonLoader nightly builds and stable-update notifications with in-app update prompts while preserving explicit runtime and channel choices.
+- Added provider-catalog refresh and update checks so discovered mod metadata and available updates stay current while using the existing cache rules.
+- Hardened managed game operations with Steam-style file verification, serialized DepotDownloader probes, recoverable cancellation and shutdown handling, focus-safe progress reconciliation, and byte-weighted download size, speed, and ETA reporting; clarified the completed branch-update prompt's Update Description and Keep Current Description choices.
+- Added safe Nexus BBCode rendering for discovered descriptions, including HTTPS links, constrained lazy-loaded HTTPS images, compact formatting, and collapsible previews without executing raw HTML or leaking referrers.
+- Reworked Mod Library into full-width mod and collection detail pages with responsive identity headers, overview/actions/dependencies/version sections, clearer navigation, and improved behavior across narrower desktop viewports.
+- Refined desktop layout behavior with single-row Mod Library navigation, centered and constrained dialogs, minimum viewport protection, and compact collection controls that keep long content usable.
+- Updated Steam/Nexus login completion to use the registered protocol callback so authentication returns through the configured desktop handler.
+- Restored invalid download-directory defaults automatically and hardened MLVScan archive staging against unsafe or incomplete archive inputs.
+- Added beta release packaging and validation for the mod-integration SDK and runtime-specific bridge artifacts.
+
 ## [0.8.7]
 
-- Added safe basic Nexus BBCode formatting to discovered mod descriptions, including compact headings, emphasis, lists, quotes, spoilers, code, HTTPS links, HTML-style line-break cleanup, and a collapsible preview without executing raw HTML or automatically loading remote images.
-- Added Steam-style game-file verification to managed environments and hardened DepotDownloader operations with serialized update probes, recoverable cancellation and shutdown state, backend progress reconciliation while SIMM is unfocused, and clearer completed-operation handling.
-- Replaced file-count game-download progress with live byte-weighted progress, transferred-size, speed, and ETA reporting; large-file downloads now advance continuously without counting manifest/setup writes or exceeding the estimated total.
-- Clarified the successful branch-update prompt with explicit Update Description and Keep Current Description choices so declining the optional description edit no longer looks like cancelling the completed update.
 - Restored the Profile Library import control so exported profile JSON files can be imported without crowding the existing profile apply and launch actions.
 - Ignored license-only archive and FOMOD mappings during mod installation so packages such as Bars Graphics can install their actual Mods and UserLibs payloads without treating license text as game content.
 - Prevented partial or forward-compatible settings updates from panicking when they introduce a key that is not already present in the current settings snapshot.

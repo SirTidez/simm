@@ -358,6 +358,36 @@ impl DepotDownloaderService {
         }
     }
 
+    async fn terminalize_queued_progress<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        download_id: &str,
+        operation_id: &str,
+        status: DownloadStatus,
+        message: String,
+        error: Option<String>,
+    ) {
+        let progress = {
+            let mut progress_map = self.download_progress.write().await;
+            let Some(progress) = progress_map.get_mut(download_id) else {
+                return;
+            };
+
+            if !matches!(&progress.status, DownloadStatus::Queued)
+                || progress.operation_id.as_str() != operation_id
+            {
+                return;
+            }
+
+            progress.status = status;
+            progress.message = Some(message);
+            progress.error = error;
+            progress.clone()
+        };
+
+        let _ = crate::events::emit_progress(app, progress);
+    }
+
     async fn clear_auth_state(&self, download_id: &str) {
         self.auth_prompted_downloads
             .write()
@@ -1210,13 +1240,50 @@ impl DepotDownloaderService {
             changed = cancellation.changed() => {
                 self.pending_downloads.write().await.remove(&download_id);
                 if changed.is_ok() && *cancellation.borrow() {
+                    self.terminalize_queued_progress(
+                        &app,
+                        &download_id,
+                        &operation_id,
+                        DownloadStatus::Cancelled,
+                        if operation == DepotOperation::Verify {
+                            "Game file verification cancelled".to_string()
+                        } else {
+                            "Download cancelled".to_string()
+                        },
+                        None,
+                    )
+                    .await;
                     return Ok(());
                 }
-                return Err(anyhow::anyhow!("The queued DepotDownloader operation was interrupted"));
+                let error =
+                    anyhow::anyhow!("The queued DepotDownloader operation was interrupted");
+                self.terminalize_queued_progress(
+                    &app,
+                    &download_id,
+                    &operation_id,
+                    DownloadStatus::Error,
+                    "Queued DepotDownloader operation was interrupted".to_string(),
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
             }
         };
         if *cancellation.borrow() {
             self.pending_downloads.write().await.remove(&download_id);
+            self.terminalize_queued_progress(
+                &app,
+                &download_id,
+                &operation_id,
+                DownloadStatus::Cancelled,
+                if operation == DepotOperation::Verify {
+                    "Game file verification cancelled".to_string()
+                } else {
+                    "Download cancelled".to_string()
+                },
+                None,
+            )
+            .await;
             return Ok(());
         }
 
@@ -1228,9 +1295,18 @@ impl DepotDownloaderService {
         if self.shutting_down.load(Ordering::Acquire) {
             drop(active_downloads);
             self.pending_downloads.write().await.remove(&download_id);
-            return Err(anyhow::anyhow!(
-                "SIMM is shutting down; no new game download can be started"
-            ));
+            let error =
+                anyhow::anyhow!("SIMM is shutting down; no new game download can be started");
+            self.terminalize_queued_progress(
+                &app,
+                &download_id,
+                &operation_id,
+                DownloadStatus::Error,
+                "Unable to start DepotDownloader while SIMM is shutting down".to_string(),
+                Some(error.to_string()),
+            )
+            .await;
+            return Err(error);
         }
         if let Err(error) = ensure_no_active_game_download(
             active_downloads.keys().next().map(String::as_str),
@@ -1238,6 +1314,15 @@ impl DepotDownloaderService {
         ) {
             drop(active_downloads);
             self.pending_downloads.write().await.remove(&download_id);
+            self.terminalize_queued_progress(
+                &app,
+                &download_id,
+                &operation_id,
+                DownloadStatus::Error,
+                "Unable to start DepotDownloader operation".to_string(),
+                Some(error.to_string()),
+            )
+            .await;
             return Err(error);
         }
         self.clear_auth_state(&download_id).await;
@@ -1277,6 +1362,15 @@ impl DepotDownloaderService {
             Ok(child) => child,
             Err(error) => {
                 self.pending_downloads.write().await.remove(&download_id);
+                self.terminalize_queued_progress(
+                    &app,
+                    &download_id,
+                    &operation_id,
+                    DownloadStatus::Error,
+                    "Unable to start DepotDownloader process".to_string(),
+                    Some(error.to_string()),
+                )
+                .await;
                 return Err(error);
             }
         };

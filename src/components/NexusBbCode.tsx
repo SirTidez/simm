@@ -208,7 +208,17 @@ function renderNode(node: Exclude<NexusBbCodeNode, string>, key: string): ReactN
     case 'img': {
       const target = safeExternalUrl(nodeText(node.children).trim());
       return target
-        ? <a key={key} href={target} target="_blank" rel="noopener noreferrer">View image</a>
+        ? (
+          <img
+            key={key}
+            src={target}
+            alt="Nexus mod description"
+            className="nexus-bbcode__image"
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+          />
+        )
         : null;
     }
     case 'youtube': {

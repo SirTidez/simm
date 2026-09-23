@@ -380,16 +380,6 @@ function CollectionEmpty({ children }: { children: string }) {
   );
 }
 
-function InspectorEmpty({ children }: { children: string }) {
-  return (
-    <Empty className="workspace-collection__inspector-empty">
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
-  );
-}
-
 type WorkspaceBadgeTone = "source" | "success" | "warning" | "danger";
 
 function WorkspaceBadge({
@@ -418,27 +408,91 @@ function WorkspaceBadge({
   );
 }
 
-function SecurityScanBadge({ summary }: { summary?: SecurityScanSummary }) {
+function SecurityScanBadge({
+  summary,
+  compact = false,
+}: {
+  summary?: SecurityScanSummary;
+  compact?: boolean;
+}) {
   const config = getSecurityBadgeConfig(summary);
 
   if (!config) {
     return null;
   }
 
+  const badge = (
+    <WorkspaceBadge
+      className="workspace-pill--security"
+      style={{
+        borderColor: config.border,
+        background: config.background,
+        color: config.color,
+      }}
+    >
+      <Icon name={`fas ${config.icon}`} style={{ fontSize: "0.7rem" }} />
+      {config.label}
+    </WorkspaceBadge>
+  );
+
+  return compact ? (
+    badge
+  ) : (
+    <div className="workspace-inspector-card__badge-row">{badge}</div>
+  );
+}
+
+function ModLibraryDetailHeader({
+  backLabel,
+  onBack,
+  icon,
+  title,
+  subtitle,
+  tags,
+  metrics,
+}: {
+  backLabel: string;
+  onBack: () => void;
+  icon: ReactNode;
+  title: string;
+  subtitle?: ReactNode;
+  tags: ReactNode;
+  metrics: Array<{ label: string; value: ReactNode }>;
+}) {
   return (
-    <div className="workspace-inspector-card__badge-row">
-      <WorkspaceBadge
-        className="workspace-pill--security"
-        style={{
-          borderColor: config.border,
-          background: config.background,
-          color: config.color,
-        }}
-      >
-        <Icon name={`fas ${config.icon}`} style={{ fontSize: "0.7rem" }} />
-        {config.label}
-      </WorkspaceBadge>
-    </div>
+    <header className="workspace-collection__detail-header">
+      <div className="workspace-collection__detail-navigation">
+        <SimmButton
+          type="button"
+          variant="secondary"
+          className="btn btn-secondary workspace-collection__detail-back"
+          onClick={onBack}
+        >
+          <Icon name="fas fa-arrow-left" />
+          <span>{backLabel}</span>
+        </SimmButton>
+        {icon}
+      </div>
+      <div className="workspace-inspector-card__identity workspace-collection__detail-identity">
+        <div className="workspace-collection__detail-copy">
+          <h2>{title}</h2>
+          {subtitle ? (
+            <div className="workspace-inspector-card__subtle">{subtitle}</div>
+          ) : null}
+          <div className="workspace-inspector-card__tags workspace-inspector-card__tags--compact">
+            {tags}
+          </div>
+        </div>
+        <div className="workspace-inspector-card__metrics workspace-inspector-card__metrics--compact">
+          {metrics.map((metric) => (
+            <div key={metric.label}>
+              <span>{metric.label}</span>
+              <strong>{metric.value}</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+    </header>
   );
 }
 
@@ -1574,7 +1628,6 @@ export function ModLibraryOverlay({
   isOpen,
   focusStorageId,
   focusRequestId,
-  focusModTag,
   onOpenAccounts,
   onOpenSecurityReport,
   onOpenProfile,
@@ -1808,13 +1861,6 @@ export function ModLibraryOverlay({
     y: number;
     items: AnchoredContextMenuItem[];
   } | null>(null);
-  const [openedFromLogs, setOpenedFromLogs] = useState<{
-    active: boolean;
-    modTag: string | null;
-  }>({
-    active: false,
-    modTag: null,
-  });
   const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const libraryScrollTopRef = useRef(0);
   const searchSourceRef = useRef(searchSource);
@@ -2047,7 +2093,6 @@ export function ModLibraryOverlay({
     if (!isOpen) {
       setActiveModView(null);
       setSelectedNexusCollectionSlug(null);
-      setOpenedFromLogs({ active: false, modTag: null });
     }
   }, [isOpen]);
   const openModView = useCallback((nextView: LibraryModViewState) => {
@@ -2056,6 +2101,16 @@ export function ModLibraryOverlay({
     }
     setSelectedNexusCollectionSlug(null);
     setActiveModView(nextView);
+  }, []);
+
+  const closeDetailView = useCallback(() => {
+    setActiveModView(null);
+    setSelectedNexusCollectionSlug(null);
+    window.requestAnimationFrame(() => {
+      if (libraryScrollContainerRef.current) {
+        libraryScrollContainerRef.current.scrollTop = libraryScrollTopRef.current;
+      }
+    });
   }, []);
 
   const getLatestDownloadedVersionForGroups = useCallback(
@@ -6733,12 +6788,10 @@ export function ModLibraryOverlay({
     }
 
     lastHandledFocusRequestIdRef.current = focusRequestId;
-    setOpenedFromLogs({ active: true, modTag: focusModTag ?? null });
     void handleSelectVersion(targetGroup, focusStorageId);
     openDownloadedModView(targetGroup, focusStorageId);
   }, [
     downloadedGroups,
-    focusModTag,
     focusRequestId,
     focusStorageId,
     handleSelectVersion,
@@ -6985,6 +7038,17 @@ export function ModLibraryOverlay({
     selectedThunderstoreVersionOptions,
   ]);
 
+  const selectedThunderstoreRepresentativePackage =
+    selectedThunderstorePackage?.packagesByRuntime.IL2CPP ||
+    selectedThunderstorePackage?.packagesByRuntime.Mono;
+  const selectedThunderstoreLatestVersion =
+    selectedThunderstoreRepresentativePackage?.versions?.[0];
+  const selectedThunderstoreRuntimeLabels = (["IL2CPP", "Mono"] as const).filter(
+    (runtime) => !!selectedThunderstorePackage?.packagesByRuntime[runtime],
+  );
+  const selectedThunderstoreCategories =
+    selectedThunderstoreRepresentativePackage?.categories || [];
+
   const selectedThunderstoreDependencies =
     getThunderstoreDependenciesForRuntime(selectedThunderstoreVersion, "Both");
   const missingSelectedThunderstoreDependencies =
@@ -7011,6 +7075,44 @@ export function ModLibraryOverlay({
       ) || null,
     [nexusCollectionsSearchResults, selectedNexusCollectionSlug],
   );
+
+  const detailPageOpen = Boolean(
+    selectedNexusCollection ||
+      (selectedDownloadedGroup && selectedDownloadedEntry) ||
+      selectedThunderstorePackage ||
+      selectedNexusResult,
+  );
+  const detailSelectionLoading =
+    (activeModView?.kind === "downloaded" && loadingLibrary) ||
+    (activeModView?.kind === "thunderstore" && searching) ||
+    (activeModView?.kind === "nexusmods" && searchingNexusMods) ||
+    (selectedNexusCollectionSlug !== null && searchingNexusCollections);
+  const detailPageBackLabel =
+    libraryTab === "discover"
+      ? "Back to Discover"
+      : libraryTab === "updates"
+        ? "Back to Updates"
+        : "Back to Library";
+
+  useEffect(() => {
+    if (
+      !isOpen ||
+      detailPageOpen ||
+      detailSelectionLoading ||
+      (!activeModView && !selectedNexusCollectionSlug)
+    ) {
+      return;
+    }
+
+    closeDetailView();
+  }, [
+    activeModView,
+    closeDetailView,
+    detailPageOpen,
+    detailSelectionLoading,
+    isOpen,
+    selectedNexusCollectionSlug,
+  ]);
 
   useEffect(() => {
     const revisionNumber = selectedNexusCollection?.revision_number;
@@ -8687,27 +8789,27 @@ export function ModLibraryOverlay({
   }, [selectedNexusFiles, selectedNexusModId, selectedNexusStoredFileId]);
 
   useEffect(() => {
-    if (!isOpen || openedFromLogs.active || libraryTab === "discover") {
+    if (
+      !isOpen ||
+      loadingLibrary ||
+      libraryTab === "discover" ||
+      activeModView?.kind !== "downloaded"
+    ) {
       return;
     }
 
-    if (displayedDownloadedGroups.length === 0) {
-      return;
-    }
-
-    const stillValid =
-      activeModView?.kind === "downloaded" &&
-      displayedDownloadedGroups.some((group) => group.key === activeModView.id);
+    const stillValid = displayedDownloadedGroups.some(
+      (group) => group.key === activeModView.id,
+    );
     if (!stillValid) {
-      openDownloadedModView(displayedDownloadedGroups[0]);
+      setActiveModView(null);
     }
   }, [
     activeModView,
     displayedDownloadedGroups,
     isOpen,
     libraryTab,
-    openDownloadedModView,
-    openedFromLogs.active,
+    loadingLibrary,
   ]);
 
   const openContextMenu = useCallback(
@@ -9105,7 +9207,8 @@ export function ModLibraryOverlay({
           description="Browse sources, manage downloaded entries, and install library versions into environments."
         />
 
-        <div className="workspace-collection">
+        <div className={`workspace-collection${detailPageOpen ? " workspace-collection--detail" : ""}`}>
+          {!detailPageOpen && (
           <div className="workspace-collection__main">
             <div className="workspace-collection__header">
               <div className="workspace-collection__nav">
@@ -9369,7 +9472,10 @@ export function ModLibraryOverlay({
               </div>
             </div>
 
-            <div className="workspace-collection__content">
+            <div
+              className="workspace-collection__content"
+              ref={libraryScrollContainerRef}
+            >
               {libraryTab === "discover" &&
                 searchSource === "thunderstore" &&
                 searchQuery.trim() === "" && (
@@ -9949,79 +10055,27 @@ export function ModLibraryOverlay({
               )}
             </div>
           </div>
+          )}
 
-          <aside className="workspace-collection__inspector">
-            {!activeModView && !selectedNexusCollection && (
-              <InspectorEmpty>
-                {libraryTab === "discover" &&
-                searchSource === "nexusmods" &&
-                nexusCatalogKind === "collections"
-                  ? "Select a collection to review its revision and contents."
-                  : "Select a mod to review details and actions."}
-              </InspectorEmpty>
-            )}
-
+          {detailPageOpen && (
+          <main className="workspace-collection__detail-page">
             {selectedNexusCollection && (
-              <div className="workspace-inspector-card">
-                <div className="workspace-inspector-card__header">
-                  {renderCardIcon(
-                    selectedNexusCollection.name,
-                    undefined,
-                    selectedNexusCollection.tile_image_url,
-                    "rail",
-                  )}
-                  <div>
-                    <h3>{selectedNexusCollection.name}</h3>
-                    <div className="workspace-inspector-card__subtle">
-                      Nexus Collection • {selectedNexusCollection.curator_name}
-                    </div>
-                  </div>
-                </div>
-                <p className="workspace-inspector-card__summary">
-                  {selectedNexusCollection.summary ||
-                    "No summary provided for this collection."}
-                </p>
-                <div className="workspace-inspector-card__metrics">
-                  <div>
-                    <span>Revision</span>
-                    <strong>
-                      {selectedNexusCollection.revision_number ?? "unknown"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Mods</span>
-                    <strong>
-                      {selectedNexusCollection.mod_count.toLocaleString()}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Downloads</span>
-                    <strong>
-                      {formatCompactNumber(
-                        selectedNexusCollection.total_downloads,
-                      )}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Updated</span>
-                    <strong>
-                      {formatInspectorDate(
-                        selectedNexusCollection.updated_at ||
-                          selectedNexusCollection.revision_updated_at,
-                      )}
-                    </strong>
-                  </div>
-                </div>
-                <div className="workspace-inspector-card__field">
-                  <label>Collection details</label>
-                  <div className="workspace-inspector-card__tags">
-                    <WorkspaceBadge tone="source">
-                      Nexus Collection
-                    </WorkspaceBadge>
+              <ModLibraryDetailHeader
+                backLabel={detailPageBackLabel}
+                onBack={closeDetailView}
+                icon={renderCardIcon(
+                  selectedNexusCollection.name,
+                  undefined,
+                  selectedNexusCollection.tile_image_url,
+                  "rail",
+                )}
+                title={selectedNexusCollection.name}
+                subtitle={<>Curated by {selectedNexusCollection.curator_name}</>}
+                tags={
+                  <>
+                    <WorkspaceBadge tone="source">Nexus Collection</WorkspaceBadge>
                     {selectedNexusCollection.category_name && (
-                      <WorkspaceBadge>
-                        {selectedNexusCollection.category_name}
-                      </WorkspaceBadge>
+                      <WorkspaceBadge>{selectedNexusCollection.category_name}</WorkspaceBadge>
                     )}
                     {selectedNexusCollection.file_size !== undefined && (
                       <WorkspaceBadge>
@@ -10029,12 +10083,251 @@ export function ModLibraryOverlay({
                       </WorkspaceBadge>
                     )}
                     {selectedNexusCollection.contains_adult_content && (
-                      <WorkspaceBadge tone="danger">
-                        Adult content
-                      </WorkspaceBadge>
+                      <WorkspaceBadge tone="danger">Adult content</WorkspaceBadge>
                     )}
-                  </div>
-                </div>
+                  </>
+                }
+                metrics={[
+                  {
+                    label: "Revision",
+                    value: selectedNexusCollection.revision_number ?? "unknown",
+                  },
+                  {
+                    label: "Mods",
+                    value: selectedNexusCollection.mod_count.toLocaleString(),
+                  },
+                  {
+                    label: "Downloads",
+                    value: formatCompactNumber(selectedNexusCollection.total_downloads),
+                  },
+                  {
+                    label: "Updated",
+                    value: formatInspectorDate(
+                      selectedNexusCollection.updated_at ||
+                        selectedNexusCollection.revision_updated_at,
+                    ),
+                  },
+                ]}
+              />
+            )}
+            {selectedDownloadedGroup && selectedDownloadedEntry && (
+              <ModLibraryDetailHeader
+                backLabel={detailPageBackLabel}
+                onBack={closeDetailView}
+                icon={renderCardIcon(
+                  selectedDownloadedGroup.displayName,
+                  selectedDownloadedEntry.iconCachePath,
+                  selectedDownloadedEntry.iconUrl,
+                  "rail",
+                )}
+                title={selectedDownloadedGroup.displayName}
+                subtitle={
+                  <>
+                    {selectedDownloadedGroup.author
+                      ? `${selectedDownloadedGroup.author} • `
+                      : ""}
+                    {`${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? "" : "s"}`}
+                  </>
+                }
+                tags={
+                  <>
+                    <WorkspaceBadge tone="source">
+                      {getSourceBadgeLabel(selectedDownloadedEntry.source)}
+                    </WorkspaceBadge>
+                    {(selectedDownloadedEntry.availableRuntimes || []).map((runtime) => (
+                      <WorkspaceBadge key={`${selectedDownloadedEntry.storageId}-${runtime}`}>
+                        {runtime}
+                      </WorkspaceBadge>
+                    ))}
+                    {isGroupUpdateAvailable(selectedDownloadedGroup) && (
+                      <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>
+                    )}
+                    {settings?.showSecurityScanBadges !== false && (
+                      <SecurityScanBadge
+                        summary={selectedDownloadedEntry.securityScan}
+                        compact
+                      />
+                    )}
+                  </>
+                }
+                metrics={[
+                  {
+                    label: "Installed",
+                    value: selectedDownloadedGroup.installedIn.length,
+                  },
+                  {
+                    label: "Versions",
+                    value: selectedDownloadedGroupEntries.length,
+                  },
+                  {
+                    label: "Selected version",
+                    value: formatVersionTag(
+                      getEntryVersionLabel(selectedDownloadedEntry),
+                    ),
+                  },
+                  {
+                    label: "Latest",
+                    value: selectedDownloadedGroup.remoteVersion
+                      ? formatVersionTag(selectedDownloadedGroup.remoteVersion)
+                      : "unknown",
+                  },
+                ]}
+              />
+            )}
+            {selectedThunderstorePackage && (
+              <ModLibraryDetailHeader
+                backLabel={detailPageBackLabel}
+                onBack={closeDetailView}
+                icon={renderCardIcon(
+                  selectedThunderstorePackage.name,
+                  undefined,
+                  selectedThunderstoreLatestVersion?.icon ||
+                    selectedThunderstoreRepresentativePackage?.icon ||
+                    selectedThunderstoreRepresentativePackage?.icon_url,
+                  "rail",
+                )}
+                title={selectedThunderstorePackage.name}
+                subtitle={
+                  <>
+                    {selectedThunderstorePackage.owner}
+                    {downloadedGroupForSelectedThunderstore
+                      ? ` • ${downloadedGroupForSelectedThunderstore.installedIn.length} env${downloadedGroupForSelectedThunderstore.installedIn.length === 1 ? "" : "s"}`
+                      : ""}
+                  </>
+                }
+                tags={
+                  <>
+                    <WorkspaceBadge tone="source">Thunderstore</WorkspaceBadge>
+                    {selectedThunderstoreRuntimeLabels.map((runtime) => (
+                      <WorkspaceBadge key={`${selectedThunderstorePackage.key}-${runtime}`}>
+                        {runtime}
+                      </WorkspaceBadge>
+                    ))}
+                    {selectedThunderstoreRuntimeLabels.length === 0 && (
+                      <WorkspaceBadge>Unknown runtime</WorkspaceBadge>
+                    )}
+                    {selectedThunderstoreCategories.slice(0, 6).map((category) => (
+                      <WorkspaceBadge key={`${selectedThunderstorePackage.key}-${category}`}>
+                        {category}
+                      </WorkspaceBadge>
+                    ))}
+                    {downloadedGroupForSelectedThunderstore && (
+                      <WorkspaceBadge tone="success">Downloaded</WorkspaceBadge>
+                    )}
+                    {downloadedGroupForSelectedThunderstore &&
+                      isGroupUpdateAvailable(downloadedGroupForSelectedThunderstore) && (
+                        <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>
+                      )}
+                    {selectedThunderstoreRepresentativePackage?.is_pinned && (
+                      <WorkspaceBadge>Pinned</WorkspaceBadge>
+                    )}
+                    {selectedThunderstoreRepresentativePackage?.is_deprecated && (
+                      <WorkspaceBadge tone="danger">Deprecated</WorkspaceBadge>
+                    )}
+                  </>
+                }
+                metrics={[
+                  {
+                    label: "Latest",
+                    value: formatVersionTag(
+                      selectedThunderstoreLatestVersion?.version_number,
+                    ),
+                  },
+                  {
+                    label: "Versions",
+                    value: selectedThunderstoreRepresentativePackage?.versions?.length || 0,
+                  },
+                  {
+                    label: "Downloads",
+                    value: formatCompactNumber(
+                      selectedThunderstoreLatestVersion?.downloads,
+                    ),
+                  },
+                  {
+                    label: "Updated",
+                    value: formatInspectorDate(
+                      getThunderstorePackageUpdatedAt(
+                        selectedThunderstoreRepresentativePackage,
+                      ),
+                    ),
+                  },
+                ]}
+              />
+            )}
+            {selectedNexusResult && (
+              <ModLibraryDetailHeader
+                backLabel={detailPageBackLabel}
+                onBack={closeDetailView}
+                icon={renderCardIcon(
+                  selectedNexusResult.name,
+                  undefined,
+                  selectedNexusResult.picture_url,
+                  "rail",
+                )}
+                title={selectedNexusResult.name}
+                subtitle={
+                  <>
+                    {getNexusModAttribution(selectedNexusResult)}
+                    {downloadedGroupForSelectedNexus
+                      ? ` • ${downloadedGroupForSelectedNexus.installedIn.length} env${downloadedGroupForSelectedNexus.installedIn.length === 1 ? "" : "s"}`
+                      : ""}
+                  </>
+                }
+                tags={
+                  <>
+                    <WorkspaceBadge tone="source">Nexus Mods</WorkspaceBadge>
+                    {selectedNexusResult.category_name && (
+                      <WorkspaceBadge>{selectedNexusResult.category_name}</WorkspaceBadge>
+                    )}
+                    {downloadedGroupForSelectedNexus && (
+                      <WorkspaceBadge tone="success">Downloaded</WorkspaceBadge>
+                    )}
+                    {downloadedGroupForSelectedNexus &&
+                      isGroupUpdateAvailable(downloadedGroupForSelectedNexus) && (
+                        <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>
+                      )}
+                    {selectedNexusResult.contains_adult_content && (
+                      <WorkspaceBadge tone="danger">Adult content</WorkspaceBadge>
+                    )}
+                    {selectedNexusResult.status && (
+                      <WorkspaceBadge>{selectedNexusResult.status}</WorkspaceBadge>
+                    )}
+                  </>
+                }
+                metrics={[
+                  {
+                    label: "Latest",
+                    value: formatVersionTag(selectedNexusResult.version),
+                  },
+                  {
+                    label: "Endorsements",
+                    value: formatCompactNumber(selectedNexusResult.endorsement_count),
+                  },
+                  {
+                    label: "Downloads",
+                    value: formatCompactNumber(
+                      selectedNexusResult.mod_downloads ||
+                        selectedNexusResult.unique_downloads,
+                    ),
+                  },
+                  {
+                    label: "Updated",
+                    value: formatInspectorDate(
+                      getNexusModUpdatedAt(selectedNexusResult),
+                    ),
+                  },
+                ]}
+              />
+            )}
+
+            <div className="workspace-collection__detail-content">
+
+            {selectedNexusCollection && (
+              <div className="workspace-inspector-card">
+                <p className="workspace-inspector-card__summary">
+                  {selectedNexusCollection.summary ||
+                    "No summary provided for this collection."}
+                </p>
                 {selectedCollectionPlan && (
                   <section className="workspace-inspector-card__subsection workspace-collection-runtime-preview">
                     <div className="workspace-inspector-card__subsection-header">
@@ -10428,62 +10721,9 @@ export function ModLibraryOverlay({
 
             {selectedDownloadedGroup && selectedDownloadedEntry && (
               <div className="workspace-inspector-card">
-                <div className="workspace-inspector-card__header">
-                  {renderCardIcon(
-                    selectedDownloadedGroup.displayName,
-                    selectedDownloadedEntry.iconCachePath,
-                    selectedDownloadedEntry.iconUrl,
-                    "rail",
-                  )}
-                  <div>
-                    <h3>{selectedDownloadedGroup.displayName}</h3>
-                    <div className="workspace-inspector-card__subtle">
-                      {getSourceBadgeLabel(selectedDownloadedEntry.source)}
-                      {selectedDownloadedGroup.author
-                        ? ` • ${selectedDownloadedGroup.author}`
-                        : ""}
-                      {` • ${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? "" : "s"}`}
-                    </div>
-                    {settings?.showSecurityScanBadges !== false && (
-                      <SecurityScanBadge
-                        summary={selectedDownloadedEntry.securityScan}
-                      />
-                    )}
-                  </div>
-                </div>
                 <p className="workspace-inspector-card__summary">
                   {selectedDownloadedEntry.summary || "No summary provided."}
                 </p>
-                <div className="workspace-inspector-card__metrics">
-                  <div>
-                    <span>Installed</span>
-                    <strong>
-                      {selectedDownloadedGroup.installedIn.length}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Versions</span>
-                    <strong>{selectedDownloadedGroupEntries.length}</strong>
-                  </div>
-                  <div>
-                    <span>Selected version</span>
-                    <strong>
-                      {formatVersionTag(
-                        getEntryVersionLabel(selectedDownloadedEntry),
-                      )}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Latest</span>
-                    <strong>
-                      {selectedDownloadedGroup.remoteVersion
-                        ? formatVersionTag(
-                            selectedDownloadedGroup.remoteVersion,
-                          )
-                        : "unknown"}
-                    </strong>
-                  </div>
-                </div>
                 {selectedDownloadedEntry.source === "nexusmods" && (
                   <section
                     className="workspace-inspector-card__subsection workspace-inspector-card__subsection--dependencies"
@@ -10734,134 +10974,10 @@ export function ModLibraryOverlay({
 
             {selectedThunderstorePackage && (
               <div className="workspace-inspector-card">
-                {(() => {
-                  const representativePackage =
-                    selectedThunderstorePackage.packagesByRuntime.IL2CPP ||
-                    selectedThunderstorePackage.packagesByRuntime.Mono;
-                  const latestVersion = representativePackage?.versions?.[0];
-                  const runtimeLabels = (["IL2CPP", "Mono"] as const).filter(
-                    (runtime) =>
-                      !!selectedThunderstorePackage.packagesByRuntime[runtime],
-                  );
-                  const categories = representativePackage?.categories || [];
-                  return (
-                    <>
-                      <div className="workspace-inspector-card__header">
-                        {renderCardIcon(
-                          selectedThunderstorePackage.name,
-                          undefined,
-                          latestVersion?.icon ||
-                            representativePackage?.icon ||
-                            representativePackage?.icon_url,
-                          "rail",
-                        )}
-                        <div>
-                          <h3>{selectedThunderstorePackage.name}</h3>
-                          <div className="workspace-inspector-card__subtle">
-                            Thunderstore • {selectedThunderstorePackage.owner}
-                            {downloadedGroupForSelectedThunderstore
-                              ? ` • ${downloadedGroupForSelectedThunderstore.installedIn.length} env${downloadedGroupForSelectedThunderstore.installedIn.length === 1 ? "" : "s"}`
-                              : ""}
-                          </div>
-                        </div>
-                      </div>
-                      <p className="workspace-inspector-card__summary">
-                        {latestVersion?.description ||
-                          "No description provided for this package."}
-                      </p>
-                      <div className="workspace-inspector-card__metrics">
-                        <div>
-                          <span>Latest</span>
-                          <strong>
-                            {formatVersionTag(latestVersion?.version_number)}
-                          </strong>
-                        </div>
-                        <div>
-                          <span>Versions</span>
-                          <strong>
-                            {representativePackage?.versions?.length || 0}
-                          </strong>
-                        </div>
-                        <div>
-                          <span>Downloads</span>
-                          <strong>
-                            {formatCompactNumber(latestVersion?.downloads)}
-                          </strong>
-                        </div>
-                        <div>
-                          <span>Updated</span>
-                          <strong>
-                            {formatInspectorDate(
-                              getThunderstorePackageUpdatedAt(
-                                representativePackage,
-                              ),
-                            )}
-                          </strong>
-                        </div>
-                      </div>
-                      <div className="workspace-inspector-card__field">
-                        <label>Runtime support</label>
-                        <div className="workspace-inspector-card__tags">
-                          {runtimeLabels.map((runtime) => (
-                            <WorkspaceBadge
-                              key={`${selectedThunderstorePackage.key}-${runtime}`}
-                            >
-                              {runtime}
-                            </WorkspaceBadge>
-                          ))}
-                          {runtimeLabels.length === 0 && (
-                            <WorkspaceBadge>
-                              Unknown runtime
-                            </WorkspaceBadge>
-                          )}
-                        </div>
-                      </div>
-                      {categories.length > 0 && (
-                        <div className="workspace-inspector-card__field">
-                          <label>Categories</label>
-                          <div className="workspace-inspector-card__tags">
-                            {categories.slice(0, 6).map((category) => (
-                              <WorkspaceBadge
-                                key={`${selectedThunderstorePackage.key}-${category}`}
-                              >
-                                {category}
-                              </WorkspaceBadge>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      <div className="workspace-inspector-card__field">
-                        <label>Status</label>
-                        <div className="workspace-inspector-card__tags">
-                          <WorkspaceBadge tone="source">
-                            Thunderstore
-                          </WorkspaceBadge>
-                          {downloadedGroupForSelectedThunderstore && (
-                            <WorkspaceBadge tone="success">
-                              Downloaded
-                            </WorkspaceBadge>
-                          )}
-                          {downloadedGroupForSelectedThunderstore &&
-                            isGroupUpdateAvailable(
-                              downloadedGroupForSelectedThunderstore,
-                            ) && (
-                              <WorkspaceBadge tone="warning">
-                                Update available
-                              </WorkspaceBadge>
-                            )}
-                          {representativePackage?.is_pinned && (
-                            <WorkspaceBadge>Pinned</WorkspaceBadge>
-                          )}
-                          {representativePackage?.is_deprecated && (
-                            <WorkspaceBadge tone="danger">
-                              Deprecated
-                            </WorkspaceBadge>
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  );
-                })()}
+                <p className="workspace-inspector-card__summary">
+                  {selectedThunderstoreLatestVersion?.description ||
+                    "No description provided for this package."}
+                </p>
                 <section
                   className="workspace-inspector-card__subsection"
                   aria-labelledby="thunderstore-inspector-dependencies"
@@ -11062,93 +11178,12 @@ export function ModLibraryOverlay({
 
             {selectedNexusResult && (
               <div className="workspace-inspector-card">
-                <div className="workspace-inspector-card__header">
-                  {renderCardIcon(
-                    selectedNexusResult.name,
-                    undefined,
-                    selectedNexusResult.picture_url,
-                    "rail",
-                  )}
-                  <div>
-                    <h3>{selectedNexusResult.name}</h3>
-                    <div className="workspace-inspector-card__subtle">
-                      Nexus Mods • {getNexusModAttribution(selectedNexusResult)}
-                      {downloadedGroupForSelectedNexus
-                        ? ` • ${downloadedGroupForSelectedNexus.installedIn.length} env${downloadedGroupForSelectedNexus.installedIn.length === 1 ? "" : "s"}`
-                        : ""}
-                    </div>
-                  </div>
-                </div>
                 <div className="workspace-inspector-card__summary">
                   <NexusDescription key={selectedNexusResult.mod_id}>
                     {selectedNexusResult.description ||
                       selectedNexusResult.summary ||
                       "No description provided for this mod."}
                   </NexusDescription>
-                </div>
-                <div className="workspace-inspector-card__metrics">
-                  <div>
-                    <span>Latest</span>
-                    <strong>
-                      {formatVersionTag(selectedNexusResult.version)}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Endorsements</span>
-                    <strong>
-                      {formatCompactNumber(
-                        selectedNexusResult.endorsement_count,
-                      )}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Downloads</span>
-                    <strong>
-                      {formatCompactNumber(
-                        selectedNexusResult.mod_downloads ||
-                          selectedNexusResult.unique_downloads,
-                      )}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Updated</span>
-                    <strong>
-                      {formatInspectorDate(
-                        getNexusModUpdatedAt(selectedNexusResult),
-                      )}
-                    </strong>
-                  </div>
-                </div>
-                <div className="workspace-inspector-card__field">
-                  <label>Status</label>
-                  <div className="workspace-inspector-card__tags">
-                    <WorkspaceBadge tone="source">
-                      Nexus Mods
-                    </WorkspaceBadge>
-                    {downloadedGroupForSelectedNexus && (
-                      <WorkspaceBadge tone="success">
-                        Downloaded
-                      </WorkspaceBadge>
-                    )}
-                    {downloadedGroupForSelectedNexus &&
-                      isGroupUpdateAvailable(
-                        downloadedGroupForSelectedNexus,
-                      ) && (
-                        <WorkspaceBadge tone="warning">
-                          Update available
-                        </WorkspaceBadge>
-                      )}
-                    {selectedNexusResult.contains_adult_content && (
-                      <WorkspaceBadge tone="danger">
-                        Adult content
-                      </WorkspaceBadge>
-                    )}
-                    {selectedNexusResult.status && (
-                      <WorkspaceBadge>
-                        {selectedNexusResult.status}
-                      </WorkspaceBadge>
-                    )}
-                  </div>
                 </div>
                 <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
                   <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
@@ -11353,7 +11388,9 @@ export function ModLibraryOverlay({
                 </section>
               </div>
             )}
-          </aside>
+            </div>
+          </main>
+          )}
         </div>
       </div>
 
