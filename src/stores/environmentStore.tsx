@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react';
 import type { Environment, DownloadProgress, ExtractGameVersionResult, OneTimeDownloadCredentials } from '../types';
 
 function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partial<Environment> {
@@ -78,7 +78,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const pendingOperationReplacementRef = useRef<Set<string>>(new Set());
   const progressReconciliationInFlightRef = useRef(false);
   const progressRef = useRef(progress);
-  progressRef.current = progress;
+  useLayoutEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
   const environmentsRef = useRef<Environment[]>([]);
   const snapshotGenerationRef = useRef(0);
   const commitEnvironmentSnapshot = useCallback((updater: (current: Environment[]) => Environment[]) => {
