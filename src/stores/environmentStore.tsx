@@ -77,6 +77,8 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   }>>(new Map());
   const pendingOperationReplacementRef = useRef<Set<string>>(new Set());
   const progressReconciliationInFlightRef = useRef(false);
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
   const environmentsRef = useRef<Environment[]>([]);
   const snapshotGenerationRef = useRef(0);
   const commitEnvironmentSnapshot = useCallback((updater: (current: Environment[]) => Environment[]) => {
@@ -435,7 +437,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const reconcileGameOperationProgress = useCallback(async () => {
     if (progressReconciliationInFlightRef.current) return;
     const downloadIds = new Set<string>();
-    for (const entry of progress.values()) {
+    for (const entry of progressRef.current.values()) {
       if (!isTerminalDownloadStatus(entry.status)) downloadIds.add(entry.downloadId);
     }
     for (const environment of environmentsRef.current) {
@@ -481,7 +483,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     } finally {
       progressReconciliationInFlightRef.current = false;
     }
-  }, [acceptProgressOperation, invalidateEnvironmentSnapshot, progress, refreshEnvironments]);
+  }, [acceptProgressOperation, invalidateEnvironmentSnapshot, refreshEnvironments]);
 
   // Load environments on mount
   useEffect(() => {

@@ -118,49 +118,82 @@ internal sealed class SimmBridgeProvider : IModIntegrationBridge
             .ConfigureAwait(false);
 
         using var stream = client.GetStream();
+        using var ioTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        ioTimeout.CancelAfter(_responseTimeout);
+        // Mono's NetworkStream can ignore cancellation after a read starts.
+        // Closing the client makes the pending operation fail on every runtime.
+        using var abortRegistration = ioTimeout.Token.Register(
+            static state => ((TcpClient)state!).Close(),
+            client);
         var serializer = new DataContractJsonSerializer(typeof(WireRequest));
-        using (var buffer = new MemoryStream())
+        try
         {
-            serializer.WriteObject(buffer, request);
-            buffer.WriteByte((byte)'\n');
-            var payload = buffer.ToArray();
-            await stream.WriteAsync(payload, 0, payload.Length, cancellationToken)
+            using (var buffer = new MemoryStream())
+            {
+                serializer.WriteObject(buffer, request);
+                buffer.WriteByte((byte)'\n');
+                var payload = buffer.ToArray();
+                await stream.WriteAsync(payload, 0, payload.Length, ioTimeout.Token)
+                    .ConfigureAwait(false);
+                await stream.FlushAsync(ioTimeout.Token).ConfigureAwait(false);
+            }
+
+            var responseBytes = await ReadLineAsync(
+                    stream,
+                    MaximumResponseBytes,
+                    ioTimeout.Token)
                 .ConfigureAwait(false);
-            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
+            using var responseStream = new MemoryStream(responseBytes, writable: false);
+            var responseSerializer = new DataContractJsonSerializer(typeof(WireResponse));
+            var response = responseSerializer.ReadObject(responseStream) as WireResponse
+                ?? throw new IOException("SIMM returned an empty response.");
 
-        var responseBytes = await ReadLineAsync(
-                stream,
-                MaximumResponseBytes,
-                _responseTimeout,
-                cancellationToken)
-            .ConfigureAwait(false);
-        using var responseStream = new MemoryStream(responseBytes, writable: false);
-        var responseSerializer = new DataContractJsonSerializer(typeof(WireResponse));
-        var response = responseSerializer.ReadObject(responseStream) as WireResponse
-            ?? throw new IOException("SIMM returned an empty response.");
+            if (response.ProtocolVersion != BridgeConfiguration.SupportedProtocolVersion)
+            {
+                return ModIntegrationResult.Unavailable(
+                    $"SIMM returned unsupported protocol v{response.ProtocolVersion}.");
+            }
 
-        if (response.ProtocolVersion != BridgeConfiguration.SupportedProtocolVersion)
-        {
-            return ModIntegrationResult.Unavailable(
-                $"SIMM returned unsupported protocol v{response.ProtocolVersion}.");
-        }
+            if (!string.Equals(response.RequestId, request.RequestId, StringComparison.Ordinal))
+            {
+                return new ModIntegrationResult(
+                    ModIntegrationStatus.Invalid,
+                    "SIMM returned a response for a different request.");
+            }
 
-        if (!string.Equals(response.RequestId, request.RequestId, StringComparison.Ordinal))
-        {
+            var status = ParseStatus(response.Status);
             return new ModIntegrationResult(
-                ModIntegrationStatus.Invalid,
-                "SIMM returned a response for a different request.");
+                status,
+                response.Message,
+                response.CurrentVersion,
+                response.TargetVersion,
+                response.Source,
+                response.QueuedRequestId);
         }
-
-        var status = ParseStatus(response.Status);
-        return new ModIntegrationResult(
-            status,
-            response.Message,
-            response.CurrentVersion,
-            response.TargetVersion,
-            response.Source,
-            response.QueuedRequestId);
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (ioTimeout.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The local SIMM connection timed out.");
+        }
+        catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (ObjectDisposedException) when (ioTimeout.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The local SIMM connection timed out.");
+        }
+        catch (IOException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (IOException) when (ioTimeout.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The local SIMM connection timed out.");
+        }
     }
 
     internal static ModIntegrationStatus ParseStatus(string status) => status switch
@@ -185,16 +218,13 @@ internal sealed class SimmBridgeProvider : IModIntegrationBridge
     private static async Task<byte[]> ReadLineAsync(
         NetworkStream stream,
         int maximumBytes,
-        TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
         using var buffer = new MemoryStream();
         var oneByte = new byte[1];
         while (buffer.Length <= maximumBytes)
         {
-            var read = await stream.ReadAsync(oneByte, 0, 1, timeoutSource.Token)
+            var read = await stream.ReadAsync(oneByte, 0, 1, cancellationToken)
                 .ConfigureAwait(false);
             if (read == 0 || oneByte[0] == (byte)'\n')
             {

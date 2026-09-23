@@ -36,6 +36,9 @@ pub const DEFAULT_MOD_INTEGRATION_PORT: u16 = 43871;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const REQUESTS_PER_MINUTE: usize = 30;
 const REQUEST_RETENTION_PER_ENVIRONMENT: i64 = 200;
+// Integration callbacks often arrive in a burst when the game starts. Keep
+// that burst on one provider scan while allowing normal checks to refresh soon.
+const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const PORT_SEARCH_SPACE: u32 = u16::MAX as u32;
 
 pub(crate) fn is_mod_integration_infrastructure_file(file_name: &str) -> bool {
@@ -103,6 +106,7 @@ pub struct ModIntegrationService {
     app: AppHandle,
     runtime_settings: RuntimeSettingsState,
     rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    update_check_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     listener_tasks: Arc<Mutex<HashMap<u16, JoinHandle<()>>>>,
     background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     shutdown_started: Arc<AtomicBool>,
@@ -164,6 +168,7 @@ impl ModIntegrationService {
             app,
             runtime_settings,
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            update_check_locks: Arc::new(Mutex::new(HashMap::new())),
             listener_tasks: Arc::new(Mutex::new(HashMap::new())),
             background_tasks: Arc::new(Mutex::new(Vec::new())),
             shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -562,12 +567,20 @@ impl ModIntegrationService {
             let token_hash = row.get::<String, _>("token_hash");
             let output_dir = row.get::<String, _>("output_dir");
             let config_path = Self::bridge_config_path(&output_dir);
-            let config = Self::read_bridge_config(&config_path)
-                .await
-                .with_context(|| {
-                    format!("Failed to load bridge configuration for {environment_id}")
-                })?;
-            Self::validate_bridge_config(&config, &environment_id, &token_hash)?;
+            let config = match Self::read_bridge_config(&config_path).await {
+                Ok(config) => config,
+                Err(error) => {
+                    log::debug!("Skipping bridge configuration for {environment_id}: {error:#}");
+                    continue;
+                }
+            };
+            if let Err(error) = Self::validate_bridge_config(&config, &environment_id, &token_hash)
+            {
+                log::debug!(
+                    "Skipping invalid bridge configuration for {environment_id}: {error:#}"
+                );
+                continue;
+            }
             configs.push((environment_id, config_path, config));
         }
         Ok(configs)
@@ -986,13 +999,15 @@ impl ModIntegrationService {
         environment_id: &str,
         mod_file_name: &str,
     ) -> std::result::Result<ResolvedIntegrationMod, String> {
-        check_mod_updates_for_environment(
-            self.pool.clone(),
-            &self.app,
-            environment_id,
-            self.runtime_settings.snapshot().await,
-        )
-        .await?;
+        let update_check_lock = {
+            let mut locks = self.update_check_locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(environment_id.to_string())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _update_check_guard = update_check_lock.lock().await;
         let synthetic_request = ModIntegrationWireRequest {
             protocol_version: MOD_INTEGRATION_PROTOCOL_VERSION,
             request_id: "internal-refresh".to_string(),
@@ -1013,7 +1028,32 @@ impl ModIntegrationService {
             .ok_or_else(|| "The requested mod is no longer installed".to_string())?;
         self.apply_local_test_fixture(environment_id, &mut resolved)
             .await?;
+        if !Self::has_recent_update_check(&resolved.metadata) {
+            check_mod_updates_for_environment(
+                self.pool.clone(),
+                &self.app,
+                environment_id,
+                self.runtime_settings.snapshot().await,
+            )
+            .await?;
+            resolved = self
+                .resolve_mod_by_file_name(&synthetic_request.environment_id, mod_file_name)
+                .await?
+                .ok_or_else(|| "The requested mod is no longer installed".to_string())?;
+            self.apply_local_test_fixture(environment_id, &mut resolved)
+                .await?;
+        }
         Ok(resolved)
+    }
+
+    fn has_recent_update_check(metadata: &ModMetadata) -> bool {
+        metadata.last_update_check.is_some_and(|checked_at| {
+            let age = Utc::now().signed_duration_since(checked_at);
+            age >= chrono::Duration::zero()
+                && age
+                    .to_std()
+                    .is_ok_and(|elapsed| elapsed < UPDATE_CHECK_CACHE_TTL)
+        })
     }
 
     async fn resolve_mod(
@@ -1414,7 +1454,6 @@ impl ModIntegrationService {
     }
 
     async fn process_queued_requests(&self) -> Result<()> {
-        let running = running_schedule_directories().await.unwrap_or_default();
         let rows = sqlx::query(
             r#"SELECT id, environment_id, mod_file_name
                FROM mod_integration_requests
@@ -1423,6 +1462,12 @@ impl ModIntegrationService {
         .fetch_all(&*self.pool)
         .await
         .context("Failed to load queued integration requests")?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let running = running_schedule_directories()
+            .await
+            .context("Failed to determine whether Schedule I is running")?;
         for row in rows {
             let id = row.get::<String, _>("id");
             let environment_id = row.get::<String, _>("environment_id");

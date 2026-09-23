@@ -1,7 +1,7 @@
 use crate::services::depot_downloader::DepotDownloaderService;
 use crate::services::environment::EnvironmentService;
 use crate::services::settings::{RuntimeSettingsState, SettingsService};
-use crate::types::{DepotDownloadOptions, DepotOperation, DownloadProgress};
+use crate::types::{DepotDownloadOptions, DepotOperation, DownloadProgress, EnvironmentType};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -134,6 +134,16 @@ async fn start_depot_operation(
         .ok_or_else(|| "Environment not found".to_string())?;
 
     if operation == DepotOperation::Verify {
+        if matches!(
+            env.environment_type,
+            Some(EnvironmentType::Steam) | Some(EnvironmentType::Local)
+        ) {
+            return Err(
+                "File verification is only supported for SIMM-managed DepotDownloader environments."
+                    .to_string(),
+            );
+        }
+
         let metadata = tokio::fs::metadata(&env.output_dir)
             .await
             .map_err(|_| {

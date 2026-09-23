@@ -198,6 +198,15 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
   // if a backgrounded webview delayed the original Tauri event.
   useEffect(() => {
     for (const progress of gameProgress.values()) {
+      const tracked = downloadsRef.current.get(`game:${progress.downloadId}`);
+      if (
+        isTerminal(progress.status)
+        && tracked
+        && isTerminal(tracked.status)
+        && tracked.operationId === progress.operationId
+      ) {
+        continue;
+      }
       updateGameDownload(progress.downloadId, {
         operationId: progress.operationId,
         contextLabel: progress.operation === 'verify' ? 'Game file verification' : 'Game download',

@@ -7154,12 +7154,9 @@ exit 1
         {
             anyhow::bail!("Refusing to remove a mod path outside the environment");
         }
+        let mut metadata_map = self.load_mod_metadata(&mods_directory).await?;
         self.remove_path_if_exists(&file_to_delete).await?;
 
-        let mut metadata_map = self
-            .load_mod_metadata(&mods_directory)
-            .await
-            .unwrap_or_else(|_| HashMap::new());
         metadata_map.remove(mod_file_name);
         self.save_mod_metadata(&mods_directory, &metadata_map)
             .await?;

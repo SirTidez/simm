@@ -609,56 +609,58 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
         'downloading',
         `Downloading exact Nexus file ${fileId} for the ${runtime} profile.`,
       );
-      let result = await ApiService.downloadNexusModToLibrary(
-        collectionItem.nexusModId,
-        fileId,
-        runtime,
-      );
-      if (!result.success && result.securityScanConfirmationRequired && !result.securityScanBlocked) {
-        const confirmed = await confirm(
-          `SIMM's security scan found items that require review for ${collectionItem.requestedName} (${runtime}). Continue with this exact Nexus file anyway?`,
-          { title: `Security review required · ${runtime}`, kind: 'warning' },
-        );
-        if (!confirmed) {
-          await setCollectionItemStatus(
-            workingProfile,
-            collectionItem.key,
-            'manualRequired',
-            'Download paused because the security review was not approved.',
-          );
-          return null;
-        }
-        result = await ApiService.downloadNexusModToLibrary(
+      try {
+        let result = await ApiService.downloadNexusModToLibrary(
           collectionItem.nexusModId,
           fileId,
           runtime,
-          true,
         );
-      }
-      if (!result.success) {
-        const statusMessage = result.securityScanBlocked
-          ? `The security policy blocked this exact ${runtime} Nexus file.`
-          : result.error || `Nexus did not complete the exact ${runtime} file download.`;
+        if (!result.success && result.securityScanConfirmationRequired && !result.securityScanBlocked) {
+          const confirmed = await confirm(
+            `SIMM's security scan found items that require review for ${collectionItem.requestedName} (${runtime}). Continue with this exact Nexus file anyway?`,
+            { title: `Security review required · ${runtime}`, kind: 'warning' },
+          );
+          if (!confirmed) {
+            await setCollectionItemStatus(
+              workingProfile,
+              collectionItem.key,
+              'manualRequired',
+              'Download paused because the security review was not approved.',
+            );
+            return null;
+          }
+          result = await ApiService.downloadNexusModToLibrary(
+            collectionItem.nexusModId,
+            fileId,
+            runtime,
+            true,
+          );
+        }
+
+        if (!result.success) {
+          throw new Error(result.securityScanBlocked
+            ? `The security policy blocked this exact ${runtime} Nexus file.`
+            : result.error || `Nexus did not complete the exact ${runtime} file download.`);
+        }
+
+        const library = await ApiService.getModLibrary();
+        workingProfile = updateCollectionProfileFromLibrary(workingProfile, library.downloaded);
+        const syncedItem = workingProfile.manifest.collection?.items.find((item) => item.key === collectionItem.key);
+        if (syncedItem?.status !== 'ready') {
+          throw new Error('The file downloaded, but SIMM could not attach the exact Nexus file to this profile. Refresh the library and retry.');
+        }
+        await saveCollectionProfile(workingProfile);
+        window.dispatchEvent(new CustomEvent('library-updated'));
+        return `${collectionItem.requestedName} ${collectionItem.requestedVersion} is downloaded and ready in this profile.`;
+      } catch (err) {
         await setCollectionItemStatus(
           workingProfile,
           collectionItem.key,
           'error',
-          statusMessage,
-        );
-        throw new Error(statusMessage);
+          getErrorMessage(err, `Nexus did not complete the exact ${runtime} file download.`),
+        ).catch(() => undefined);
+        throw err;
       }
-
-      const library = await ApiService.getModLibrary();
-      workingProfile = updateCollectionProfileFromLibrary(workingProfile, library.downloaded);
-      const syncedItem = workingProfile.manifest.collection?.items.find((item) => item.key === collectionItem.key);
-      if (syncedItem?.status !== 'ready') {
-        const statusMessage = 'The file downloaded, but SIMM could not attach the exact Nexus file to this profile. Refresh the library and retry.';
-        await setCollectionItemStatus(workingProfile, collectionItem.key, 'error', statusMessage);
-        throw new Error(statusMessage);
-      }
-      await saveCollectionProfile(workingProfile);
-      window.dispatchEvent(new CustomEvent('library-updated'));
-      return `${collectionItem.requestedName} ${collectionItem.requestedVersion} is downloaded and ready in this profile.`;
     }
 
     const match = collectionItem.thunderstoreMatch;
@@ -677,44 +679,54 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
       'downloading',
       `Downloading exact Thunderstore version ${collectionItem.requestedVersion}.`,
     );
-    let result = await ApiService.downloadThunderstoreToLibrary(
-      match.packageUuid,
-      runtime,
-      undefined,
-      match.versionUuid,
-    );
-    if (!result.success && result.securityScanConfirmationRequired && !result.securityScanBlocked) {
-      const confirmed = await confirm(
-        `SIMM's security scan found items that require review for ${collectionItem.requestedName}. Continue with this exact Thunderstore file anyway?`,
-        { title: 'Security review required', kind: 'warning' },
+    try {
+      let result = await ApiService.downloadThunderstoreToLibrary(
+        match.packageUuid,
+        runtime,
+        undefined,
+        match.versionUuid,
       );
-      if (confirmed) {
-        result = await ApiService.downloadThunderstoreToLibrary(
-          match.packageUuid,
-          runtime,
-          true,
-          match.versionUuid,
+      if (!result.success && result.securityScanConfirmationRequired && !result.securityScanBlocked) {
+        const confirmed = await confirm(
+          `SIMM's security scan found items that require review for ${collectionItem.requestedName}. Continue with this exact Thunderstore file anyway?`,
+          { title: 'Security review required', kind: 'warning' },
         );
+        if (confirmed) {
+          result = await ApiService.downloadThunderstoreToLibrary(
+            match.packageUuid,
+            runtime,
+            true,
+            match.versionUuid,
+          );
+        } else {
+          await setCollectionItemStatus(
+            workingProfile,
+            collectionItem.key,
+            'manualRequired',
+            'Download paused because the security review was not approved.',
+          );
+          return null;
+        }
       }
-    }
-    if (!result.success) {
+      if (!result.success) {
+        throw new Error(result.securityScanBlocked
+          ? 'The security policy blocked this Thunderstore file.'
+          : 'Thunderstore did not complete the exact-version download.');
+      }
+      const library = await ApiService.getModLibrary();
+      workingProfile = updateCollectionProfileFromLibrary(workingProfile, library.downloaded);
+      await saveCollectionProfile(workingProfile);
+      window.dispatchEvent(new CustomEvent('library-updated'));
+      return `${collectionItem.requestedName} ${collectionItem.requestedVersion} is ready in this profile.`;
+    } catch (err) {
       await setCollectionItemStatus(
         workingProfile,
         collectionItem.key,
         'error',
-        result.securityScanBlocked
-          ? 'The security policy blocked this file.'
-          : 'Thunderstore did not complete the exact-version download.',
-      );
-      throw new Error(result.securityScanBlocked
-        ? 'The security policy blocked this Thunderstore file.'
-        : 'Thunderstore did not complete the download.');
+        getErrorMessage(err, 'Thunderstore did not complete the download.'),
+      ).catch(() => undefined);
+      throw err;
     }
-    const library = await ApiService.getModLibrary();
-    workingProfile = updateCollectionProfileFromLibrary(workingProfile, library.downloaded);
-    await saveCollectionProfile(workingProfile);
-    window.dispatchEvent(new CustomEvent('library-updated'));
-    return `${collectionItem.requestedName} ${collectionItem.requestedVersion} is ready in this profile.`;
   }, [refreshNexusDownloadAccess, saveCollectionProfile, selectedProfile, setCollectionItemStatus]);
 
   useEffect(() => {
@@ -1291,7 +1303,6 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
                 const canDownloadNexusDirectly = Boolean(isNexusCollectionItem && nexusDownloadAccess?.canDirectDownload);
                 const nexusLoginRequired = Boolean(isNexusCollectionItem && nexusDownloadAccess && !nexusDownloadAccess.connected);
                 const collectionReady = collectionItem?.status === 'ready';
-                const collectionDownloading = collectionItem?.status === 'downloading';
                 const collectionSource = collectionItem
                   ? collectionSourceLabel(collectionItem, row.item)
                   : null;
@@ -1365,12 +1376,12 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
                           type="button"
                           size="sm"
                           variant="secondary"
-                          disabled={busyAction !== null || collectionDownloading || nexusAccessChecking || nexusLoginRequired}
+                          disabled={busyAction !== null || nexusAccessChecking || nexusLoginRequired}
                           title={nexusLoginRequired ? 'Sign in to Nexus Mods from Accounts first.' : undefined}
                           onClick={() => void runAction(`collection-${collectionItem.key}`, () => downloadCollectionProfileItem(collectionItem))}
                         >
-                          <Icon name={collectionActionBusy || collectionDownloading || nexusAccessChecking ? 'spinner' : isNexusCollectionItem && !canDownloadNexusDirectly ? 'arrowUpRightFromSquare' : 'download'} />
-                          {collectionActionBusy || collectionDownloading
+                          <Icon name={collectionActionBusy || nexusAccessChecking ? 'spinner' : isNexusCollectionItem && !canDownloadNexusDirectly ? 'arrowUpRightFromSquare' : 'download'} />
+                          {collectionActionBusy
                             ? 'Downloading…'
                             : nexusAccessChecking
                               ? 'Checking Nexus…'

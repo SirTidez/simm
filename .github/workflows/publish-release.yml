@@ -774,6 +774,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Extract latest release changelog
         id: nexus_changelog
@@ -834,7 +835,54 @@ jobs:
 
           test -f "artifacts/nexus/SIMM_${RELEASE_VERSION}_Setup.exe"
 
+      - name: Check for an existing Nexus file version
+        id: nexus_existing_version
+        env:
+          NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          RELEASE_VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          versions_json="$(curl --fail-with-body --retry 3 --retry-all-errors \
+            --header "apikey: ${NEXUSMODS_API_KEY}" \
+            --header 'User-Agent: SIMM GitHub Actions' \
+            --header 'Accept: application/json' \
+            "https://api.nexusmods.com/v3/mod-files/7231657/versions")"
+          existing_version_id="$(jq -r --arg version "${RELEASE_VERSION}" \
+            '.data.versions[]? | select(.version == $version) | .id' <<<"${versions_json}" | head -n 1)"
+
+          if [[ -n "${existing_version_id}" && "${existing_version_id}" != "null" ]]; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "version_id=${existing_version_id}" >> "${GITHUB_OUTPUT}"
+            echo "Nexus already has file version ${RELEASE_VERSION} (${existing_version_id}); the changelog will be retried without uploading the file again."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Add changelog to existing Nexus file version
+        if: steps.nexus_existing_version.outputs.exists == 'true'
+        env:
+          NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          RELEASE_VERSION: ${{ needs.build-windows.outputs.version }}
+          NEXUS_CHANGELOG: ${{ steps.nexus_changelog.outputs.text }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "${RELEASE_VERSION}" \
+            --arg changelog "${NEXUS_CHANGELOG}" \
+            '{version: $version, changelog: $changelog}' \
+            | curl --fail-with-body --retry 3 --retry-all-errors \
+                --request POST \
+                --header "apikey: ${NEXUSMODS_API_KEY}" \
+                --header 'User-Agent: SIMM GitHub Actions' \
+                --header 'Content-Type: application/json' \
+                --data-binary @- \
+                "https://api.nexusmods.com/v3/mods/31701153613526/changelogs"
+
       - name: Upload Setup Wizard to Nexus Mods
+        if: steps.nexus_existing_version.outputs.exists != 'true'
         uses: Nexus-Mods/upload-action@c96019556046053aa26044b44396cd38929daf23 # v1.0.0-beta.10
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}

@@ -1287,6 +1287,15 @@ impl DepotDownloaderService {
             return Ok(());
         }
 
+        let estimated_total_bytes = if operation == DepotOperation::Download {
+            let estimate_path = std::path::PathBuf::from(&output_dir);
+            tokio::task::spawn_blocking(move || Self::estimated_install_size(&estimate_path))
+                .await
+                .unwrap_or(None)
+        } else {
+            None
+        };
+
         // DepotDownloader maintains shared on-disk state, so only one game
         // install or update process may run at a time. Keep the check and
         // process insertion in one write-locked critical section to avoid a
@@ -1326,15 +1335,6 @@ impl DepotDownloaderService {
             return Err(error);
         }
         self.clear_auth_state(&download_id).await;
-
-        let estimated_total_bytes = if operation == DepotOperation::Download {
-            let estimate_path = std::path::PathBuf::from(&output_dir);
-            tokio::task::spawn_blocking(move || Self::estimated_install_size(&estimate_path))
-                .await
-                .unwrap_or(None)
-        } else {
-            None
-        };
 
         // Spawn process with working directory set to depots folder.
         #[cfg(target_os = "windows")]
