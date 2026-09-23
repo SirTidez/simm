@@ -1,15 +1,15 @@
 {
-  "version": "0.8.7",
-  "notes": "## What's Changed\n* Restore profile import and harden runtime handling by @SirTidez in https://github.com/SirTidez/simm/pull/29\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.6...v0.8.7",
-  "pub_date": "2026-09-10T00:55:30.6552078+00:00",
+  "version": "0.8.8",
+  "notes": "## What's Changed\n* 0.8.8 Update by @SirTidez in https://github.com/SirTidez/simm/pull/31\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.7...v0.8.8",
+  "pub_date": "2026-09-23T05:45:36.5268091+00:00",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.7/SIMM_0.8.7_Setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmVHVWtYRWxBd0FpNHhDK3V5UUlzSEo0dFY4c2FiblpNbXZ6SlMxNFJHWEdCMEl1Qm1JdjBodVNaZVk0MEFpK1FrRWp1Q1h2ak41b0dkQ1VTbndLWmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDAxNjg3CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguN194NjQtc2V0dXAuZXhlClJpQ0o0UGFNdkZtVjU5Q2g4MFJBTkMwRGpiZkx6bFR4clBmM2R2dEt0V0I2aWw3ZVpLVWxiNzhPR0lNYVRyNXZSK01lT2JYNGI2ZzRPQjV1T3N5OUNBPT0K"
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.8/SIMM_0.8.8_Setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmJVL1d4N1htdVd4WFZxMm5XZGJYRVVCcXNSYVNsYlFVODNoUE5nS01PeEUweFYxeTRraEx1TTdZZ3ZFWnRXNTFCRHpCU1U1U3MvQ29PbEtLV1FjQ2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMTQyMjU4CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguOF94NjQtc2V0dXAuZXhlCmxRMDlzR1VyRnI1cUlCWlhmQkpYcnFLemJDQUd6b0E1c2d1WWE4Nmg5Ky8xVEFRbmVBWTRTQjRhRDJ4aWpiSkQvUTNqbm81cXhKY09Ca3hhdmJDMUNRPT0K"
     },
     "linux-x86_64": {
-      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.7/SIMM_0.8.7_x86_64.AppImage",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmZxSzVJM3VoalcvWFNXa3Frc2ZxTVZHRitsRUc3MS8wSG5TNTJBSnYxblFkYlIrTFF2enNsMG42NG5ZY2Q2SW1MNmk5QlhFaUpoeTROMy9QdlJ6SUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MDAxMzM4CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguN19hbWQ2NC5BcHBJbWFnZQoycWEwVkl5V3V3bnhpeDVIUVJ1N24xZk5OUWRTYXQvY2IyenRpeUFqS3h0Q01mVmJ4UkZUc0I1bE9LaTllN1BtcWtHY1A3YklxazhSd0tkN0RseE1Cdz09Cg=="
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.8/SIMM_0.8.8_x86_64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5clh1WSt3bFhKWUdkOTR5TGJxdVVOOG9IQlFQaVRpNW95OXpPVitYTFo0QmY0VWlwdTRyZFJodWdWM0NPbEJ3ei9qNnBDYjQ0ZDNoU3Z5ZlFNOWlxWlFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMTQxNTA4CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguOF9hbWQ2NC5BcHBJbWFnZQo0bGhFM2RNNWFjcnhtNXJYQnUxclNkNUlwcnRrZUFMQWNpQ2dOVGJDMERUOXUrdExKSlB0TVBsbFFselRHcWNraHJ4NXIzZ1Q2ZnFaNDRqOTJsaTVCZz09Cg=="
     }
   }
 }
