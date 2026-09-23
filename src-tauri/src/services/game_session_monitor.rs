@@ -351,7 +351,7 @@ impl GameSessionMonitor {
     }
 }
 
-async fn running_schedule_directories() -> Result<HashSet<String>> {
+pub(crate) async fn running_schedule_directories() -> Result<HashSet<String>> {
     let paths = tokio::task::spawn_blocking(discover_schedule_process_paths)
         .await
         .context("Schedule I process discovery task failed")??;
@@ -449,7 +449,7 @@ fn discover_schedule_process_paths() -> Result<Vec<PathBuf>> {
     Ok(Vec::new())
 }
 
-fn normalize_path(path: &Path) -> String {
+pub(crate) fn normalize_path(path: &Path) -> String {
     let path = path.to_string_lossy();
     normalize_path_for_platform(&path, cfg!(windows))
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 
 import { DownloadsPanel } from './DownloadsPanel';
 
@@ -26,7 +26,9 @@ describe('DownloadsPanel', () => {
           label: 'Main Branch',
           contextLabel: 'Game download',
           status: 'downloading',
-          progress: 40,
+          progress: 25,
+          downloadedBytes: 512 * 1024 * 1024,
+          totalBytes: 2 * 1024 * 1024 * 1024,
           downloadedFiles: 4,
           totalFiles: 10,
           iconUrl: 'https://example.com/main-branch.png',
@@ -56,7 +58,25 @@ describe('DownloadsPanel', () => {
     expect(screen.getByText('Main Branch')).toBeTruthy();
     expect(screen.getByText('ExampleMod.zip')).toBeTruthy();
     expect(document.querySelector('.downloads-panel__icon-image')).not.toBeNull();
-    expect(screen.getByText('40% - 4 / 10 files')).toBeTruthy();
+    expect(screen.getByText('25% - 512 MB / 2.00 GB')).toBeTruthy();
+  });
+
+  it('keeps a game download visibly active until byte totals are known', () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [{
+        id: 'game-large-file',
+        kind: 'game',
+        label: 'Alternate Beta',
+        contextLabel: 'Game download',
+        status: 'downloading',
+        progress: 0,
+        startedAt: Date.now(),
+      }],
+    });
+
+    render(<DownloadsPanel />);
+
+    expect(document.querySelector('.downloads-panel__progress-bar--indeterminate')).not.toBeNull();
   });
 
   it('renders an indeterminate bar for active non-game downloads', () => {
@@ -116,5 +136,29 @@ describe('DownloadsPanel', () => {
 
     expect(screen.getByText('Active and recent downloads will appear here while SIMM is working.')).toBeTruthy();
     expect(screen.queryByText('0')).toBeNull();
+  });
+
+  it('opens a collection profile from its aggregate download row', () => {
+    const onOpenProfile = vi.fn();
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [{
+        id: 'collection:example:1',
+        kind: 'collection',
+        label: 'Example Collection',
+        contextLabel: 'Revision 1 collection profile',
+        status: 'completed',
+        progress: 100,
+        downloadedFiles: 4,
+        totalFiles: 4,
+        profileId: 'profile-collection',
+        persistent: true,
+        startedAt: Date.now() - 1000,
+        finishedAt: Date.now(),
+      }],
+    });
+
+    render(<DownloadsPanel onOpenProfile={onOpenProfile} />);
+    fireEvent.click(screen.getByRole('button', { name: /Example Collection/i }));
+    expect(onOpenProfile).toHaveBeenCalledWith('profile-collection');
   });
 });

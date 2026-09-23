@@ -1,4 +1,6 @@
-use crate::types::{DepotDownloadOptions, DownloadProgress, DownloadStatus};
+use crate::types::{
+    DepotDownloadOptions, DepotOperation, DownloadProgress, DownloadStatus, EnvironmentStatus,
+};
 use crate::utils::depot_downloader_detector::detect_depot_downloader_with_override;
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
@@ -12,11 +14,12 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
+use tokio::sync::{watch, Mutex, OwnedMutexGuard, RwLock};
 use tokio::task::JoinHandle;
 
 macro_rules! eprintln {
@@ -27,7 +30,9 @@ macro_rules! eprintln {
 
 pub struct DepotDownloaderService {
     active_downloads: Arc<RwLock<HashMap<String, ActiveDownload>>>,
+    pending_downloads: Arc<RwLock<HashMap<String, PendingDownload>>>,
     download_progress: Arc<RwLock<HashMap<String, DownloadProgress>>>,
+    byte_meter_ready: Arc<RwLock<HashMap<String, String>>>,
     auth_prompted_downloads: Arc<RwLock<HashSet<String>>>,
     credential_handoffs: Arc<RwLock<HashMap<String, CredentialHandoffPhase>>>,
     shutting_down: Arc<AtomicBool>,
@@ -46,7 +51,17 @@ struct ActiveDownload {
     stderr_task: Option<JoinHandle<()>>,
     output_dir: String,
     operation_id: String,
+    operation: DepotOperation,
+    previous_status: EnvironmentStatus,
     _process_permit: Option<OwnedMutexGuard<()>>,
+}
+
+#[derive(Clone)]
+struct PendingDownload {
+    operation_id: String,
+    operation: DepotOperation,
+    previous_status: EnvironmentStatus,
+    cancel: watch::Sender<bool>,
 }
 
 impl ActiveDownload {
@@ -110,6 +125,8 @@ impl ActiveDownload {
             stderr_task: None,
             output_dir: String::new(),
             operation_id: unique_login_id(),
+            operation: DepotOperation::Download,
+            previous_status: EnvironmentStatus::NotDownloaded,
             _process_permit: None,
         }
     }
@@ -128,9 +145,19 @@ pub const DEPOT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 static DEPOT_PROCESS_GATE: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
 static DEPOT_LOGIN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static DEPOT_CONTENT_TRANSFER_START: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^Downloading depot \d+$").expect("valid depot transfer regex"));
 
 pub(crate) async fn acquire_process_permit() -> OwnedMutexGuard<()> {
     DEPOT_PROCESS_GATE.clone().lock_owned().await
+}
+
+pub(crate) fn try_acquire_process_permit() -> Option<OwnedMutexGuard<()>> {
+    DEPOT_PROCESS_GATE.clone().try_lock_owned().ok()
+}
+
+pub(crate) fn depot_process_busy() -> bool {
+    try_acquire_process_permit().is_none()
 }
 
 /// Owns a newly spawned child until it has been published in active_downloads.
@@ -205,7 +232,9 @@ impl DepotDownloaderService {
     pub fn new() -> Self {
         Self {
             active_downloads: Arc::new(RwLock::new(HashMap::new())),
+            pending_downloads: Arc::new(RwLock::new(HashMap::new())),
             download_progress: Arc::new(RwLock::new(HashMap::new())),
+            byte_meter_ready: Arc::new(RwLock::new(HashMap::new())),
             auth_prompted_downloads: Arc::new(RwLock::new(HashSet::new())),
             credential_handoffs: Arc::new(RwLock::new(HashMap::new())),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -329,12 +358,43 @@ impl DepotDownloaderService {
         }
     }
 
+    async fn terminalize_queued_progress<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        download_id: &str,
+        operation_id: &str,
+        status: DownloadStatus,
+        message: String,
+        error: Option<String>,
+    ) {
+        let progress = {
+            let mut progress_map = self.download_progress.write().await;
+            let Some(progress) = progress_map.get_mut(download_id) else {
+                return;
+            };
+
+            if !matches!(&progress.status, DownloadStatus::Queued)
+                || progress.operation_id.as_str() != operation_id
+            {
+                return;
+            }
+
+            progress.status = status;
+            progress.message = Some(message);
+            progress.error = error;
+            progress.clone()
+        };
+
+        let _ = crate::events::emit_progress(app, progress);
+    }
+
     async fn clear_auth_state(&self, download_id: &str) {
         self.auth_prompted_downloads
             .write()
             .await
             .remove(download_id);
         self.credential_handoffs.write().await.remove(download_id);
+        self.byte_meter_ready.write().await.remove(download_id);
     }
 
     async fn take_auth_retry_requested(&self, download_id: &str) -> bool {
@@ -344,6 +404,7 @@ impl DepotDownloaderService {
             .await
             .remove(download_id);
         self.credential_handoffs.write().await.remove(download_id);
+        self.byte_meter_ready.write().await.remove(download_id);
         requested
     }
 
@@ -441,6 +502,56 @@ impl DepotDownloaderService {
                 download_id,
                 error
             );
+        }
+    }
+
+    async fn persist_environment_status<R: Runtime>(
+        app: &AppHandle<R>,
+        download_id: &str,
+        status: &EnvironmentStatus,
+    ) {
+        let Some(pool) = app.try_state::<Arc<SqlitePool>>() else {
+            log::warn!(
+                "[DepotDownloader] Cannot persist terminal status for {} because SIMM database state is unavailable",
+                download_id
+            );
+            return;
+        };
+        let Ok(environment_service) =
+            crate::services::environment::EnvironmentService::new(pool.inner().clone())
+        else {
+            log::warn!(
+                "[DepotDownloader] Cannot create environment service while persisting {}",
+                download_id
+            );
+            return;
+        };
+        if let Err(error) = environment_service
+            .update_environment(
+                download_id,
+                vec![(
+                    "status".to_string(),
+                    serde_json::to_value(status).expect("environment status serializes"),
+                )],
+            )
+            .await
+        {
+            log::warn!(
+                "[DepotDownloader] Failed to persist terminal status for {}: {:#}",
+                download_id,
+                error
+            );
+        }
+    }
+
+    fn failed_environment_status(
+        operation: DepotOperation,
+        previous_status: &EnvironmentStatus,
+    ) -> EnvironmentStatus {
+        if operation == DepotOperation::Verify {
+            previous_status.clone()
+        } else {
+            EnvironmentStatus::Error
         }
     }
 
@@ -565,8 +676,11 @@ impl DepotDownloaderService {
                 .unwrap_or_else(|| DownloadProgress {
                     download_id: download_id.to_string(),
                     operation_id: unique_login_id(),
+                    operation: DepotOperation::Download,
                     status: DownloadStatus::Downloading,
                     progress: 0.0,
+                    downloaded_bytes: None,
+                    total_bytes: None,
                     downloaded_files: None,
                     total_files: None,
                     speed: None,
@@ -578,6 +692,17 @@ impl DepotDownloaderService {
         };
 
         let lower_line = line.to_lowercase();
+        if progress.operation == DepotOperation::Download
+            && DEPOT_CONTENT_TRANSFER_START.is_match(line.trim())
+        {
+            // DepotDownloader writes manifests and configuration before this
+            // exact line. Start the process-I/O meter only once content file
+            // processing begins so setup bytes are never shown as game data.
+            self.byte_meter_ready
+                .write()
+                .await
+                .insert(download_id.to_string(), progress.operation_id.clone());
+        }
         let invalid_password = lower_line.contains("password")
             && (lower_line.contains("incorrect")
                 || lower_line.contains("invalid")
@@ -701,7 +826,11 @@ impl DepotDownloaderService {
             || lower_line.contains("authenticated")
         {
             self.mark_credentials_authenticated(download_id).await;
-            progress.message = Some("Authentication successful, starting download...".to_string());
+            progress.message = Some(if progress.operation == DepotOperation::Verify {
+                "Authentication successful, starting game file verification...".to_string()
+            } else {
+                "Authentication successful, starting download...".to_string()
+            });
             self.download_progress
                 .write()
                 .await
@@ -712,25 +841,55 @@ impl DepotDownloaderService {
 
         // Parse percentage: "Downloading depot 3164501 (45%)" or "05.30% filepath"
         // Try format with parentheses first: (45%)
+        let previous_progress = progress.progress;
         let percent_re_paren = Regex::new(r"\((\d+)%\)").unwrap();
-        let mut found_percent = false;
+        let mut parsed_percent = None;
         if let Some(caps) = percent_re_paren.captures(line) {
             if let Ok(percent) = caps[1].parse::<f64>() {
-                progress.progress = percent.min(100.0).max(0.0);
-                found_percent = true;
+                let percent = percent.clamp(0.0, 100.0);
+                progress.progress = previous_progress.max(percent);
+                parsed_percent = Some(percent);
             }
         }
 
         // If not found in parentheses format, try plain format: 05.30% (match anywhere in line)
         // This will match percentages like "05.30%", "5.30%", "45%", etc.
-        if !found_percent {
+        if parsed_percent.is_none() {
             let percent_re_plain = Regex::new(r"(\d+\.?\d*)%").unwrap();
             if let Some(caps) = percent_re_plain.captures(line) {
                 if let Ok(percent) = caps[1].parse::<f64>() {
                     // Only update if we found a valid percentage (0-100)
                     if percent >= 0.0 && percent <= 100.0 {
-                        progress.progress = percent;
+                        progress.progress = previous_progress.max(percent);
+                        parsed_percent = Some(percent);
                     }
+                }
+            }
+        }
+
+        // DepotDownloader's printed percentage is weighted by processed
+        // bytes, but redirected output only prints it after each file. Anchor
+        // the live process-write meter to each official milestone. For an
+        // update, the current install size gives us a useful total before the
+        // first changed file completes; for a new install, the first milestone
+        // calibrates the total from bytes observed so far.
+        if let Some(percent) = parsed_percent {
+            if let Some(total_bytes) = progress.total_bytes.filter(|total| *total > 0) {
+                let milestone_bytes = ((total_bytes as f64) * (percent / 100.0)).round() as u64;
+                progress.downloaded_bytes = Some(
+                    progress
+                        .downloaded_bytes
+                        .unwrap_or(0)
+                        .max(milestone_bytes.min(total_bytes)),
+                );
+            } else if let Some(downloaded_bytes) = progress
+                .downloaded_bytes
+                .filter(|downloaded| *downloaded > 0)
+            {
+                if percent > 0.0 {
+                    let estimated_total =
+                        ((downloaded_bytes as f64) * 100.0 / percent).ceil() as u64;
+                    progress.total_bytes = Some(estimated_total.max(downloaded_bytes));
                 }
             }
         }
@@ -738,14 +897,6 @@ impl DepotDownloaderService {
         if let Some((downloaded, total)) = Self::extract_file_counts(line) {
             progress.downloaded_files = Some(downloaded);
             progress.total_files = Some(total);
-
-            // Calculate progress from file counts if percentage wasn't found
-            // This ensures we always have a progress value
-            if progress.progress == 0.0 && total > 0 {
-                progress.progress = ((downloaded as f64 / total as f64) * 100.0)
-                    .min(100.0)
-                    .max(0.0);
-            }
         }
 
         // Parse speed: "Speed: 5.2 MB/s"
@@ -840,6 +991,144 @@ impl DepotDownloaderService {
         None
     }
 
+    fn process_written_bytes(system: &mut System, pid: Pid) -> Option<u64> {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_disk_usage(),
+        );
+        system
+            .process(pid)
+            .map(|process| process.disk_usage().total_written_bytes)
+    }
+
+    fn format_byte_rate(bytes_per_second: u64) -> String {
+        const KIB: f64 = 1024.0;
+        const MIB: f64 = KIB * 1024.0;
+        const GIB: f64 = MIB * 1024.0;
+        let rate = bytes_per_second as f64;
+        if rate >= GIB {
+            format!("{:.1} GB/s", rate / GIB)
+        } else if rate >= MIB {
+            format!("{:.1} MB/s", rate / MIB)
+        } else if rate >= KIB {
+            format!("{:.1} KB/s", rate / KIB)
+        } else {
+            format!("{} B/s", bytes_per_second)
+        }
+    }
+
+    fn format_eta(seconds: u64) -> String {
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        let seconds = seconds % 60;
+        if hours > 0 {
+            format!("{}h {}m", hours, minutes)
+        } else if minutes > 0 {
+            format!("{}m {}s", minutes, seconds)
+        } else {
+            format!("{}s", seconds)
+        }
+    }
+
+    fn estimated_install_size(path: &std::path::Path) -> Option<u64> {
+        if !path.is_dir() {
+            return None;
+        }
+
+        const NON_DEPOT_ROOTS: [&str; 6] = [
+            ".DepotDownloader",
+            "MelonLoader",
+            "Mods",
+            "Plugins",
+            "UserData",
+            "UserLibs",
+        ];
+        let mut total = 0_u64;
+        let mut directories = vec![path.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    if directory == path
+                        && entry.file_name().to_str().is_some_and(|name| {
+                            NON_DEPOT_ROOTS
+                                .iter()
+                                .any(|excluded| name.eq_ignore_ascii_case(excluded))
+                        })
+                    {
+                        continue;
+                    }
+                    directories.push(entry_path);
+                } else if metadata.is_file() {
+                    total = total.saturating_add(metadata.len());
+                }
+            }
+        }
+
+        (total > 0).then_some(total)
+    }
+
+    async fn apply_byte_meter_sample<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        download_id: &str,
+        operation_id: &str,
+        downloaded_bytes_delta: u64,
+        bytes_per_second: u64,
+    ) {
+        let mut progress_map = self.download_progress.write().await;
+        let Some(progress) = progress_map.get_mut(download_id) else {
+            return;
+        };
+        if progress.operation_id != operation_id
+            || !matches!(progress.status, DownloadStatus::Downloading)
+        {
+            return;
+        }
+
+        if downloaded_bytes_delta == 0 {
+            return;
+        }
+
+        let metered_downloaded_bytes = progress
+            .downloaded_bytes
+            .unwrap_or(0)
+            .saturating_add(downloaded_bytes_delta);
+        let downloaded_bytes = progress
+            .total_bytes
+            .filter(|total| *total > 0)
+            .map_or(metered_downloaded_bytes, |total| {
+                metered_downloaded_bytes.min(total)
+            });
+        progress.downloaded_bytes = Some(downloaded_bytes);
+        if bytes_per_second > 0 {
+            progress.speed = Some(Self::format_byte_rate(bytes_per_second));
+        }
+        if let Some(total_bytes) = progress.total_bytes.filter(|total| *total > 0) {
+            let metered_progress =
+                ((downloaded_bytes as f64 / total_bytes as f64) * 100.0).clamp(0.0, 99.5);
+            progress.progress = progress.progress.max(metered_progress);
+            if bytes_per_second > 0 && downloaded_bytes < total_bytes {
+                progress.eta = Some(Self::format_eta(
+                    (total_bytes - downloaded_bytes) / bytes_per_second,
+                ));
+            }
+        }
+        let progress = progress.clone();
+        drop(progress_map);
+        let _ = crate::events::emit_progress(app, progress);
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn start_download<R: Runtime>(
         &self,
@@ -847,8 +1136,14 @@ impl DepotDownloaderService {
         options: DepotDownloadOptions,
         app: AppHandle<R>,
     ) -> Result<()> {
-        self.start_download_with_executable(download_id, options, app, None)
-            .await
+        self.start_download_with_executable(
+            download_id,
+            options,
+            app,
+            None,
+            EnvironmentStatus::NotDownloaded,
+        )
+        .await
     }
 
     pub async fn start_download_with_executable<R: Runtime>(
@@ -857,6 +1152,7 @@ impl DepotDownloaderService {
         options: DepotDownloadOptions,
         app: AppHandle<R>,
         configured_executable: Option<&str>,
+        previous_status: EnvironmentStatus,
     ) -> Result<()> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(anyhow::anyhow!(
@@ -875,6 +1171,11 @@ impl DepotDownloaderService {
         let executable_path = detector_info.path.unwrap();
 
         let output_dir = options.output_dir.clone();
+        let operation = if options.validate.unwrap_or(false) {
+            DepotOperation::Verify
+        } else {
+            DepotOperation::Download
+        };
 
         // Build command
         let args = self.build_command_args(&options);
@@ -883,7 +1184,117 @@ impl DepotDownloaderService {
         let depots_dir = crate::utils::directory_init::get_depots_dir()
             .context("Failed to get depots directory")?;
 
-        let process_permit = acquire_process_permit().await;
+        let operation_id = unique_login_id();
+        let (cancel, mut cancellation) = watch::channel(false);
+        {
+            let active_downloads = self.active_downloads.read().await;
+            ensure_no_active_game_download(
+                active_downloads.keys().next().map(String::as_str),
+                &download_id,
+            )?;
+        }
+        {
+            let mut pending_downloads = self.pending_downloads.write().await;
+            ensure_no_active_game_download(
+                pending_downloads.keys().next().map(String::as_str),
+                &download_id,
+            )?;
+            pending_downloads.insert(
+                download_id.clone(),
+                PendingDownload {
+                    operation_id: operation_id.clone(),
+                    operation,
+                    previous_status: previous_status.clone(),
+                    cancel,
+                },
+            );
+        }
+        let queued_progress = DownloadProgress {
+            download_id: download_id.clone(),
+            operation_id: operation_id.clone(),
+            operation,
+            status: DownloadStatus::Queued,
+            progress: 0.0,
+            downloaded_bytes: None,
+            total_bytes: None,
+            downloaded_files: None,
+            total_files: None,
+            speed: None,
+            eta: None,
+            message: Some(if operation == DepotOperation::Verify {
+                "Game file verification queued...".to_string()
+            } else {
+                "Download queued...".to_string()
+            }),
+            error: None,
+            manifest_id: None,
+        };
+        self.download_progress
+            .write()
+            .await
+            .insert(download_id.clone(), queued_progress.clone());
+        let _ = crate::events::emit_progress(&app, queued_progress);
+
+        let process_permit = tokio::select! {
+            permit = acquire_process_permit() => permit,
+            changed = cancellation.changed() => {
+                self.pending_downloads.write().await.remove(&download_id);
+                if changed.is_ok() && *cancellation.borrow() {
+                    self.terminalize_queued_progress(
+                        &app,
+                        &download_id,
+                        &operation_id,
+                        DownloadStatus::Cancelled,
+                        if operation == DepotOperation::Verify {
+                            "Game file verification cancelled".to_string()
+                        } else {
+                            "Download cancelled".to_string()
+                        },
+                        None,
+                    )
+                    .await;
+                    return Ok(());
+                }
+                let error =
+                    anyhow::anyhow!("The queued DepotDownloader operation was interrupted");
+                self.terminalize_queued_progress(
+                    &app,
+                    &download_id,
+                    &operation_id,
+                    DownloadStatus::Error,
+                    "Queued DepotDownloader operation was interrupted".to_string(),
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if *cancellation.borrow() {
+            self.pending_downloads.write().await.remove(&download_id);
+            self.terminalize_queued_progress(
+                &app,
+                &download_id,
+                &operation_id,
+                DownloadStatus::Cancelled,
+                if operation == DepotOperation::Verify {
+                    "Game file verification cancelled".to_string()
+                } else {
+                    "Download cancelled".to_string()
+                },
+                None,
+            )
+            .await;
+            return Ok(());
+        }
+
+        let estimated_total_bytes = if operation == DepotOperation::Download {
+            let estimate_path = std::path::PathBuf::from(&output_dir);
+            tokio::task::spawn_blocking(move || Self::estimated_install_size(&estimate_path))
+                .await
+                .unwrap_or(None)
+        } else {
+            None
+        };
 
         // DepotDownloader maintains shared on-disk state, so only one game
         // install or update process may run at a time. Keep the check and
@@ -891,19 +1302,43 @@ impl DepotDownloaderService {
         // second environment racing past this guard.
         let mut active_downloads = self.active_downloads.write().await;
         if self.shutting_down.load(Ordering::Acquire) {
-            return Err(anyhow::anyhow!(
-                "SIMM is shutting down; no new game download can be started"
-            ));
+            drop(active_downloads);
+            self.pending_downloads.write().await.remove(&download_id);
+            let error =
+                anyhow::anyhow!("SIMM is shutting down; no new game download can be started");
+            self.terminalize_queued_progress(
+                &app,
+                &download_id,
+                &operation_id,
+                DownloadStatus::Error,
+                "Unable to start DepotDownloader while SIMM is shutting down".to_string(),
+                Some(error.to_string()),
+            )
+            .await;
+            return Err(error);
         }
-        ensure_no_active_game_download(
+        if let Err(error) = ensure_no_active_game_download(
             active_downloads.keys().next().map(String::as_str),
             &download_id,
-        )?;
+        ) {
+            drop(active_downloads);
+            self.pending_downloads.write().await.remove(&download_id);
+            self.terminalize_queued_progress(
+                &app,
+                &download_id,
+                &operation_id,
+                DownloadStatus::Error,
+                "Unable to start DepotDownloader operation".to_string(),
+                Some(error.to_string()),
+            )
+            .await;
+            return Err(error);
+        }
         self.clear_auth_state(&download_id).await;
 
         // Spawn process with working directory set to depots folder.
         #[cfg(target_os = "windows")]
-        let child = Command::new(&executable_path)
+        let child_result = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
@@ -911,17 +1346,34 @@ impl DepotDownloaderService {
             .stderr(Stdio::piped())
             .creation_flags(0x08000000) // CREATE_NO_WINDOW flag to prevent console window from appearing
             .spawn()
-            .context("Failed to spawn DepotDownloader process")?;
+            .context("Failed to spawn DepotDownloader process");
 
         #[cfg(not(target_os = "windows"))]
-        let child = Command::new(&executable_path)
+        let child_result = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("Failed to spawn DepotDownloader process")?;
+            .context("Failed to spawn DepotDownloader process");
+
+        let child = match child_result {
+            Ok(child) => child,
+            Err(error) => {
+                self.pending_downloads.write().await.remove(&download_id);
+                self.terminalize_queued_progress(
+                    &app,
+                    &download_id,
+                    &operation_id,
+                    DownloadStatus::Error,
+                    "Unable to start DepotDownloader process".to_string(),
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         let mut pending_child = PendingDepotChild::new(child, process_permit);
         let credential_input = if let Some(payload) = Self::credential_stdin_payload(&options) {
@@ -938,8 +1390,6 @@ impl DepotDownloaderService {
             self.credential_handoffs.write().await.remove(&download_id);
         }
 
-        let operation_id = unique_login_id();
-
         // The process is now reserved by the global gate. Only publish the
         // active progress entry after it has spawned successfully.
         {
@@ -949,17 +1399,34 @@ impl DepotDownloaderService {
                 DownloadProgress {
                     download_id: download_id.clone(),
                     operation_id: operation_id.clone(),
-                    status: DownloadStatus::Downloading,
+                    operation,
+                    status: if operation == DepotOperation::Verify {
+                        DownloadStatus::Validating
+                    } else {
+                        DownloadStatus::Downloading
+                    },
                     progress: 0.0,
+                    downloaded_bytes: (operation == DepotOperation::Download).then_some(0),
+                    total_bytes: estimated_total_bytes,
                     downloaded_files: None,
                     total_files: None,
                     speed: None,
                     eta: None,
-                    message: None,
+                    message: (operation == DepotOperation::Verify)
+                        .then(|| "Verifying installed game files...".to_string()),
                     error: None,
                     manifest_id: None,
                 },
             );
+        }
+        if let Some(initial_progress) = self
+            .download_progress
+            .read()
+            .await
+            .get(&download_id)
+            .cloned()
+        {
+            let _ = crate::events::emit_progress(&app, initial_progress);
         }
 
         let _app_clone = app.clone();
@@ -1012,6 +1479,10 @@ impl DepotDownloaderService {
         }
 
         let (child, process_permit) = pending_child.into_parts();
+        let process_pid = child.id().map(Pid::from_u32);
+        let mut process_system = System::new();
+        let process_written_baseline =
+            process_pid.and_then(|pid| Self::process_written_bytes(&mut process_system, pid));
 
         // Store child process
         active_downloads.insert(
@@ -1022,10 +1493,18 @@ impl DepotDownloaderService {
                 stderr_task,
                 output_dir: output_dir.clone(),
                 operation_id,
+                operation,
+                previous_status: previous_status.clone(),
                 _process_permit: Some(process_permit),
             },
         );
         drop(active_downloads);
+        self.pending_downloads.write().await.remove(&download_id);
+
+        if *cancellation.borrow() {
+            let _ = self.cancel_download(&download_id, &app).await;
+            return Ok(());
+        }
 
         // Publish the child before awaiting pipe I/O so app shutdown can
         // always find, terminate, and reap it. The credential payload is tiny,
@@ -1060,6 +1539,12 @@ impl DepotDownloaderService {
                     }
                 }
                 self.clear_auth_state(&download_id).await;
+                Self::persist_environment_status(
+                    &app,
+                    &download_id,
+                    &Self::failed_environment_status(operation, &previous_status),
+                )
+                .await;
                 return Err(error);
             }
         }
@@ -1068,11 +1553,66 @@ impl DepotDownloaderService {
         let app_complete = app.clone();
         let download_id_complete = download_id.clone();
         let service_complete = service_clone.clone();
+        let previous_status_complete = previous_status.clone();
         tokio::spawn(async move {
             let started_at = Instant::now();
+            let mut byte_meter_started = false;
+            let mut last_process_written = process_written_baseline;
+            let mut last_meter_at = Instant::now();
             // Poll for process completion
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                if operation == DepotOperation::Download {
+                    if let Some(pid) = process_pid {
+                        if let Some(total_written) =
+                            Self::process_written_bytes(&mut process_system, pid)
+                        {
+                            let now = Instant::now();
+                            let meter_ready = service_complete
+                                .byte_meter_ready
+                                .read()
+                                .await
+                                .get(&download_id_complete)
+                                .is_some_and(|ready_operation_id| {
+                                    ready_operation_id == &operation_id_complete
+                                });
+
+                            if !meter_ready || !byte_meter_started {
+                                // Reset at the content-transfer boundary. This
+                                // intentionally drops at most one polling
+                                // interval rather than counting manifest/cache
+                                // writes as downloaded game data.
+                                last_process_written = Some(total_written);
+                                last_meter_at = now;
+                                byte_meter_started = meter_ready;
+                            } else if let Some(previous_written) = last_process_written {
+                                let metered_delta = total_written.saturating_sub(previous_written);
+                                let elapsed = now.duration_since(last_meter_at).as_secs_f64();
+                                let bytes_per_second = if metered_delta > 0 && elapsed > 0.0 {
+                                    (metered_delta as f64 / elapsed) as u64
+                                } else {
+                                    0
+                                };
+                                if metered_delta > 0 {
+                                    service_complete
+                                        .apply_byte_meter_sample(
+                                            &app_complete,
+                                            &download_id_complete,
+                                            &operation_id_complete,
+                                            metered_delta,
+                                            bytes_per_second,
+                                        )
+                                        .await;
+                                }
+                                last_process_written = Some(total_written);
+                                last_meter_at = now;
+                            } else {
+                                last_process_written = Some(total_written);
+                                last_meter_at = now;
+                            }
+                        }
+                    }
+                }
                 let mut map = service_complete.active_downloads.write().await;
                 if map
                     .get(&download_id_complete)
@@ -1091,6 +1631,12 @@ impl DepotDownloaderService {
                         service_complete
                             .clear_auth_state(&download_id_complete)
                             .await;
+                        Self::persist_environment_status(
+                            &app_complete,
+                            &download_id_complete,
+                            &Self::failed_environment_status(operation, &previous_status_complete),
+                        )
+                        .await;
                         let mut progress_map = service_complete.download_progress.write().await;
                         if let Some(progress) = progress_map.get_mut(&download_id_complete) {
                             if !matches!(
@@ -1111,14 +1657,12 @@ impl DepotDownloaderService {
                             &app_complete,
                             download_id_complete.clone(),
                             operation_id_complete.clone(),
+                            operation,
                             "DepotDownloader timed out before completion".to_string(),
                         );
                         break;
                     }
                     drop(map);
-                    service_complete
-                        .clear_auth_state(&download_id_complete)
-                        .await;
                     break;
                 }
                 if let Some(download) = map.get_mut(&download_id_complete) {
@@ -1145,10 +1689,32 @@ impl DepotDownloaderService {
                                 // specific authentication event. Do not turn
                                 // this expected kill into a generic process
                                 // failure after it has been reaped.
+                                Self::persist_environment_status(
+                                    &app_complete,
+                                    &download_id_complete,
+                                    &Self::failed_environment_status(
+                                        operation,
+                                        &previous_status_complete,
+                                    ),
+                                )
+                                .await;
                                 break;
                             }
 
                             if status.success() {
+                                let completed_total_bytes = if operation == DepotOperation::Download
+                                {
+                                    let completed_output_dir = download.output_dir.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        DepotDownloaderService::estimated_install_size(
+                                            std::path::Path::new(&completed_output_dir),
+                                        )
+                                    })
+                                    .await
+                                    .unwrap_or(None)
+                                } else {
+                                    None
+                                };
                                 let manifest_id = service_complete
                                     .download_progress
                                     .read()
@@ -1175,6 +1741,10 @@ impl DepotDownloaderService {
                                 {
                                     progress.status = DownloadStatus::Completed;
                                     progress.progress = 100.0;
+                                    if let Some(total_bytes) = completed_total_bytes {
+                                        progress.downloaded_bytes = Some(total_bytes);
+                                        progress.total_bytes = Some(total_bytes);
+                                    }
                                     let progress_clone = progress.clone();
                                     drop(progress_map);
                                     let _ =
@@ -1188,9 +1758,19 @@ impl DepotDownloaderService {
                                     &app_complete,
                                     download_id_complete.clone(),
                                     operation_id_complete.clone(),
+                                    operation,
                                     manifest_id,
                                 );
                             } else {
+                                Self::persist_environment_status(
+                                    &app_complete,
+                                    &download_id_complete,
+                                    &Self::failed_environment_status(
+                                        operation,
+                                        &previous_status_complete,
+                                    ),
+                                )
+                                .await;
                                 let mut progress_map =
                                     service_complete.download_progress.write().await;
                                 if let Some(progress) = progress_map.get_mut(&download_id_complete)
@@ -1209,6 +1789,7 @@ impl DepotDownloaderService {
                                     &app_complete,
                                     download_id_complete.clone(),
                                     operation_id_complete.clone(),
+                                    operation,
                                     format!("DepotDownloader exited with code {:?}", status.code()),
                                 );
                             }
@@ -1233,6 +1814,15 @@ impl DepotDownloaderService {
                             service_complete
                                 .clear_auth_state(&download_id_complete)
                                 .await;
+                            Self::persist_environment_status(
+                                &app_complete,
+                                &download_id_complete,
+                                &Self::failed_environment_status(
+                                    operation,
+                                    &previous_status_complete,
+                                ),
+                            )
+                            .await;
                             let mut progress_map = service_complete.download_progress.write().await;
                             if let Some(progress) = progress_map.get_mut(&download_id_complete) {
                                 progress.status = DownloadStatus::Error;
@@ -1246,6 +1836,7 @@ impl DepotDownloaderService {
                                 &app_complete,
                                 download_id_complete.clone(),
                                 operation_id_complete.clone(),
+                                operation,
                                 format!("Error checking process status: {}", e),
                             );
                             break;
@@ -1272,8 +1863,43 @@ impl DepotDownloaderService {
         download_id: &str,
         app: &AppHandle<R>,
     ) -> Result<bool> {
+        if let Some(pending) = self.pending_downloads.write().await.remove(download_id) {
+            let _ = pending.cancel.send(true);
+            self.clear_auth_state(download_id).await;
+            Self::persist_environment_status(app, download_id, &pending.previous_status).await;
+            let mut progress_map = self.download_progress.write().await;
+            let progress = progress_map
+                .entry(download_id.to_string())
+                .or_insert_with(|| DownloadProgress {
+                    download_id: download_id.to_string(),
+                    operation_id: pending.operation_id,
+                    operation: pending.operation,
+                    status: DownloadStatus::Cancelled,
+                    progress: 0.0,
+                    downloaded_bytes: None,
+                    total_bytes: None,
+                    downloaded_files: None,
+                    total_files: None,
+                    speed: None,
+                    eta: None,
+                    message: None,
+                    error: None,
+                    manifest_id: None,
+                });
+            progress.status = DownloadStatus::Cancelled;
+            progress.message = Some(if pending.operation == DepotOperation::Verify {
+                "Game file verification cancelled".to_string()
+            } else {
+                "Download cancelled".to_string()
+            });
+            let _ = crate::events::emit_progress(app, progress.clone());
+            return Ok(true);
+        }
+
         let mut map = self.active_downloads.write().await;
         if let Some(mut download) = map.remove(download_id) {
+            let operation = download.operation;
+            let previous_status = download.previous_status.clone();
             drop(map);
             let terminated = download
                 .kill_reap_and_join_before(tokio::time::Instant::now() + DEPOT_SHUTDOWN_TIMEOUT)
@@ -1284,17 +1910,23 @@ impl DepotDownloaderService {
                     download_id
                 );
             }
-            self.auth_prompted_downloads
-                .write()
-                .await
-                .remove(download_id);
+            self.clear_auth_state(download_id).await;
 
             let mut progress_map = self.download_progress.write().await;
             if let Some(progress) = progress_map.get_mut(download_id) {
                 progress.status = DownloadStatus::Cancelled;
-                progress.message = Some("Download cancelled".to_string());
+                progress.message = Some(if operation == DepotOperation::Verify {
+                    "Game file verification cancelled".to_string()
+                } else {
+                    "Download cancelled".to_string()
+                });
                 let _ = crate::events::emit_progress(app, progress.clone());
             }
+            drop(progress_map);
+
+            // Restore the exact state that existed before this operation so a
+            // new install becomes retryable and an installed environment stays usable.
+            Self::persist_environment_status(app, download_id, &previous_status).await;
 
             Ok(true)
         } else {
@@ -1309,6 +1941,14 @@ impl DepotDownloaderService {
     ) -> DepotShutdownReport {
         self.shutting_down.store(true, Ordering::Release);
         let deadline = tokio::time::Instant::now() + timeout;
+        let pending_downloads = {
+            let mut pending = self.pending_downloads.write().await;
+            pending.drain().collect::<Vec<_>>()
+        };
+        for (download_id, pending) in pending_downloads {
+            let _ = pending.cancel.send(true);
+            Self::persist_environment_status(app, &download_id, &pending.previous_status).await;
+        }
         let mut downloads = {
             let mut active_downloads = self.active_downloads.write().await;
             active_downloads.drain().collect::<Vec<_>>()
@@ -1357,6 +1997,7 @@ impl DepotDownloaderService {
                         app,
                         download_id,
                         download.operation_id.clone(),
+                        download.operation,
                         manifest_id,
                     );
                     continue;
@@ -1375,8 +2016,11 @@ impl DepotDownloaderService {
                         .or_insert_with(|| DownloadProgress {
                             download_id: download_id.clone(),
                             operation_id: download.operation_id.clone(),
+                            operation: download.operation,
                             status: DownloadStatus::Error,
                             progress: 0.0,
+                            downloaded_bytes: None,
+                            total_bytes: None,
                             downloaded_files: None,
                             total_files: None,
                             speed: None,
@@ -1396,6 +2040,7 @@ impl DepotDownloaderService {
                 app,
                 download_id.clone(),
                 download.operation_id.clone(),
+                download.operation,
                 interruption_message,
             );
 
@@ -1429,7 +2074,9 @@ impl Clone for DepotDownloaderService {
     fn clone(&self) -> Self {
         Self {
             active_downloads: Arc::clone(&self.active_downloads),
+            pending_downloads: Arc::clone(&self.pending_downloads),
             download_progress: Arc::clone(&self.download_progress),
+            byte_meter_ready: Arc::clone(&self.byte_meter_ready),
             auth_prompted_downloads: Arc::clone(&self.auth_prompted_downloads),
             credential_handoffs: Arc::clone(&self.credential_handoffs),
             shutting_down: Arc::clone(&self.shutting_down),
@@ -1558,8 +2205,11 @@ mod tests {
             DownloadProgress {
                 download_id: download_id.to_string(),
                 operation_id: unique_login_id(),
+                operation: DepotOperation::Download,
                 status: DownloadStatus::Downloading,
                 progress: 0.0,
+                downloaded_bytes: None,
+                total_bytes: None,
                 downloaded_files: None,
                 total_files: None,
                 speed: None,
@@ -1590,6 +2240,8 @@ mod tests {
                 stderr_task: None,
                 output_dir: String::new(),
                 operation_id: unique_login_id(),
+                operation: DepotOperation::Download,
+                previous_status: EnvironmentStatus::NotDownloaded,
                 _process_permit: None,
             },
         );
@@ -1699,8 +2351,11 @@ mod tests {
             DownloadProgress {
                 download_id: environment.id.clone(),
                 operation_id: unique_login_id(),
+                operation: DepotOperation::Download,
                 status: DownloadStatus::Downloading,
                 progress: 25.0,
+                downloaded_bytes: None,
+                total_bytes: None,
                 downloaded_files: None,
                 total_files: None,
                 speed: None,
@@ -1718,6 +2373,8 @@ mod tests {
                 stderr_task: None,
                 output_dir: environment.output_dir.clone(),
                 operation_id: unique_login_id(),
+                operation: DepotOperation::Download,
+                previous_status: EnvironmentStatus::Completed,
                 _process_permit: None,
             },
         );
@@ -1750,6 +2407,102 @@ mod tests {
                 .expect("environment remains available")
                 .status,
             crate::types::EnvironmentStatus::Error
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cancelling_verification_restores_the_installed_environment_state() -> Result<()> {
+        let temp = tempdir()?;
+        let _data_guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let environment_service = EnvironmentService::new(pool.clone())?;
+        let environment = environment_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "beta".to_string(),
+                temp.path().join("game").to_string_lossy().to_string(),
+                Some("Verification fixture".to_string()),
+                None,
+            )
+            .await?;
+        environment_service
+            .update_environment(
+                &environment.id,
+                vec![("status".to_string(), serde_json::json!("downloading"))],
+            )
+            .await?;
+
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd")
+            .args(["/C", "ping 127.0.0.1 -n 30 > NUL"])
+            .spawn()?;
+        #[cfg(not(target_os = "windows"))]
+        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn()?;
+
+        let operation_id = unique_login_id();
+        let service = DepotDownloaderService::new();
+        service.download_progress.write().await.insert(
+            environment.id.clone(),
+            DownloadProgress {
+                download_id: environment.id.clone(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Verify,
+                status: DownloadStatus::Validating,
+                progress: 20.0,
+                downloaded_bytes: None,
+                total_bytes: None,
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: Some("Verifying installed game files...".to_string()),
+                error: None,
+                manifest_id: None,
+            },
+        );
+        service.active_downloads.write().await.insert(
+            environment.id.clone(),
+            ActiveDownload {
+                child,
+                stdout_task: None,
+                stderr_task: None,
+                output_dir: environment.output_dir.clone(),
+                operation_id,
+                operation: DepotOperation::Verify,
+                previous_status: EnvironmentStatus::Completed,
+                _process_permit: None,
+            },
+        );
+
+        let app = mock_app();
+        app.manage(pool);
+        assert!(
+            service
+                .cancel_download(&environment.id, &app.handle())
+                .await?
+        );
+        assert!(service.active_downloads.read().await.is_empty());
+        let progress = service
+            .get_progress(&environment.id)
+            .await
+            .expect("cancelled verification progress remains visible");
+        assert!(matches!(progress.status, DownloadStatus::Cancelled));
+        assert_eq!(
+            progress.message.as_deref(),
+            Some("Game file verification cancelled")
+        );
+        assert!(matches!(
+            environment_service
+                .get_environment(&environment.id)
+                .await?
+                .expect("environment remains available")
+                .status,
+            crate::types::EnvironmentStatus::Completed
         ));
         Ok(())
     }
@@ -2030,6 +2783,93 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn cancelling_queued_download_restores_its_previous_environment_state() -> Result<()> {
+        let temp = tempdir()?;
+        let _data_guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let environment_service = EnvironmentService::new(pool.clone())?;
+        let environment = environment_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "beta".to_string(),
+                temp.path().join("game").to_string_lossy().to_string(),
+                Some("Queued fixture".to_string()),
+                None,
+            )
+            .await?;
+        environment_service
+            .update_environment(
+                &environment.id,
+                vec![("status".to_string(), serde_json::json!("downloading"))],
+            )
+            .await?;
+
+        let operation_id = unique_login_id();
+        let (cancel, mut cancellation) = watch::channel(false);
+        let service = DepotDownloaderService::new();
+        service.pending_downloads.write().await.insert(
+            environment.id.clone(),
+            PendingDownload {
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                previous_status: EnvironmentStatus::NotDownloaded,
+                cancel,
+            },
+        );
+        service.download_progress.write().await.insert(
+            environment.id.clone(),
+            DownloadProgress {
+                download_id: environment.id.clone(),
+                operation_id,
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Queued,
+                progress: 0.0,
+                downloaded_bytes: None,
+                total_bytes: None,
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: Some("Download queued...".to_string()),
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        let app = mock_app();
+        app.manage(pool);
+        assert!(
+            service
+                .cancel_download(&environment.id, &app.handle())
+                .await?
+        );
+        cancellation.changed().await?;
+        assert!(*cancellation.borrow());
+        assert!(service.pending_downloads.read().await.is_empty());
+        assert!(matches!(
+            service
+                .get_progress(&environment.id)
+                .await
+                .expect("cancelled queued progress remains visible")
+                .status,
+            DownloadStatus::Cancelled
+        ));
+        assert!(matches!(
+            environment_service
+                .get_environment(&environment.id)
+                .await?
+                .expect("environment remains available")
+                .status,
+            EnvironmentStatus::NotDownloaded
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     #[cfg(target_os = "windows")]
     async fn start_download_returns_error_when_depotdownloader_missing() -> Result<()> {
         let temp = tempdir()?;
@@ -2170,6 +3010,279 @@ mod tests {
             .expect("progress set");
         assert_eq!(progress.progress, 45.0);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parse_progress_does_not_use_file_counts_as_percentage() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+
+        service
+            .parse_progress("Downloaded 5 of 10 files", "download-file-count", &handle)
+            .await?;
+
+        let progress = service
+            .get_progress("download-file-count")
+            .await
+            .expect("progress set");
+        assert_eq!(progress.progress, 0.0);
+        assert_eq!(progress.downloaded_files, Some(5));
+        assert_eq!(progress.total_files, Some(10));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn byte_meter_starts_for_content_transfer_but_not_manifest_download() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        let operation_id = unique_login_id();
+        service.download_progress.write().await.insert(
+            "download-transfer-boundary".to_string(),
+            DownloadProgress {
+                download_id: "download-transfer-boundary".to_string(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 0.0,
+                downloaded_bytes: Some(0),
+                total_bytes: Some(1_000),
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: None,
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .parse_progress(
+                "Downloading depot 3164501 manifest",
+                "download-transfer-boundary",
+                &handle,
+            )
+            .await?;
+        assert!(!service
+            .byte_meter_ready
+            .read()
+            .await
+            .contains_key("download-transfer-boundary"));
+
+        service
+            .parse_progress(
+                "Downloading depot 3164501",
+                "download-transfer-boundary",
+                &handle,
+            )
+            .await?;
+        assert_eq!(
+            service
+                .byte_meter_ready
+                .read()
+                .await
+                .get("download-transfer-boundary"),
+            Some(&operation_id)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parse_progress_calibrates_byte_total_from_depot_percentage() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        service.download_progress.write().await.insert(
+            "download-byte-total".to_string(),
+            DownloadProgress {
+                download_id: "download-byte-total".to_string(),
+                operation_id: unique_login_id(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 0.0,
+                downloaded_bytes: Some(25 * 1024 * 1024),
+                total_bytes: None,
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: None,
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .parse_progress(
+                "25.00% C:\\Games\\Schedule I_Data\\sharedassets0.assets",
+                "download-byte-total",
+                &handle,
+            )
+            .await?;
+
+        let progress = service
+            .get_progress("download-byte-total")
+            .await
+            .expect("progress set");
+        assert_eq!(progress.progress, 25.0);
+        assert_eq!(progress.downloaded_bytes, Some(25 * 1024 * 1024));
+        assert_eq!(progress.total_bytes, Some(100 * 1024 * 1024));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn depot_milestone_anchors_existing_install_byte_progress() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        let operation_id = unique_login_id();
+        service.download_progress.write().await.insert(
+            "download-update".to_string(),
+            DownloadProgress {
+                download_id: "download-update".to_string(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 10.0,
+                downloaded_bytes: Some(100),
+                total_bytes: Some(1_000),
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: None,
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .parse_progress(
+                "50.00% C:\\Games\\Schedule I.exe",
+                "download-update",
+                &handle,
+            )
+            .await?;
+        service
+            .apply_byte_meter_sample(&handle, "download-update", &operation_id, 100, 50)
+            .await;
+
+        let progress = service
+            .get_progress("download-update")
+            .await
+            .expect("progress set");
+        assert_eq!(progress.downloaded_bytes, Some(600));
+        assert_eq!(progress.total_bytes, Some(1_000));
+        assert_eq!(progress.progress, 60.0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn byte_meter_advances_between_depot_file_milestones() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        let operation_id = unique_login_id();
+        service.download_progress.write().await.insert(
+            "download-meter".to_string(),
+            DownloadProgress {
+                download_id: "download-meter".to_string(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 10.0,
+                downloaded_bytes: Some(100),
+                total_bytes: Some(1_000),
+                downloaded_files: Some(1),
+                total_files: Some(10),
+                speed: None,
+                eta: None,
+                message: Some("Downloading sharedassets0.assets".to_string()),
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .apply_byte_meter_sample(&handle, "download-meter", &operation_id, 150, 50)
+            .await;
+
+        let progress = service
+            .get_progress("download-meter")
+            .await
+            .expect("progress remains available");
+        assert_eq!(progress.downloaded_bytes, Some(250));
+        assert_eq!(progress.total_bytes, Some(1_000));
+        assert_eq!(progress.progress, 25.0);
+        assert_eq!(progress.speed.as_deref(), Some("50 B/s"));
+        assert_eq!(progress.eta.as_deref(), Some("15s"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn byte_meter_never_displays_more_than_the_estimated_total() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        let operation_id = unique_login_id();
+        service.download_progress.write().await.insert(
+            "download-meter-cap".to_string(),
+            DownloadProgress {
+                download_id: "download-meter-cap".to_string(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 90.0,
+                downloaded_bytes: Some(900),
+                total_bytes: Some(1_000),
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: None,
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .apply_byte_meter_sample(&handle, "download-meter-cap", &operation_id, 250, 50)
+            .await;
+
+        let progress = service
+            .get_progress("download-meter-cap")
+            .await
+            .expect("progress remains available");
+        assert_eq!(progress.downloaded_bytes, Some(1_000));
+        assert_eq!(progress.total_bytes, Some(1_000));
+        assert_eq!(progress.progress, 99.5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn estimated_install_size_ignores_managed_mod_roots() -> Result<()> {
+        let temp = tempdir()?;
+        std::fs::write(temp.path().join("Schedule I.exe"), vec![0_u8; 512])?;
+        let data = temp.path().join("Schedule I_Data");
+        std::fs::create_dir_all(&data)?;
+        std::fs::write(data.join("sharedassets0.assets"), vec![0_u8; 1_024])?;
+        let mods = temp.path().join("Mods");
+        std::fs::create_dir_all(&mods)?;
+        std::fs::write(mods.join("Example.dll"), vec![0_u8; 4_096])?;
+
+        assert_eq!(
+            DepotDownloaderService::estimated_install_size(temp.path()),
+            Some(1_536)
+        );
         Ok(())
     }
 
@@ -2369,8 +3482,11 @@ mod tests {
             DownloadProgress {
                 download_id: "download-cancelled".to_string(),
                 operation_id: unique_login_id(),
+                operation: DepotOperation::Download,
                 status: DownloadStatus::Cancelled,
                 progress: 12.0,
+                downloaded_bytes: None,
+                total_bytes: None,
                 downloaded_files: Some(1),
                 total_files: Some(10),
                 speed: None,

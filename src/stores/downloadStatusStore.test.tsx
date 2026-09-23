@@ -63,6 +63,7 @@ function Consumer() {
       <div data-testid="labels">{downloads.map((download) => `${download.label}|${download.contextLabel}`).join(',')}</div>
       <div data-testid="statuses">{downloads.map((download) => `${download.id}:${download.status}`).join(',')}</div>
       <div data-testid="summary">{summary.downloaded}/{summary.total}</div>
+      <div data-testid="bytes">{downloads.map((download) => `${download.downloadedBytes ?? 0}/${download.totalBytes ?? 0}`).join(',')}</div>
     </div>
   );
 }
@@ -87,6 +88,7 @@ describe('DownloadStatusStore', () => {
           name: 'Main Branch',
         },
       ],
+      progress: new Map(),
     });
 
     eventMocks.onProgress.mockReset();
@@ -142,6 +144,8 @@ describe('DownloadStatusStore', () => {
         operationId: 'operation-1',
         status: 'downloading',
         progress: 35,
+        downloadedBytes: 256 * 1024 * 1024,
+        totalBytes: 1024 * 1024 * 1024,
         downloadedFiles: 2,
         totalFiles: 10,
         message: 'Downloading depot',
@@ -151,6 +155,32 @@ describe('DownloadStatusStore', () => {
     expect(screen.getByTestId('count').textContent).toBe('1');
     expect(screen.getByTestId('labels').textContent).toContain('Main Branch|Game download');
     expect(screen.getByTestId('summary').textContent).toBe('2/10');
+    expect(screen.getByTestId('bytes').textContent).toBe(`${256 * 1024 * 1024}/${1024 * 1024 * 1024}`);
+  });
+
+  it('mirrors reconciled game progress when the original event was delayed', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [{ id: 'env-1', name: 'Main Branch' }],
+      progress: new Map([['env-1', {
+        downloadId: 'env-1',
+        operationId: 'operation-reconciled',
+        operation: 'download',
+        status: 'downloading',
+        progress: 48,
+        downloadedFiles: 4,
+        totalFiles: 10,
+      } satisfies DownloadProgress]]),
+    });
+
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+    await flushListeners();
+
+    expect(screen.getByTestId('statuses').textContent).toContain('game:env-1:downloading');
+    expect(screen.getByTestId('summary').textContent).toBe('4/10');
   });
 
   it('ingests tracked download events and summarizes file totals', async () => {
@@ -217,6 +247,37 @@ describe('DownloadStatusStore', () => {
     });
 
     expect(screen.getByTestId('count').textContent).toBe('0');
+  });
+
+  it('retains completed collection summaries so they can navigate back to Profiles', async () => {
+    vi.useFakeTimers();
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+    await flushListeners();
+
+    await act(async () => {
+      trackedDownloadHandler?.({
+        id: 'collection:example:1',
+        kind: 'collection',
+        label: 'Example Collection',
+        contextLabel: 'Revision 1 collection profile',
+        status: 'completed',
+        progress: 100,
+        downloadedFiles: 4,
+        totalFiles: 4,
+        profileId: 'profile-collection',
+        persistent: true,
+        startedAt: Date.now() - 1000,
+        finishedAt: Date.now(),
+      });
+      vi.advanceTimersByTime(60_000);
+    });
+
+    expect(screen.getByTestId('count').textContent).toBe('1');
+    expect(screen.getByTestId('labels').textContent).toContain('Example Collection');
   });
 
   it('sorts active rows ahead of terminal rows', async () => {

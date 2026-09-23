@@ -1,13 +1,13 @@
 ---
 name: simmrust-cross-platform
-description: Coordinate Windows and Linux parity work in the SIMM Tauri/React/Rust app. Use when changes touch OS-specific behavior, filesystem paths, process launching, Steam/Proton or Windows game integration, MelonLoader prerequisites, desktop/protocol handlers, packaging, installer/AppImage/deb outputs, Tauri cfg-gated code, shell commands, environment variables, native dependencies, or validation that must keep Windows and Linux behavior developed in tandem.
+description: "Maintain SIMM Windows/Linux parity. Use when changing OS-specific paths, processes, game integration, prerequisites, protocol handlers, or packaging."
 ---
 
 # SIMM Cross Platform
 
 ## Workflow
 
-1. Read `AGENTS.md`, `ARCHITECTURE.md`, `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the likely touched files.
+1. Read `AGENTS.md` and affected files. Consult architecture for cross-layer contracts, package manifests for dependencies, and Tauri configuration for platform or packaging changes.
 2. Check `git status --short` and preserve unrelated user changes.
 3. Classify the platform surface before editing:
    - frontend platform UI or readiness messaging

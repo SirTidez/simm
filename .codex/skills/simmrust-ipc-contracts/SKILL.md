@@ -1,6 +1,6 @@
 ---
 name: simmrust-ipc-contracts
-description: Maintain SIMM frontend/backend IPC contracts across Tauri commands, Rust DTOs, TypeScript types, ApiService wrappers, event helpers, and tests. Use when adding, renaming, deleting, or debugging invoke commands, Tauri events, shared request/response types, or frontend/backend contract drift.
+description: "Maintain SIMM frontend/backend contracts. Use when editing Tauri commands, events, Rust/TypeScript DTOs, ApiService, or event helpers."
 ---
 
 # SIMM IPC Contracts

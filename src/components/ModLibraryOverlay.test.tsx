@@ -19,6 +19,7 @@ import { ModLibraryStoreProvider } from "../stores/modLibraryStore";
 const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
   getEnvironments: vi.fn(),
+  extractGameVersion: vi.fn(),
   getS1APILatestRelease: vi.fn(),
   getMLVScanLatestRelease: vi.fn(),
   getS1APIReleases: vi.fn(),
@@ -28,6 +29,9 @@ const apiMocks = vi.hoisted(() => ({
   searchThunderstore: vi.fn(),
   searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
+  browseNexusModsPage: vi.fn(),
+  browseNexusCollectionsPage: vi.fn(),
+  getNexusCollectionRevisionPlan: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   getNexusModsModFiles: vi.fn(),
   getNexusModFileDependencies: vi.fn(),
@@ -43,6 +47,7 @@ const apiMocks = vi.hoisted(() => ({
   getModSecurityScanReport: vi.fn(),
   storeModArchive: vi.fn(),
   refreshThunderstorePackageCache: vi.fn(),
+  saveModProfile: vi.fn(),
 }));
 
 vi.mock("../services/api", () => ({
@@ -173,11 +178,13 @@ function renderLibraryOverlay({
   libraryTab,
   navigationState,
   onOpenSecurityReport,
+  onOpenProfile,
   onNavigationStateChange,
 }: {
   libraryTab?: "discover" | "library" | "updates";
   navigationState?: ModLibraryNavigationState;
   onOpenSecurityReport?: (request: { title: string }) => void;
+  onOpenProfile?: (profileId: string) => void;
   onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
 } = {}) {
   return render(
@@ -187,6 +194,7 @@ function renderLibraryOverlay({
           isOpen={true}
           onClose={() => {}}
           onOpenSecurityReport={onOpenSecurityReport}
+          onOpenProfile={onOpenProfile}
           onNavigationStateChange={onNavigationStateChange}
           navigationState={
             navigationState ?? (libraryTab ? { libraryTab } : undefined)
@@ -198,8 +206,23 @@ function renderLibraryOverlay({
 }
 
 async function chooseAvailableLibraryVersion(optionName: RegExp) {
+  if (!screen.queryByRole("combobox", { name: "Available versions" })) {
+    await openFirstDownloadedModDetails();
+  }
   fireEvent.click(await screen.findByRole("combobox", { name: "Available versions" }));
   fireEvent.click(await screen.findByRole("option", { name: optionName }));
+}
+
+async function openFirstDownloadedModDetails() {
+  let row: HTMLElement | null = null;
+  await waitFor(() => {
+    row = document.querySelector(".workspace-collection__row--downloaded");
+    expect(row).not.toBeNull();
+  });
+  fireEvent.click(row!);
+  expect(
+    await screen.findByRole("button", { name: /Back to (Library|Updates)/ }),
+  ).toBeTruthy();
 }
 
 vi.mock("../services/events", () => ({
@@ -226,6 +249,7 @@ describe("ModLibraryOverlay", () => {
   beforeEach(() => {
     apiMocks.getModLibrary.mockReset();
     apiMocks.getEnvironments.mockReset();
+    apiMocks.extractGameVersion.mockReset();
     apiMocks.getS1APILatestRelease.mockReset();
     apiMocks.getMLVScanLatestRelease.mockReset();
     apiMocks.getS1APIReleases.mockReset();
@@ -235,6 +259,9 @@ describe("ModLibraryOverlay", () => {
     apiMocks.searchThunderstore.mockReset();
     apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
+    apiMocks.browseNexusModsPage.mockReset();
+    apiMocks.browseNexusCollectionsPage.mockReset();
+    apiMocks.getNexusCollectionRevisionPlan.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.getNexusModsModFiles.mockReset();
     apiMocks.getNexusModFileDependencies.mockReset();
@@ -250,6 +277,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.storeModArchive.mockReset();
     apiMocks.refreshThunderstorePackageCache.mockReset();
+    apiMocks.saveModProfile.mockReset();
     eventMocks.onProgress.mockReset();
     eventMocks.onComplete.mockReset();
     eventMocks.onError.mockReset();
@@ -268,6 +296,10 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
     apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
     apiMocks.getEnvironments.mockResolvedValue([]);
+    apiMocks.extractGameVersion.mockResolvedValue({
+      version: "",
+      source: "unknown",
+    });
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.deleteDownloadedMod.mockResolvedValue({ deleted: true, removedFrom: [] });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
@@ -305,6 +337,27 @@ describe("ModLibraryOverlay", () => {
       },
     );
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
+    apiMocks.browseNexusModsPage.mockResolvedValue({
+      mods: [],
+      totalCount: 0,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [],
+      totalCount: 0,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: "empty-collection",
+      revisionId: "empty-revision",
+      revisionNumber: 1,
+      modFiles: [],
+      externalResources: [],
+    });
     apiMocks.getNexusOAuthStatus.mockResolvedValue({
       connected: true,
       account: {
@@ -357,6 +410,16 @@ describe("ModLibraryOverlay", () => {
         rateLimitedResponses: 0,
       },
     });
+    apiMocks.saveModProfile.mockImplementation(async (request) => ({
+      id: request.profileId || "profile-test",
+      name: request.name,
+      runtime: request.runtime,
+      isDefault: false,
+      activeEnvironmentIds: [],
+      manifest: request.manifest,
+      createdAt: "2026-09-10T00:00:00Z",
+      updatedAt: "2026-09-10T00:00:00Z",
+    }));
     [
       eventMocks.onProgress,
       eventMocks.onComplete,
@@ -416,8 +479,9 @@ describe("ModLibraryOverlay", () => {
       download_url: "https://example.com/s1api.zip",
     });
 
-    renderLibraryOverlay();
-
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "thunderstore" },
+    });
     expect(await screen.findByText("S1API")).toBeTruthy();
 
     await waitFor(() => {
@@ -443,7 +507,9 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
-    renderLibraryOverlay({ libraryTab: "discover" });
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "thunderstore" },
+    });
 
     const steamNetworkLibButtons = await screen.findAllByRole("button", {
       name: /SteamNetworkLib/i,
@@ -540,7 +606,9 @@ describe("ModLibraryOverlay", () => {
       storageId: "mlvscan-new",
     });
 
-    renderLibraryOverlay();
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "thunderstore" },
+    });
 
     fireEvent.click(await screen.findByRole("button", { name: /MLVScan/i }));
 
@@ -634,11 +702,78 @@ describe("ModLibraryOverlay", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
 
     expect(await screen.findByText("MapTools")).toBeTruthy();
-    expect(screen.getByText("Tester")).toBeTruthy();
+    const mapToolsRow = screen.getByRole("button", { name: /MapTools/i });
+    expect(mapToolsRow.textContent).toContain("v1.2.0");
+    expect(mapToolsRow.textContent).toContain("250 downloads");
+    expect(mapToolsRow.textContent).toContain("10 rating score");
+    expect(mapToolsRow.textContent).toContain("by Tester");
     expect(
-      screen.getByText("Select a mod to review details and actions."),
-    ).toBeTruthy();
+      mapToolsRow.textContent?.match(/IL2CPP \+ Mono/g) ?? [],
+    ).toHaveLength(1);
+    expect(mapToolsRow.textContent).not.toContain("Thunderstore");
+    expect(mapToolsRow.textContent).not.toContain("Available");
+    expect(document.querySelector(".workspace-collection__inspector")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Back to Discover" }),
+    ).toBeNull();
     expect(screen.getByText("Updated Jan 2, 2025")).toBeTruthy();
+  });
+
+  it("preloads both latest mod catalogs and reuses the inactive source result", async () => {
+    apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
+      packagesByRuntime: {
+        IL2CPP: [
+          makeThunderstorePackage("Latest Toolkit", "2.1.0", "IL2CPP"),
+        ],
+        Mono: [makeThunderstorePackage("Latest Toolkit", "2.1.0", "Mono")],
+      },
+    });
+    apiMocks.browseNexusModsPage.mockResolvedValue({
+      mods: [
+        {
+          mod_id: 1800,
+          name: "Cached Nexus Utility",
+          summary: "A preloaded Nexus result.",
+          description: "A preloaded Nexus result.",
+          picture_url: "https://example.com/nexus-utility.png",
+          version: "3.0.0",
+          author: "ExampleAuthor",
+          uploaded_time: "2026-01-01",
+          updated_time: "2026-01-02",
+          contains_adult_content: false,
+          status: "published",
+          endorsement_count: 12,
+          unique_downloads: 80,
+          mod_downloads: 120,
+        },
+      ],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "thunderstore",
+      },
+    });
+
+    expect(await screen.findByText("Latest Toolkit")).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.browseNexusModsPage).toHaveBeenCalledWith(
+        "schedule1",
+        "",
+        "updated",
+        0,
+        50,
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Nexus Mods" }));
+    expect(await screen.findByText("Cached Nexus Utility")).toBeTruthy();
+    expect(apiMocks.browseNexusModsPage).toHaveBeenCalledTimes(1);
   });
 
   it("publishes only the latest overlapping Thunderstore search", async () => {
@@ -693,6 +828,7 @@ describe("ModLibraryOverlay", () => {
     const thirdHandler = vi.fn();
     const baseNavigationState: ModLibraryNavigationState = {
       libraryTab: "discover",
+      searchSource: "thunderstore",
     };
 
     const { rerender } = renderLibraryOverlay({
@@ -762,7 +898,7 @@ describe("ModLibraryOverlay", () => {
             mod_id: 1629,
             name: "Pack Rat",
             summary: "Carry more stuff.",
-            description: "Carry more stuff.",
+            description: "[h1]Carry more[/h1][b]Safely organized[/b] [url=https://example.com/guide]Read the guide[/url]",
             picture_url: "https://example.com/packrat.png",
             version: "1.0.0",
             author: "ActualUploader",
@@ -771,6 +907,7 @@ describe("ModLibraryOverlay", () => {
             uploaded_time: "2025-01-01",
             updated_time: "2025-01-02",
             category_id: 1,
+            category_name: "Utility",
             contains_adult_content: false,
             status: "published",
             endorsement_count: 42,
@@ -799,9 +936,36 @@ describe("ModLibraryOverlay", () => {
     });
 
     expect((await screen.findAllByText("Pack Rat")).length).toBeGreaterThan(0);
+    const discoverHeader = document.querySelector(
+      ".workspace-collection__table-head--discover:not(.workspace-collection__table-head--collections)",
+    );
     expect(
-      screen.getByText("ActualUploader • Original creator: ExampleAuthor"),
-    ).toBeTruthy();
+      Array.from(discoverHeader?.querySelectorAll("span") ?? []).map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["Mod", "Version", "Downloads"]);
+    const packRatRow = screen.getByRole("button", { name: /Pack Rat/i });
+    expect(packRatRow.textContent).toContain("v1.0.0");
+    expect(packRatRow.textContent).toContain("250 downloads");
+    expect(packRatRow.textContent).toContain("100 unique");
+    expect(
+      packRatRow.querySelector('[aria-label="42 endorsements"]'),
+    ).not.toBeNull();
+    expect(packRatRow.textContent).toContain("Utility");
+    expect(packRatRow.textContent?.match(/Utility/g) ?? []).toHaveLength(1);
+    expect(packRatRow.textContent).toContain(
+      "by ActualUploader • Original creator: ExampleAuthor",
+    );
+    expect(packRatRow.textContent).not.toContain("Nexus Mods");
+    expect(packRatRow.textContent).not.toContain("Available");
+    expect(
+      packRatRow.querySelector(".workspace-collection__row-cell--status"),
+    ).toBeNull();
+    const warehouseRow = screen.getByRole("button", {
+      name: /Warehouse Helper/i,
+    });
+    expect(warehouseRow.textContent).not.toContain("Available");
+    expect(warehouseRow.textContent).not.toContain("Downloaded");
     expect(apiMocks.getNexusModsModFiles).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Pack Rat/i }));
@@ -815,9 +979,75 @@ describe("ModLibraryOverlay", () => {
     });
     expect(
       screen.getByText(
-        "Nexus Mods • ActualUploader • Original creator: ExampleAuthor",
+        "ActualUploader • Original creator: ExampleAuthor",
       ),
     ).toBeTruthy();
+    const nexusDetailHeader = document.querySelector(
+      ".workspace-collection__detail-page .workspace-collection__detail-header",
+    );
+    const nexusDetailTags = nexusDetailHeader?.querySelector(
+      ".workspace-inspector-card__tags--compact",
+    );
+    const nexusDetailMetrics = nexusDetailHeader?.querySelector(
+      ".workspace-inspector-card__metrics--compact",
+    );
+    const nexusDetailCopy = nexusDetailHeader?.querySelector(
+      ".workspace-collection__detail-copy",
+    );
+    const nexusDetailSummary = document.querySelector(
+      ".workspace-collection__detail-page .workspace-inspector-card__summary",
+    );
+    expect(nexusDetailTags?.textContent).toContain("Nexus Mods");
+    expect(nexusDetailTags?.textContent).toContain("Utility");
+    expect(nexusDetailTags?.textContent).toContain("published");
+    expect(nexusDetailMetrics?.textContent).toContain("Latestv1.0.0");
+    expect(nexusDetailMetrics?.textContent).toContain("Endorsements42");
+    expect(nexusDetailMetrics?.textContent).toContain("Downloads250");
+    expect(nexusDetailCopy?.textContent).toContain("Pack Rat");
+    expect(
+      Boolean(
+        nexusDetailCopy &&
+          nexusDetailMetrics &&
+          nexusDetailCopy.compareDocumentPosition(nexusDetailMetrics) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(
+      screen.getByRole("heading", { name: "Pack Rat", level: 2 }),
+    ).toBeTruthy();
+    const detailNavigation = nexusDetailHeader?.querySelector(
+      ".workspace-collection__detail-navigation",
+    );
+    const detailBackButton = detailNavigation?.querySelector("button");
+    const detailIcon = detailNavigation?.querySelector(".mod-card-icon-rail");
+    expect(detailBackButton).not.toBeNull();
+    expect(detailIcon).not.toBeNull();
+    expect(
+      Boolean(
+        detailBackButton &&
+          detailIcon &&
+          detailBackButton.compareDocumentPosition(detailIcon) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(screen.queryByText("Mod details")).toBeNull();
+    expect(
+      Boolean(
+        nexusDetailHeader &&
+          nexusDetailSummary &&
+          nexusDetailHeader.compareDocumentPosition(nexusDetailSummary) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(screen.getByRole("heading", { name: "Carry more" })).toBeTruthy();
+    expect(screen.getByText("Safely organized").tagName).toBe("STRONG");
+    expect(screen.getByRole("link", { name: "Read the guide" })).toHaveAttribute(
+      "href",
+      "https://example.com/guide",
+    );
+    expect(document.querySelector(".workspace-collection__inspector")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to Discover" }));
+    expect(await screen.findByRole("button", { name: /Pack Rat/i })).toBeTruthy();
   });
 
   it("loads published Nexus dependencies for the selected library update", async () => {
@@ -870,15 +1100,10 @@ describe("ModLibraryOverlay", () => {
     renderLibraryOverlay({
       navigationState: {
         libraryTab: "updates",
-        activeModView: {
-          kind: "downloaded",
-          id: "nexusmods::1629::file::301",
-          name: "Pack Rat",
-          source: "nexusmods",
-        },
       },
     });
 
+    await openFirstDownloadedModDetails();
     await waitFor(() => {
       expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledWith(
         "schedule1",
@@ -908,7 +1133,7 @@ describe("ModLibraryOverlay", () => {
         uploaded_timestamp: number;
       }>
     >();
-    apiMocks.searchNexusMods.mockImplementation(async (_gameId, query) => {
+    apiMocks.browseNexusModsPage.mockImplementation(async (_gameId, query) => {
       if (String(query).toLowerCase().includes("warehouse")) {
         return {
           mods: [
@@ -930,6 +1155,10 @@ describe("ModLibraryOverlay", () => {
               mod_downloads: 120,
             },
           ],
+          totalCount: 1,
+          offset: 0,
+          count: 50,
+          hasMore: false,
         };
       }
 
@@ -953,6 +1182,10 @@ describe("ModLibraryOverlay", () => {
             mod_downloads: 250,
           },
         ],
+        totalCount: 1,
+        offset: 0,
+        count: 50,
+        hasMore: false,
       };
     });
     apiMocks.getNexusModsModFiles
@@ -1012,6 +1245,7 @@ describe("ModLibraryOverlay", () => {
       expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(1);
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "Back to Discover" }));
     fireEvent.change(
       screen.getByPlaceholderText("Search or browse Nexus Mods..."),
       {
@@ -1056,6 +1290,1105 @@ describe("ModLibraryOverlay", () => {
         1629,
       );
     });
+  });
+
+  it("loads additional Nexus catalog pages without replacing current results", async () => {
+    const makeNexusMod = (modId: number, name: string) => ({
+      mod_id: modId,
+      name,
+      summary: `${name} summary`,
+      description: `${name} description`,
+      version: "1.0.0",
+      author: "CatalogAuthor",
+      uploaded_time: "2026-09-01T00:00:00Z",
+      updated_time: "2026-09-02T00:00:00Z",
+      category_id: 0,
+      category_name: "Gameplay",
+      contains_adult_content: false,
+      status: "published",
+      endorsement_count: 1,
+      unique_downloads: 10,
+      mod_downloads: 10,
+    });
+    apiMocks.browseNexusModsPage
+      .mockResolvedValueOnce({
+        mods: [makeNexusMod(1, "Catalog One")],
+        totalCount: 2,
+        offset: 0,
+        count: 50,
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        mods: [makeNexusMod(2, "Catalog Two")],
+        totalCount: 2,
+        offset: 1,
+        count: 50,
+        hasMore: false,
+      });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+
+    expect(await screen.findByText("Catalog One")).toBeTruthy();
+    expect(screen.getByText("Showing 1 of 2 Nexus Mods")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Catalog Two")).toBeTruthy();
+    expect(screen.getByText("Showing 2 of 2 Nexus Mods")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    expect(apiMocks.browseNexusModsPage).toHaveBeenNthCalledWith(
+      2,
+      "schedule1",
+      "",
+      "updated",
+      1,
+      50,
+    );
+  });
+
+  it("browses and searches Nexus Collections from the approved discover switcher", async () => {
+    const collection = {
+      id: 19,
+      slug: "quality-of-life",
+      name: "Quality of Life",
+      summary: "A curated set of improvements.",
+      category_name: "Gameplay",
+      curator_name: "Curator",
+      endorsements: 42,
+      total_downloads: 500,
+      overall_rating: 4.7,
+      overall_rating_count: 12,
+      updated_at: "2026-09-09T00:00:00Z",
+      revision_number: 3,
+      revision_updated_at: "2026-09-08T00:00:00Z",
+      mod_count: 8,
+      file_size: 2048,
+      contains_adult_content: false,
+    };
+    apiMocks.browseNexusCollectionsPage
+      .mockResolvedValueOnce({
+        collections: [collection],
+        totalCount: 120,
+        offset: 0,
+        count: 50,
+        hasMore: false,
+      })
+      .mockResolvedValueOnce({
+        collections: [{ ...collection, id: 20, slug: "quality-search", name: "Quality Search" }],
+        totalCount: 1,
+        offset: 0,
+        count: 50,
+        hasMore: false,
+      });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: "quality-of-life",
+      revisionId: "revision-3",
+      revisionNumber: 3,
+      totalSize: 2048,
+      modFiles: [],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+
+    const primaryTabs = screen.getByRole("button", { name: "Discover" }).parentElement;
+    expect(primaryTabs?.classList.contains("workspace-collection__primary-tabs")).toBe(true);
+    expect(primaryTabs?.querySelectorAll("button")).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    expect(await screen.findByText("Quality of Life")).toBeTruthy();
+    expect(screen.getByText("Showing 1 of 120 Nexus Collections")).toBeTruthy();
+    expect(apiMocks.browseNexusCollectionsPage).toHaveBeenNthCalledWith(
+      1,
+      "schedule1",
+      "",
+      "updated",
+      0,
+      50,
+    );
+
+    fireEvent.click(screen.getByText("Quality of Life").closest('[role="button"]')!);
+    expect(screen.getByText("Curated by Curator")).toBeTruthy();
+    const collectionDetailHeader = document.querySelector(
+      ".workspace-collection__detail-page .workspace-collection__detail-header",
+    );
+    const collectionDetailTags = collectionDetailHeader?.querySelector(
+      ".workspace-inspector-card__tags--compact",
+    );
+    const collectionDetailMetrics = collectionDetailHeader?.querySelector(
+      ".workspace-inspector-card__metrics--compact",
+    );
+    expect(collectionDetailTags?.textContent).toContain("Nexus Collection");
+    expect(collectionDetailTags?.textContent).toContain("Gameplay");
+    expect(collectionDetailTags?.textContent).toContain("2 KB");
+    expect(collectionDetailMetrics?.textContent).toContain("Revision3");
+    expect(collectionDetailMetrics?.textContent).toContain("Mods8");
+    expect(
+      screen.getByRole("heading", { name: "Quality of Life", level: 2 }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Collection details")).toBeNull();
+    expect(screen.getByRole("link", { name: "Open Collection on Nexus Mods" })).toHaveAttribute(
+      "href",
+      "https://next.nexusmods.com/schedule1/collections/quality-of-life",
+    );
+    expect(apiMocks.getNexusCollectionRevisionPlan).toHaveBeenCalledWith(
+      "quality-of-life",
+      3,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to Discover" }));
+    fireEvent.change(screen.getByPlaceholderText("Search Nexus Collections..."), {
+      target: { value: "quality" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("Quality Search")).toBeTruthy();
+    expect(apiMocks.browseNexusCollectionsPage).toHaveBeenNthCalledWith(
+      2,
+      "schedule1",
+      "quality",
+      "updated",
+      0,
+      50,
+    );
+  });
+
+  it("creates an isolated Premium collection profile and continues exact downloads", async () => {
+    const collection = {
+      id: 21,
+      slug: "profiled-collection",
+      name: "Profiled Collection",
+      summary: "Two exact files.",
+      curator_name: "Curator",
+      endorsements: 2,
+      total_downloads: 10,
+      revision_number: 2,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    const existing = makeEntry({
+      storageId: "existing-42",
+      displayName: "Conflict Mod",
+      source: "nexusmods",
+      sourceId: "42",
+      nexusFileId: "8000",
+      sourceVersion: "1.0.0",
+      installedIn: ["env-mono"],
+      installedInByRuntime: { Mono: ["env-mono"] },
+      storageIdsByRuntime: { Mono: "existing-42" },
+    });
+    const downloaded = makeEntry({
+      storageId: "collection-43",
+      displayName: "Background Mod",
+      source: "nexusmods",
+      sourceId: "43",
+      nexusFileId: "9002",
+      sourceVersion: "2.0.0",
+      storageIdsByRuntime: { Mono: "collection-43" },
+    });
+    let library = { downloaded: [existing] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/game",
+        runtime: "Mono",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-2",
+      revisionNumber: 2,
+      modFiles: [
+        {
+          collectionRevisionModId: "crm-1",
+          modId: 42,
+          fileId: 9001,
+          modName: "Conflict Mod",
+          fileName: "Conflict Mod 2.0",
+          version: "2.0.0",
+          optional: false,
+          available: true,
+        },
+        {
+          collectionRevisionModId: "crm-2",
+          modId: 43,
+          fileId: 9002,
+          modName: "Background Mod",
+          fileName: "Background Mod 2.0",
+          version: "2.0.0",
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    });
+    const backgroundDownload = createDeferred<{
+      success: boolean;
+      storageId: string;
+    }>();
+    const downloadedConflict = makeEntry({
+      storageId: "collection-42",
+      displayName: "Conflict Mod",
+      source: "nexusmods",
+      sourceId: "42",
+      nexusFileId: "9001",
+      sourceVersion: "2.0.0",
+      storageIdsByRuntime: { Mono: "collection-42" },
+    });
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (modId) => {
+      if (modId === 42) {
+        library = { downloaded: [existing, downloadedConflict] };
+        return { success: true, storageId: "collection-42" };
+      }
+      return backgroundDownload.promise;
+    });
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: {
+        isPremium: true,
+        canDirectDownload: false,
+        requiresSiteConfirmation: true,
+      },
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click(
+      (await screen.findByText("Profiled Collection")).closest(
+        '[role="button"]',
+      )!,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Collection staging" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Optional content" })).toBeNull();
+    });
+    const startDownload = await screen.findByRole("button", { name: "Start collection download" });
+    expect(startDownload).toHaveAttribute(
+      "title",
+      "Create and open a collection profile, then download every required mod plus the optional mods selected above.",
+    );
+    expect(screen.getByRole("button", { name: "Create profile & choose mods" })).toHaveAttribute(
+      "title",
+      "Create and open the collection profile without starting downloads. Choose individual mod downloads from the profile page.",
+    );
+    fireEvent.click(startDownload);
+    expect(apiMocks.searchThunderstoreByRuntime).not.toHaveBeenCalledWith("schedule-i", "Conflict Mod");
+    expect(apiMocks.searchThunderstoreByRuntime).not.toHaveBeenCalledWith("schedule-i", "Background Mod");
+    expect(screen.queryByRole("button", { name: "Use Thunderstore" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Apply next choice to all matches/i })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+    await waitFor(() => expect(apiMocks.saveModProfile).toHaveBeenCalledTimes(1));
+    const initialRequest = apiMocks.saveModProfile.mock.calls[0][0];
+    expect(initialRequest.profileId).toBeUndefined();
+    expect(initialRequest.manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "42",
+          nexusFileId: "9001",
+          storageId: null,
+        }),
+        expect.objectContaining({
+          sourceId: "43",
+          nexusFileId: "9002",
+          storageId: null,
+        }),
+      ]),
+    );
+    await waitFor(() => {
+      expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+        42,
+        9001,
+        "Mono",
+      );
+    });
+    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(43, 9002, "Mono"));
+    library = { downloaded: [existing, downloadedConflict, downloaded] };
+    backgroundDownload.resolve({ success: true, storageId: "collection-43" });
+
+    await waitFor(() => expect(apiMocks.saveModProfile.mock.calls.length).toBeGreaterThanOrEqual(3));
+    const profileCalls = apiMocks.saveModProfile.mock.calls;
+    const request = profileCalls[profileCalls.length - 1][0];
+    expect(request.profileId).toBe("profile-test");
+    expect(request.name).toBe("Profiled Collection (Revision 2)");
+    expect(request.manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "42",
+          nexusFileId: "9001",
+          storageId: "collection-42",
+        }),
+        expect.objectContaining({
+          sourceId: "43",
+          nexusFileId: "9002",
+          storageId: "collection-43",
+        }),
+      ]),
+    );
+  });
+
+  it("shows only optional choices to Premium users and downloads the selected optional files", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const collection = {
+      id: 25,
+      slug: "premium-options",
+      name: "Premium Options",
+      summary: "Required and optional content.",
+      curator_name: "Curator",
+      endorsements: 1,
+      total_downloads: 5,
+      revision_number: 4,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    const downloadedEntries = {
+      91: makeEntry({
+        storageId: "premium-required",
+        displayName: "Required Mod",
+        source: "nexusmods",
+        sourceId: "91",
+        nexusFileId: "9101",
+        sourceVersion: "1.0.0",
+        storageIdsByRuntime: { Mono: "premium-required" },
+      }),
+      92: makeEntry({
+        storageId: "premium-optional",
+        displayName: "Optional Mod",
+        source: "nexusmods",
+        sourceId: "92",
+        nexusFileId: "9201",
+        sourceVersion: "2.0.0",
+        storageIdsByRuntime: { Mono: "premium-optional" },
+      }),
+    };
+    let library = { downloaded: [] as ModLibraryEntry[] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([{
+      id: "env-mono",
+      name: "Main Mono",
+      appId: "3164500",
+      branch: "main",
+      outputDir: "C:/game",
+      runtime: "Mono",
+      status: "completed",
+    }]);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { isPremium: true, canDirectDownload: false, requiresSiteConfirmation: true },
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-4",
+      revisionNumber: 4,
+      modFiles: [
+        { collectionRevisionModId: "premium-required", modId: 91, fileId: 9101, modName: "Required Mod", fileName: "required.zip", version: "1.0.0", optional: false, available: true },
+        { collectionRevisionModId: "premium-optional", modId: 92, fileId: 9201, modName: "Optional Mod", fileName: "optional.zip", version: "2.0.0", optional: true, available: true },
+      ],
+      externalResources: [],
+    });
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (modId: 91 | 92) => {
+      library = { downloaded: [...library.downloaded, downloadedEntries[modId]] };
+      return { success: true, storageId: downloadedEntries[modId].storageId };
+    });
+    const onOpenProfile = vi.fn();
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+      onOpenProfile,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Premium Options")).closest('[role="button"]')!);
+
+    expect(await screen.findByRole("heading", { name: "Optional content" })).toBeTruthy();
+    expect(screen.queryByText("Required Mod")).toBeNull();
+    expect(screen.getByText("Optional Mod")).toBeTruthy();
+    expect(screen.getByText("0 / 1 selected")).toBeTruthy();
+    const optionalChoice = screen.getByRole("checkbox", { name: "Include in download" });
+    expect(optionalChoice.closest(".workspace-collection-stage__file")).toHaveClass(
+      "workspace-collection-stage__file--premium-optional",
+    );
+    fireEvent.click(optionalChoice);
+    expect(screen.getByText("1 / 1 selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start collection download" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+
+    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledTimes(2));
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(91, 9101, "Mono");
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(92, 9201, "Mono");
+    expect(apiMocks.saveModProfile.mock.calls[0][0].manifest.collection.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nexusFileId: "9101", selected: true }),
+        expect.objectContaining({ nexusFileId: "9201", optional: true, selected: true }),
+      ]),
+    );
+    expect(apiMocks.saveModProfile.mock.calls.some(([request]) =>
+      request.manifest.collection.items.some((item: { status: string }) => item.status === "downloading")
+    )).toBe(true);
+    expect(apiMocks.saveModProfile.mock.calls.some(([request]) =>
+      request.manifest.collection.items.every((item: { selected: boolean; status: string }) =>
+        !item.selected || item.status === "ready"
+      )
+    )).toBe(true);
+    expect(dispatchSpy.mock.calls.some(([event]) => event.type === "mod-profiles-updated")).toBe(true);
+    expect(onOpenProfile).toHaveBeenCalledWith("profile-test");
+    dispatchSpy.mockRestore();
+  });
+
+  it("downloads exact-version Nexus files separately for Mono and IL2CPP collection profiles", async () => {
+    const collection = {
+      id: 28,
+      slug: "runtime-downloads",
+      name: "Runtime Downloads",
+      summary: "Separate runtime archives.",
+      curator_name: "Curator",
+      endorsements: 1,
+      total_downloads: 5,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    let library = { downloaded: [] as ModLibraryEntry[] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/mono",
+        runtime: "Mono",
+        status: "completed",
+      },
+      {
+        id: "env-il2cpp",
+        name: "Main IL2CPP",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/il2cpp",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { isPremium: true, canDirectDownload: true, requiresSiteConfirmation: false },
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "runtime-downloads-revision",
+      revisionNumber: 1,
+      modFiles: [{
+        collectionRevisionModId: "runtime-download-mod",
+        modId: 93,
+        fileId: 9301,
+        modName: "Runtime Mod",
+        fileName: "Runtime Mod IL2CPP.zip",
+        version: "1.0.0",
+        optional: false,
+        available: true,
+      }],
+      externalResources: [],
+    });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 9301,
+        name: "Runtime Mod IL2CPP",
+        version: "1.0.0",
+        category_id: 1,
+        category_name: "MAIN",
+        is_primary: true,
+        size: 1024,
+        file_name: "Runtime Mod IL2CPP.zip",
+        uploaded_timestamp: 10,
+        mod_version: "1.0.0",
+      },
+      {
+        file_id: 9302,
+        name: "Runtime Mod Mono",
+        version: "1.0.0",
+        category_id: 1,
+        category_name: "MAIN",
+        is_primary: false,
+        size: 1024,
+        file_name: "Runtime Mod Mono.zip",
+        uploaded_timestamp: 11,
+        mod_version: "1.0.0",
+      },
+      {
+        file_id: 9303,
+        name: "Runtime Mod Mono",
+        version: "1.1.0",
+        category_id: 1,
+        category_name: "MAIN",
+        is_primary: true,
+        size: 1024,
+        file_name: "Runtime Mod Mono 1.1.0.zip",
+        uploaded_timestamp: 12,
+        mod_version: "1.1.0",
+      },
+    ]);
+    apiMocks.saveModProfile.mockImplementation(async (request) => ({
+      id: request.profileId || `profile-${request.runtime.toLowerCase()}`,
+      name: request.name,
+      runtime: request.runtime,
+      isDefault: false,
+      activeEnvironmentIds: [],
+      manifest: request.manifest,
+      createdAt: "2026-09-10T00:00:00Z",
+      updatedAt: "2026-09-10T00:00:00Z",
+    }));
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (_modId, fileId, runtime) => {
+      const normalizedRuntime = runtime === "IL2CPP" ? "IL2CPP" : "Mono";
+      const storageId = `runtime-${normalizedRuntime.toLowerCase()}-${fileId}`;
+      library = {
+        downloaded: [
+          ...library.downloaded,
+          makeEntry({
+            storageId,
+            displayName: "Runtime Mod",
+            source: "nexusmods",
+            sourceId: "93",
+            nexusFileId: String(fileId),
+            sourceVersion: "1.0.0",
+            availableRuntimes: [normalizedRuntime],
+            storageIdsByRuntime: { [normalizedRuntime]: storageId },
+            installedInByRuntime: { [normalizedRuntime]: [] },
+            filesByRuntime: { [normalizedRuntime]: ["RuntimeMod.dll"] },
+          }),
+        ],
+      };
+      return { success: true, storageId };
+    });
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Runtime Downloads")).closest('[role="button"]')!);
+
+    expect(await screen.findByText("1 mod differs by runtime")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show Mono profile list" }));
+    expect(screen.getByRole("list", { name: "Mono collection profile mods" })).toHaveTextContent(
+      "Nexus file 9302",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Start collection download" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Both" }));
+
+    await waitFor(() => expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledTimes(2));
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(93, 9302, "Mono");
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(93, 9301, "IL2CPP");
+    expect(apiMocks.downloadNexusModToLibrary).not.toHaveBeenCalledWith(93, 9303, "Mono");
+
+    await waitFor(() => {
+      const requests = apiMocks.saveModProfile.mock.calls.map(([request]) => request);
+      expect(requests.some((request) =>
+        request.runtime === "Mono"
+        && request.manifest.collection.items.some((item: {
+          collectionFileId?: string;
+          nexusFileId: string;
+          status: string;
+        }) => item.collectionFileId === "9301" && item.nexusFileId === "9302" && item.status === "ready")
+      )).toBe(true);
+      expect(requests.some((request) =>
+        request.runtime === "IL2CPP"
+        && request.manifest.collection.items.some((item: {
+          collectionFileId?: string;
+          nexusFileId: string;
+          status: string;
+        }) => item.collectionFileId === "9301" && item.nexusFileId === "9301" && item.status === "ready")
+      )).toBe(true);
+    });
+  });
+
+  it("previews runtime-specific collection resolution and renders the runtime chooser with visible dialog anatomy", async () => {
+    const collection = {
+      id: 26,
+      slug: "runtime-preview",
+      name: "Runtime Preview",
+      summary: "Compare runtime resolution.",
+      curator_name: "Curator",
+      endorsements: 1,
+      total_downloads: 5,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [makeEntry({
+        storageId: "runtime-preview-mono",
+        displayName: "Runtime Mod",
+        source: "nexusmods",
+        sourceId: "93",
+        nexusFileId: "9301",
+        sourceVersion: "1.0.0",
+        availableRuntimes: ["Mono"],
+        storageIdsByRuntime: { Mono: "runtime-preview-mono" },
+        installedInByRuntime: { Mono: [] },
+        filesByRuntime: { Mono: ["RuntimeMod.dll"] },
+      })],
+    });
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/mono",
+        runtime: "Mono",
+        status: "completed",
+      },
+      {
+        id: "env-il2cpp",
+        name: "Main IL2CPP",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/il2cpp",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { isPremium: true, canDirectDownload: true, requiresSiteConfirmation: false },
+    });
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "runtime-preview-revision",
+      revisionNumber: 1,
+      modFiles: [{
+        collectionRevisionModId: "runtime-preview-mod",
+        modId: 93,
+        fileId: 9301,
+        modName: "Runtime Mod",
+        fileName: "RuntimeMod.zip",
+        version: "1.0.0",
+        optional: false,
+        available: true,
+      }],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Runtime Preview")).closest('[role="button"]')!);
+
+    expect(await screen.findByRole("heading", { name: "Profile preview" })).toBeTruthy();
+    expect(screen.getByText("1 mod differs by runtime")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Mono collection profile mods" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show Mono profile list" }));
+    expect(screen.getByRole("list", { name: "Mono collection profile mods" })).toHaveTextContent(
+      "Library · Nexus Mods",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show IL2CPP profile list" }));
+    expect(screen.queryByRole("list", { name: "Mono collection profile mods" })).toBeNull();
+    expect(screen.getByRole("list", { name: "IL2CPP collection profile mods" })).toHaveTextContent(
+      "Nexus download",
+    );
+
+  });
+
+  it("renders the collection runtime chooser with the shared visible dialog anatomy", async () => {
+    const collection = {
+      id: 27,
+      slug: "runtime-chooser",
+      name: "Runtime Chooser",
+      summary: "Choose a profile runtime.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/mono",
+        runtime: "Mono",
+        status: "completed",
+      },
+      {
+        id: "env-il2cpp",
+        name: "Main IL2CPP",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/il2cpp",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "runtime-chooser-revision",
+      revisionNumber: 1,
+      modFiles: [{
+        collectionRevisionModId: "runtime-chooser-mod",
+        modId: 94,
+        fileId: 9401,
+        modName: "Chooser Mod",
+        fileName: "ChooserMod.zip",
+        version: "1.0.0",
+        optional: false,
+        available: true,
+      }],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Runtime Chooser")).closest('[role="button"]')!);
+    fireEvent.click(await screen.findByRole("button", { name: "Create profile & choose mods" }));
+
+    const dialogTitle = await screen.findByRole("heading", { name: "Choose collection profile runtime" });
+    expect(dialogTitle.closest(".modal-header")).toHaveClass("app-dialog__header");
+    expect(screen.getByText(/Collection profiles are runtime-specific/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close collection runtime dialog" })).toBeTruthy();
+  });
+
+  it("keeps a partial collection profile when a later Premium file fails", async () => {
+    const collection = {
+      id: 23,
+      slug: "partial-collection",
+      name: "Partial Collection",
+      summary: "One successful file and one failed file.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 3,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    const staged = makeEntry({
+      storageId: "partial-70",
+      displayName: "Successful Mod",
+      source: "nexusmods",
+      sourceId: "70",
+      nexusFileId: "7001",
+      sourceVersion: "1.0.0",
+      storageIdsByRuntime: { Mono: "partial-70" },
+    });
+    let library = { downloaded: [] as ModLibraryEntry[] };
+    apiMocks.getModLibrary.mockImplementation(async () => library);
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/game",
+        runtime: "Mono",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-3",
+      revisionNumber: 3,
+      modFiles: [
+        {
+          collectionRevisionModId: "crm-70",
+          modId: 70,
+          fileId: 7001,
+          modName: "Successful Mod",
+          fileName: "Successful Mod 1.0",
+          version: "1.0.0",
+          optional: false,
+          available: true,
+        },
+        {
+          collectionRevisionModId: "crm-71",
+          modId: 71,
+          fileId: 7101,
+          modName: "Failed Mod",
+          fileName: "Failed Mod 1.0",
+          version: "1.0.0",
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    });
+    apiMocks.downloadNexusModToLibrary.mockImplementation(async (modId) => {
+      if (modId === 70) {
+        library = { downloaded: [staged] };
+        return { success: true, storageId: "partial-70" };
+      }
+      throw new Error("simulated download failure");
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click(
+      (await screen.findByText("Partial Collection")).closest(
+        '[role="button"]',
+      )!,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Start collection download" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+
+    expect(
+      await screen.findByText("Collection Profile Partially Staged"),
+    ).toBeTruthy();
+    expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+      71,
+      7101,
+      "Mono",
+    );
+    expect(apiMocks.saveModProfile.mock.calls.length).toBeGreaterThanOrEqual(4);
+    const profileCalls = apiMocks.saveModProfile.mock.calls;
+    expect(profileCalls.some(([request]) =>
+      request.manifest.collection.items.some((item: { nexusFileId: string; status: string }) =>
+        item.nexusFileId === "7101" && item.status === "downloading"
+      )
+    )).toBe(true);
+    expect(profileCalls.some(([request]) =>
+      request.manifest.collection.items.some((item: { nexusFileId: string; status: string }) =>
+        item.nexusFileId === "7101" && item.status === "error"
+      )
+    )).toBe(true);
+    const savedPartial = profileCalls[profileCalls.length - 1][0];
+    expect(savedPartial.profileId).toBe("profile-test");
+    expect(savedPartial.manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          nexusFileId: "7001",
+          storageId: "partial-70",
+        }),
+        expect.objectContaining({
+          nexusFileId: "7101",
+          storageId: null,
+          manualReason: "Download the exact Nexus file from the website to complete this profile item.",
+        }),
+      ]),
+    );
+  });
+
+  it("creates a free-user collection profile with unmatched files left for Nexus", async () => {
+    const collection = {
+      id: 22,
+      slug: "manual-collection",
+      name: "Manual Collection",
+      summary: "One exact file.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 1,
+      mod_count: 1,
+      contains_adult_content: false,
+    };
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: {
+        canDirectDownload: false,
+        requiresSiteConfirmation: true,
+      },
+    });
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-mono",
+        name: "Main Mono",
+        appId: "3164500",
+        branch: "main",
+        outputDir: "C:/game",
+        runtime: "Mono",
+        status: "completed",
+      },
+    ]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection],
+      totalCount: 1,
+      offset: 0,
+      count: 50,
+      hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-1",
+      revisionNumber: 1,
+      modFiles: [
+        {
+          collectionRevisionModId: "crm-manual",
+          modId: 55,
+          fileId: 5501,
+          modName: "Manual Mod",
+          fileName: "Manual Mod 1.0",
+          version: "1.0.0",
+          optional: false,
+          available: true,
+        },
+      ],
+      externalResources: [],
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "discover",
+        searchSource: "nexusmods",
+        showDiscovery: true,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click(
+      (await screen.findByText("Manual Collection")).closest(
+        '[role="button"]',
+      )!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Create profile & choose mods" }));
+
+    await waitFor(() => {
+      expect(apiMocks.saveModProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profileId: undefined,
+          name: "Manual Collection (Revision 1)",
+          manifest: expect.objectContaining({
+            items: [
+              expect.objectContaining({
+                sourceId: "55",
+                nexusFileId: "5501",
+                storageId: null,
+              }),
+            ],
+          }),
+        }),
+      );
+    });
+    expect(apiMocks.beginNexusManualDownloadSession).not.toHaveBeenCalled();
+    expect(apiMocks.downloadNexusModToLibrary).not.toHaveBeenCalled();
+  });
+
+  it("applies a free-user source choice to all exact Thunderstore matches when selected", async () => {
+    const collection = {
+      id: 24,
+      slug: "matched-collection",
+      name: "Matched Collection",
+      summary: "Two exact Thunderstore matches.",
+      curator_name: "Curator",
+      endorsements: 0,
+      total_downloads: 1,
+      revision_number: 1,
+      mod_count: 2,
+      contains_adult_content: false,
+    };
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: { canDirectDownload: false, requiresSiteConfirmation: true },
+    });
+    apiMocks.getEnvironments.mockResolvedValue([{
+      id: "env-mono",
+      name: "Main Mono",
+      appId: "3164500",
+      branch: "main",
+      outputDir: "C:/game",
+      runtime: "Mono",
+      status: "completed",
+    }]);
+    apiMocks.browseNexusCollectionsPage.mockResolvedValue({
+      collections: [collection], totalCount: 1, offset: 0, count: 50, hasMore: false,
+    });
+    apiMocks.getNexusCollectionRevisionPlan.mockResolvedValue({
+      slug: collection.slug,
+      revisionId: "revision-1",
+      revisionNumber: 1,
+      modFiles: [
+        { collectionRevisionModId: "match-1", modId: 81, fileId: 8101, modName: "First Mod", author: "Exact Author", fileName: "first.zip", version: "1.2.3", optional: false, available: true },
+        { collectionRevisionModId: "match-2", modId: 82, fileId: 8201, modName: "Second Mod", author: "Exact Author", fileName: "second.zip", version: "2.0.0", optional: false, available: true },
+      ],
+      externalResources: [],
+    });
+    apiMocks.searchThunderstoreByRuntime.mockImplementation(async (_gameId, query) => ({
+      packagesByRuntime: {
+        Mono: [makeThunderstorePackage(query.replace(/ /g, "_"), query === "First Mod" ? "1.2.3" : "2.0.0", "Mono", "Exact_Author")],
+      },
+    }));
+
+    renderLibraryOverlay({ navigationState: { libraryTab: "discover", searchSource: "nexusmods", showDiscovery: true } });
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    fireEvent.click((await screen.findByText("Matched Collection")).closest('[role="button"]')!);
+    await screen.findAllByRole("button", { name: "Use Thunderstore" });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Apply next choice to all matches/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Keep Nexus" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Use Thunderstore" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Start collection download" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Profile & Start" }));
+
+    await waitFor(() => expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledTimes(2));
+    expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+      "First_Mod-Mono-pkg", "Mono", undefined, "First_Mod-Mono-ver",
+    );
+    expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+      "Second_Mod-Mono-pkg", "Mono", undefined, "Second_Mod-Mono-ver",
+    );
+    const initialManifest = apiMocks.saveModProfile.mock.calls[0][0].manifest;
+    expect(initialManifest.collection.items.every((item: { sourceChoice: string }) => item.sourceChoice === "thunderstore")).toBe(true);
   });
 
   it("shows the Thunderstore updated date when package data uses camelCase fields", async () => {
@@ -1190,7 +2523,7 @@ describe("ModLibraryOverlay", () => {
       await screen.findByRole("button", { name: "Download selected file" }),
     );
 
-    expect(screen.getByText("Updated Jan 2, 2025")).toBeTruthy();
+    expect(screen.getByText("Jan 2, 2025")).toBeTruthy();
 
     await waitFor(() => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
@@ -1201,7 +2534,7 @@ describe("ModLibraryOverlay", () => {
     });
   });
 
-  it("downloads the selected Thunderstore version from the inspector", async () => {
+  it("downloads the selected Thunderstore version from its details page", async () => {
     apiMocks.getEnvironments.mockResolvedValue([
       {
         id: "env-mono",
@@ -1430,7 +2763,7 @@ describe("ModLibraryOverlay", () => {
     });
   });
 
-  it("downloads the selected Nexus file from the inspector", async () => {
+  it("downloads the selected Nexus file from its details page", async () => {
     apiMocks.getEnvironments.mockResolvedValue([
       {
         id: "env-mono",
@@ -1870,7 +3203,7 @@ describe("ModLibraryOverlay", () => {
     expect(await screen.findByText("Uploaded Mar 23, 2026")).toBeTruthy();
   });
 
-  it("prioritizes primary All-in-One installers in the Nexus inspector", async () => {
+  it("prioritizes primary All-in-One installers in Nexus details", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })
       .mockResolvedValueOnce({ downloaded: [] });
@@ -2141,6 +3474,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Security Report" }),
     );
@@ -2196,6 +3530,7 @@ describe("ModLibraryOverlay", () => {
       onOpenSecurityReport,
     });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Security Report" }),
     );
@@ -2345,6 +3680,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Security Report" }),
     );
@@ -2368,7 +3704,7 @@ describe("ModLibraryOverlay", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("shows downloaded mod details in the preselected inspector state", async () => {
+  it("opens downloaded mod details on a dedicated page", async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
         makeEntry({
@@ -2388,15 +3724,34 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    expect(await screen.findByRole("button", { name: /Keyboard Mod/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Install…" })).toBeNull();
+    await openFirstDownloadedModDetails();
     expect(
       await screen.findByRole("button", { name: "Install…" }),
     ).toBeTruthy();
     expect(
-      screen.queryByText("Select a mod to review details and actions."),
-    ).toBeNull();
+      screen.getByRole("heading", { name: "Keyboard Mod", level: 2 }),
+    ).toBeTruthy();
+    const downloadedDetailHeader = document.querySelector(
+      ".workspace-collection__detail-page .workspace-collection__detail-header",
+    );
+    const downloadedDetailTags = downloadedDetailHeader?.querySelector(
+      ".workspace-inspector-card__tags--compact",
+    );
+    const downloadedDetailMetrics = downloadedDetailHeader?.querySelector(
+      ".workspace-inspector-card__metrics--compact",
+    );
+    expect(downloadedDetailTags?.textContent).toContain("Local");
+    expect(downloadedDetailTags?.textContent).toContain("Mono");
+    expect(downloadedDetailMetrics?.textContent).toContain("Versions1");
+    expect(downloadedDetailMetrics?.textContent).toContain("Selected versionv1.0.0");
+    expect(screen.queryByText("Mod details")).toBeNull();
     expect(
       screen.getByRole("button", { name: "Delete downloaded files" }),
     ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back to Library" }));
+    expect(await screen.findByRole("button", { name: /Keyboard Mod/i })).toBeTruthy();
   });
 
   it("asks before deleting a library entry that is installed in environments", async () => {
@@ -2426,6 +3781,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Delete downloaded files" }),
     );
@@ -2454,6 +3810,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Delete downloaded files" }),
     );
@@ -2463,7 +3820,7 @@ describe("ModLibraryOverlay", () => {
     expect(screen.getByText("Access denied")).toBeTruthy();
   });
 
-  it("does not render unsafe source links for downloaded inspector details", async () => {
+  it("does not render unsafe source links for downloaded details", async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
         makeEntry({
@@ -2483,6 +3840,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     expect(
       await screen.findByRole("button", { name: "Install…" }),
     ).toBeTruthy();
@@ -2521,6 +3879,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Update and activate" }),
     );
@@ -2630,6 +3989,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Update and activate" }),
     );
@@ -2742,6 +4102,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Update and activate" }),
     );
@@ -2788,6 +4149,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Update and activate" }),
@@ -2864,6 +4226,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(
       await screen.findByRole("button", { name: "Update and activate" }),
     );
@@ -2937,6 +4300,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(await screen.findByRole("button", { name: "Install…" }));
 
     expect(await screen.findByText("2 compatible environments")).toBeTruthy();
@@ -3003,6 +4367,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     fireEvent.click(await screen.findByRole("button", { name: "Install…" }));
 
     await waitFor(() => {
@@ -3077,6 +4442,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     const button = await screen.findByRole("button", {
       name: "Install to more…",
     });
@@ -3116,6 +4482,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
+    await openFirstDownloadedModDetails();
     const button = await screen.findByRole("button", { name: "Install…" });
     expect(button).toBeDisabled();
     expect(button.getAttribute("title")).toContain(

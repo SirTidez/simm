@@ -38,8 +38,20 @@ pub struct DownloadProgress {
     /// Frontends use this to distinguish an immediate retry from a duplicate
     /// event emitted by the preceding attempt.
     pub operation_id: String,
+    /// Distinguishes a normal install/update from an in-place integrity check.
+    /// Both operations intentionally share the same serialized DepotDownloader
+    /// queue and progress channel.
+    #[serde(default)]
+    pub operation: DepotOperation,
     pub status: DownloadStatus,
     pub progress: f64, // 0-100
+    /// Byte-weighted amount processed by the active DepotDownloader operation.
+    /// Unlike file counts, this continues advancing while one large asset is
+    /// being transferred.
+    pub downloaded_bytes: Option<u64>,
+    /// Estimated operation size, seeded from the current install and
+    /// calibrated against DepotDownloader's own byte-weighted output.
+    pub total_bytes: Option<u64>,
     pub downloaded_files: Option<u64>,
     pub total_files: Option<u64>,
     pub speed: Option<String>,
@@ -67,6 +79,7 @@ pub enum TrackedDownloadKind {
     Mod,
     Plugin,
     Framework,
+    Collection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +91,8 @@ pub struct TrackedDownload {
     pub context_label: String,
     pub status: DownloadStatus,
     pub progress: f64,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
     pub downloaded_files: Option<u64>,
     pub total_files: Option<u64>,
     pub icon_url: Option<String>,
@@ -299,6 +314,41 @@ pub struct AppUpdateSettings {
     pub by_channel: Option<HashMap<AppUpdateChannel, AppUpdateChannelPreferences>>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DepotOperation {
+    #[default]
+    Download,
+    Verify,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MelonLoaderUpdateSettings {
+    pub last_checked_at: Option<String>,
+    pub dismissed_version: Option<String>,
+    pub available: Option<MelonLoaderUpdateNotice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MelonLoaderUpdateNotice {
+    pub latest_version: String,
+    pub release_name: String,
+    pub published_at: Option<String>,
+    pub release_url: String,
+    pub targets: Vec<MelonLoaderUpdateTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MelonLoaderUpdateTarget {
+    pub environment_id: String,
+    pub environment_name: String,
+    pub current_version: String,
+    pub runtime: Runtime,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppUpdateChannelPreferences {
@@ -406,6 +456,8 @@ pub struct Settings {
     pub database_backup_count: Option<u32>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
     pub app_update: Option<AppUpdateSettings>,
+    #[serde(default)]
+    pub melon_loader_update: Option<MelonLoaderUpdateSettings>,
     pub experience_mode: Option<ExperienceMode>,
     pub show_advanced_game_tools: Option<bool>,
     #[serde(default)]
@@ -448,6 +500,67 @@ pub struct NexusDependencyRequirement {
 pub struct NexusModFileDependencies {
     pub source_version_id: String,
     pub requirements: Vec<NexusDependencyRequirement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusModsPage {
+    pub mods: Vec<serde_json::Value>,
+    pub total_count: u64,
+    pub offset: u32,
+    pub count: u32,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionsPage {
+    pub collections: Vec<serde_json::Value>,
+    pub total_count: u64,
+    pub offset: u32,
+    pub count: u32,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionModFile {
+    pub collection_revision_mod_id: String,
+    pub mod_id: Option<u32>,
+    pub file_id: u32,
+    pub game_id: Option<u32>,
+    pub mod_name: String,
+    pub author: Option<String>,
+    pub file_name: String,
+    pub version: String,
+    pub optional: bool,
+    pub update_policy: Option<String>,
+    pub size_in_bytes: Option<u64>,
+    pub uri: Option<String>,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionExternalResource {
+    pub id: String,
+    pub name: String,
+    pub optional: bool,
+    pub resource_type: String,
+    pub resource_url: Option<String>,
+    pub version: Option<String>,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusCollectionRevisionPlan {
+    pub slug: String,
+    pub revision_id: String,
+    pub revision_number: u32,
+    pub total_size: Option<u64>,
+    pub mod_files: Vec<NexusCollectionModFile>,
+    pub external_resources: Vec<NexusCollectionExternalResource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1077,6 +1190,7 @@ pub struct ModLibraryEntry {
     pub attached_userdata: Vec<String>,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
+    pub nexus_file_id: Option<String>,
     pub source_version: Option<String>,
     pub source_url: Option<String>,
     pub summary: Option<String>,
@@ -1125,6 +1239,231 @@ pub struct ModProfileManifest {
     pub profile: ModProfileInfo,
     #[serde(default)]
     pub items: Vec<ModProfileItem>,
+    #[serde(default)]
+    pub collection: Option<ModProfileCollection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModIntegrationPolicy {
+    #[default]
+    Disabled,
+    Ask,
+    Automatic,
+}
+
+impl ModIntegrationPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Ask => "ask",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
+impl std::str::FromStr for ModIntegrationPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "disabled" => Ok(Self::Disabled),
+            "ask" => Ok(Self::Ask),
+            "automatic" => Ok(Self::Automatic),
+            _ => Err(format!("Unknown mod integration policy: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ModIntegrationOperation {
+    CheckForUpdate,
+    RequestUpdate,
+    RequestManagement,
+}
+
+impl ModIntegrationOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CheckForUpdate => "checkForUpdate",
+            Self::RequestUpdate => "requestUpdate",
+            Self::RequestManagement => "requestManagement",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModIntegrationRequestStatus {
+    UpdateAvailable,
+    UpToDate,
+    Queued,
+    AwaitingUserApproval,
+    AwaitingUserSource,
+    AlreadyManaged,
+    Managed,
+    Denied,
+    UpdateNotAvailable,
+    NotManagedBySimm,
+    IntegrationDisabled,
+    SimmUnavailable,
+    Invalid,
+    Failed,
+}
+
+impl ModIntegrationRequestStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UpdateAvailable => "update-available",
+            Self::UpToDate => "up-to-date",
+            Self::Queued => "queued",
+            Self::AwaitingUserApproval => "awaiting-user-approval",
+            Self::AwaitingUserSource => "awaiting-user-source",
+            Self::AlreadyManaged => "already-managed",
+            Self::Managed => "managed",
+            Self::Denied => "denied",
+            Self::UpdateNotAvailable => "update-not-available",
+            Self::NotManagedBySimm => "not-managed-by-simm",
+            Self::IntegrationDisabled => "integration-disabled",
+            Self::SimmUnavailable => "simm-unavailable",
+            Self::Invalid => "invalid",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::str::FromStr for ModIntegrationRequestStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "update-available" => Ok(Self::UpdateAvailable),
+            "up-to-date" => Ok(Self::UpToDate),
+            "queued" => Ok(Self::Queued),
+            "awaiting-user-approval" => Ok(Self::AwaitingUserApproval),
+            "awaiting-user-source" => Ok(Self::AwaitingUserSource),
+            "already-managed" => Ok(Self::AlreadyManaged),
+            "managed" => Ok(Self::Managed),
+            "denied" => Ok(Self::Denied),
+            "update-not-available" => Ok(Self::UpdateNotAvailable),
+            "not-managed-by-simm" => Ok(Self::NotManagedBySimm),
+            "integration-disabled" => Ok(Self::IntegrationDisabled),
+            "simm-unavailable" => Ok(Self::SimmUnavailable),
+            "invalid" => Ok(Self::Invalid),
+            "failed" => Ok(Self::Failed),
+            _ => Err(format!("Unknown mod integration request status: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationIdentity {
+    pub assembly_path: Option<String>,
+    pub simm_storage_id: Option<String>,
+    pub guid: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationWireRequest {
+    pub protocol_version: u32,
+    pub request_id: String,
+    pub capability_token: String,
+    pub environment_id: String,
+    pub operation: ModIntegrationOperation,
+    pub mod_identity: ModIntegrationIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationWireResponse {
+    pub protocol_version: u32,
+    pub request_id: String,
+    pub status: ModIntegrationRequestStatus,
+    pub message: String,
+    pub current_version: Option<String>,
+    pub target_version: Option<String>,
+    pub source: Option<String>,
+    pub queued_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationConfig {
+    pub environment_id: String,
+    pub policy: ModIntegrationPolicy,
+    pub protocol_version: u32,
+    pub port: u16,
+    pub bridge_config_path: Option<String>,
+    pub configured: bool,
+    pub listening: bool,
+    pub connection_error: Option<String>,
+    pub pending_request_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModIntegrationRequestRecord {
+    pub id: String,
+    pub environment_id: String,
+    pub operation: ModIntegrationOperation,
+    pub status: ModIntegrationRequestStatus,
+    pub mod_file_name: String,
+    pub mod_name: String,
+    pub current_version: Option<String>,
+    pub target_version: Option<String>,
+    pub source: Option<String>,
+    pub message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCollection {
+    pub slug: String,
+    pub name: String,
+    pub revision_number: u32,
+    pub source_url: String,
+    #[serde(default)]
+    pub items: Vec<ModProfileCollectionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCollectionItem {
+    pub key: String,
+    pub nexus_mod_id: Option<u32>,
+    #[serde(default)]
+    pub collection_file_id: Option<String>,
+    pub nexus_file_id: String,
+    pub requested_name: String,
+    pub requested_author: Option<String>,
+    pub requested_version: String,
+    #[serde(default)]
+    pub requested_size_in_bytes: Option<u64>,
+    pub optional: bool,
+    pub selected: bool,
+    pub source_choice: String,
+    pub status: String,
+    pub status_message: Option<String>,
+    pub thunderstore_match: Option<ModProfileCollectionThunderstoreMatch>,
+    #[serde(default)]
+    pub runtime_mismatch: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCollectionThunderstoreMatch {
+    pub package_uuid: String,
+    pub version_uuid: String,
+    pub source_id: String,
+    pub package_url: String,
+    pub runtime: Runtime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1217,7 +1556,17 @@ pub struct ModProfileImportPlan {
     pub profile: ModProfileInfo,
     pub target_environment_id: Option<String>,
     pub items: Vec<ModProfileImportPlanItem>,
+    #[serde(default)]
+    pub removals: Vec<ModProfileRemovalPlanItem>,
     pub summary: ModProfileImportSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileRemovalPlanItem {
+    pub item: ModProfileItem,
+    pub recoverable: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1264,6 +1613,7 @@ pub struct ModProfileApplyRequest {
 pub struct ModProfileApplyResult {
     pub plan: ModProfileImportPlan,
     pub installed: usize,
+    pub removed: usize,
     pub skipped: usize,
     pub unresolved: usize,
     pub messages: Vec<String>,
@@ -1427,6 +1777,7 @@ mod tests {
             attached_userdata: vec!["Profile/save.dat".to_string()],
             source: Some(ModSource::Github),
             source_id: Some("owner/repo".to_string()),
+            nexus_file_id: None,
             source_version: Some("v1.0.0".to_string()),
             source_url: Some("https://example.com".to_string()),
             summary: Some("Example summary".to_string()),
@@ -1472,6 +1823,8 @@ mod tests {
             context_label: "Thunderstore".to_string(),
             status: DownloadStatus::Downloading,
             progress: 0.0,
+            downloaded_bytes: None,
+            total_bytes: None,
             downloaded_files: Some(0),
             total_files: Some(1),
             icon_url: Some("https://example.com/icon.png".to_string()),
@@ -1484,6 +1837,8 @@ mod tests {
 
         let json = serde_json::to_value(entry).expect("serialize");
         assert!(json.get("contextLabel").is_some());
+        assert!(json.get("downloadedBytes").is_some());
+        assert!(json.get("totalBytes").is_some());
         assert!(json.get("downloadedFiles").is_some());
         assert!(json.get("totalFiles").is_some());
         assert!(json.get("iconUrl").is_some());
@@ -1525,6 +1880,54 @@ mod tests {
         assert_eq!(
             json["byChannel"]["stable"]["skippedVersionNormalized"],
             "0.8.6"
+        );
+    }
+
+    #[test]
+    fn mod_integration_wire_contract_uses_versioned_camel_case_requests() {
+        let request = ModIntegrationWireRequest {
+            protocol_version: 1,
+            request_id: "request-1".to_string(),
+            capability_token: "token".to_string(),
+            environment_id: "env-1".to_string(),
+            operation: ModIntegrationOperation::RequestUpdate,
+            mod_identity: ModIntegrationIdentity {
+                assembly_path: Some("C:/Games/Schedule I/Mods/Example.dll".to_string()),
+                simm_storage_id: Some("storage-1".to_string()),
+                guid: Some("com.example.mod".to_string()),
+                name: Some("Example Mod".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+        };
+
+        let json = serde_json::to_value(request).expect("serialize integration request");
+        assert_eq!(json["protocolVersion"], 1);
+        assert_eq!(json["operation"], "requestUpdate");
+        assert_eq!(json["modIdentity"]["simmStorageId"], "storage-1");
+
+        let response = ModIntegrationWireResponse {
+            protocol_version: 1,
+            request_id: "request-1".to_string(),
+            status: ModIntegrationRequestStatus::AwaitingUserApproval,
+            message: "Waiting".to_string(),
+            current_version: Some("1.0.0".to_string()),
+            target_version: Some("1.1.0".to_string()),
+            source: Some("thunderstore".to_string()),
+            queued_request_id: Some("queue-1".to_string()),
+        };
+        let json = serde_json::to_value(response).expect("serialize integration response");
+        assert_eq!(json["status"], "awaiting-user-approval");
+        assert_eq!(json["queuedRequestId"], "queue-1");
+
+        assert_eq!(
+            serde_json::to_value(ModIntegrationOperation::RequestManagement)
+                .expect("serialize management operation"),
+            "requestManagement"
+        );
+        assert_eq!(
+            serde_json::to_value(ModIntegrationRequestStatus::AwaitingUserSource)
+                .expect("serialize source status"),
+            "awaiting-user-source"
         );
     }
 }

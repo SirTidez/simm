@@ -62,6 +62,12 @@ struct ResolvedScannerExecutable {
     install_method: String,
 }
 
+#[derive(Debug, Clone)]
+struct ExtractedAssembly {
+    path: PathBuf,
+    display_path: String,
+}
+
 impl SecurityScannerService {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
@@ -238,7 +244,7 @@ impl SecurityScannerService {
             Ok(files) => files,
             Err(error) => {
                 return Ok(Self::unavailable_report(
-                    format!("MLVScan could not complete the security scan: {error}"),
+                    format!("MLVScan could not complete the security scan: {error:#}"),
                     settings,
                 ));
             }
@@ -818,7 +824,7 @@ impl SecurityScannerService {
         let result = serde_json::from_str::<serde_json::Value>(&stdout)
             .context("Failed to parse MLVScan schema output")?;
 
-        let file_name = assembly_path
+        let file_name = Path::new(display_path)
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("unknown.dll")
@@ -861,40 +867,109 @@ impl SecurityScannerService {
             .context("Failed to create archive scan temp directory")?;
         let temp_root_path = temp_root.path();
 
-        match kind {
+        let assemblies = match kind {
             ArchiveKind::Zip => {
-                self.extract_zip_to_directory(archive_path, temp_root_path)
-                    .await
+                self.extract_zip_assemblies_for_scan(archive_path, temp_root_path)
+                    .await?
             }
             ArchiveKind::Rar => {
                 self.extract_rar_to_directory(archive_path, temp_root_path)
-                    .await
+                    .await?;
+                self.collect_extracted_assemblies(temp_root_path).await?
             }
             ArchiveKind::SevenZ => {
                 self.extract_7z_to_directory(archive_path, temp_root_path)
-                    .await
+                    .await?;
+                self.collect_extracted_assemblies(temp_root_path).await?
             }
             ArchiveKind::TarGz => {
                 self.extract_tar_gz_to_directory(archive_path, temp_root_path)
-                    .await
+                    .await?;
+                self.collect_extracted_assemblies(temp_root_path).await?
             }
-        }?;
+        };
 
-        let dlls = self.collect_dll_files(temp_root_path).await?;
         let mut reports = Vec::new();
-        for dll in dlls {
-            let relative = dll
-                .strip_prefix(temp_root_path)
-                .unwrap_or(&dll)
-                .to_string_lossy()
-                .replace('\\', "/");
+        for assembly in assemblies {
             reports.push(
-                self.scan_assembly_file(executable_path, &dll, &relative)
+                self.scan_assembly_file(executable_path, &assembly.path, &assembly.display_path)
                     .await?,
             );
         }
 
         Ok(reports)
+    }
+
+    async fn extract_zip_assemblies_for_scan(
+        &self,
+        archive_path: &Path,
+        target_dir: &Path,
+    ) -> Result<Vec<ExtractedAssembly>> {
+        let file = File::open(archive_path).context("Failed to open ZIP archive")?;
+        let mut archive = ZipArchive::new(file).context("Failed to read ZIP archive")?;
+        let mut budget = ArchiveBudget::default();
+        let mut assemblies = Vec::new();
+
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .context("Failed to read ZIP entry")?;
+            let entry_name = entry.name().to_string();
+            budget
+                .account(&entry_name, entry.size())
+                .context("ZIP archive exceeds scanner extraction limits")?;
+            let relative_path = entry
+                .enclosed_name()
+                .map(|path| path.to_path_buf())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("ZIP entry contains an unsafe path: {}", entry_name)
+                })?;
+
+            if entry.is_dir() {
+                continue;
+            }
+
+            let is_assembly = relative_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("dll"));
+            if !is_assembly {
+                budget
+                    .copy_entry(&entry_name, &mut entry, &mut std::io::sink())
+                    .with_context(|| format!("Failed to validate ZIP entry {entry_name}"))?;
+                continue;
+            }
+
+            // The source path remains the user-facing identity, while the physical scan
+            // path is deliberately short and collision-free. This avoids intermittent
+            // Windows failures from long, reserved, or case-colliding archive paths.
+            let output_path = target_dir.join(format!("assembly-{index:05}.dll"));
+            budget
+                .copy_entry_to_path(&entry_name, &mut entry, &output_path)
+                .with_context(|| format!("Failed to stage assembly {} for scanning", entry_name))?;
+            assemblies.push(ExtractedAssembly {
+                path: output_path,
+                display_path: relative_path.to_string_lossy().replace('\\', "/"),
+            });
+        }
+
+        assemblies.sort_by(|left, right| left.display_path.cmp(&right.display_path));
+        Ok(assemblies)
+    }
+
+    async fn collect_extracted_assemblies(&self, root: &Path) -> Result<Vec<ExtractedAssembly>> {
+        let dlls = self.collect_dll_files(root).await?;
+        Ok(dlls
+            .into_iter()
+            .map(|path| {
+                let display_path = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                ExtractedAssembly { path, display_path }
+            })
+            .collect())
     }
 
     async fn extract_zip_to_directory(&self, archive_path: &Path, target_dir: &Path) -> Result<()> {
@@ -1840,6 +1915,7 @@ mod tests {
             database_backup_count: None,
             log_retention_days: None,
             app_update: None,
+            melon_loader_update: None,
             experience_mode: None,
             show_advanced_game_tools: None,
             window_close_behavior: None,
@@ -1860,10 +1936,16 @@ mod tests {
     }
 
     fn write_zip_with_file(path: &Path, entry_name: &str, contents: &[u8]) -> Result<()> {
+        write_zip_with_files(path, &[(entry_name, contents)])
+    }
+
+    fn write_zip_with_files(path: &Path, entries: &[(&str, &[u8])]) -> Result<()> {
         let archive_file = File::create(path)?;
         let mut archive = ZipWriter::new(archive_file);
-        archive.start_file(entry_name, FileOptions::default())?;
-        archive.write_all(contents)?;
+        for (entry_name, contents) in entries {
+            archive.start_file(*entry_name, FileOptions::default())?;
+            archive.write_all(contents)?;
+        }
         archive.finish()?;
         Ok(())
     }
@@ -2487,6 +2569,43 @@ mod tests {
             dlls,
             vec![target_dir.join("Runtime/IL2CPP/Mods/Nested.dll")]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zip_scan_staging_flattens_assemblies_and_ignores_windows_hostile_assets() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("scan-staging.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+        let long_assembly_path = format!(
+            "{}/DeepMod.dll",
+            (0..30)
+                .map(|index| format!("segment-{index:02}"))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        write_zip_with_files(
+            &archive_path,
+            &[
+                ("AUX.txt", b"asset payload"),
+                (&long_assembly_path, b"fake assembly bytes"),
+            ],
+        )?;
+
+        let service = SecurityScannerService::new();
+        let assemblies = service
+            .extract_zip_assemblies_for_scan(&archive_path, &target_dir)
+            .await?;
+
+        assert_eq!(assemblies.len(), 1);
+        assert_eq!(assemblies[0].display_path, long_assembly_path);
+        assert_eq!(assemblies[0].path, target_dir.join("assembly-00001.dll"));
+        assert!(assemblies[0].path.is_file());
+        assert!(!target_dir.join("AUX.txt").exists());
+        assert!(assemblies[0].path.to_string_lossy().len() < long_assembly_path.len());
+
         Ok(())
     }
 

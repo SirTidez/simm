@@ -16,7 +16,8 @@ use aes_gcm::{
 use sha2::{Digest, Sha256};
 
 use crate::types::{
-    AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings, WindowCloseBehavior,
+    AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, MelonLoaderUpdateSettings,
+    Settings, WindowCloseBehavior,
 };
 
 pub struct SettingsService {
@@ -86,6 +87,8 @@ impl RuntimeSettingsState {
         ));
         let mut updated: Settings = serde_json::from_value(merged)?;
         updated.theme = SettingsService::normalize_theme_selection(&updated.theme);
+        updated.default_download_dir =
+            SettingsService::normalize_download_dir(&updated.default_download_dir);
 
         let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
         sqlx::query(
@@ -204,11 +207,21 @@ impl SettingsService {
                 channel: Some(AppUpdateChannel::Stable),
                 by_channel: None,
             }),
+            melon_loader_update: Some(MelonLoaderUpdateSettings::default()),
             experience_mode: Some(crate::types::ExperienceMode::Player),
             show_advanced_game_tools: Some(false),
             window_close_behavior: Some(WindowCloseBehavior::Ask),
             setup_guide_completed: Some(false),
         }
+    }
+
+    pub(crate) fn normalize_download_dir(value: &str) -> String {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).is_absolute() {
+            return trimmed.to_string();
+        }
+
+        Self::default_settings().default_download_dir
     }
 
     fn decode_persisted_settings(data: &str) -> Option<Settings> {
@@ -912,6 +925,7 @@ impl SettingsService {
         if let Some(data) = stored {
             if let Some(mut settings) = Self::decode_persisted_settings(&data) {
                 settings.theme = Self::normalize_theme_selection(&settings.theme);
+                self.migrate_download_directory(&mut settings).await?;
                 self.migrate_window_close_behavior(&mut settings).await?;
                 self.migrate_depot_downloader_remembered_session(&mut settings)
                     .await?;
@@ -923,6 +937,28 @@ impl SettingsService {
         }
 
         Ok(Self::default_settings())
+    }
+
+    async fn migrate_download_directory(&self, settings: &mut Settings) -> Result<()> {
+        let normalized = Self::normalize_download_dir(&settings.default_download_dir);
+        if settings.default_download_dir == normalized {
+            return Ok(());
+        }
+
+        log::warn!(
+            "Stored download directory was empty or relative; restoring the platform default"
+        );
+        settings.default_download_dir = normalized;
+        let content = serde_json::to_string(settings)
+            .context("Failed to serialize migrated download directory")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(content)
+            .bind(SETTINGS_ID)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to migrate the download directory")?;
+
+        Ok(())
     }
 
     async fn migrate_window_close_behavior(&self, settings: &mut Settings) -> Result<()> {
@@ -991,6 +1027,7 @@ impl SettingsService {
             Self::sanitize_legacy_settings_value(Self::merge_json(&current_json, &updates));
         let mut updated: Settings = serde_json::from_value(merged)?;
         updated.theme = Self::normalize_theme_selection(&updated.theme);
+        updated.default_download_dir = Self::normalize_download_dir(&updated.default_download_dir);
 
         let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
         sqlx::query(
@@ -1458,6 +1495,40 @@ mod tests {
         assert_eq!(loaded.database_backup_count, Some(12));
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn empty_download_directory_is_repaired_to_the_platform_default() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let mut stored_settings = SettingsService::default_settings();
+        let expected_download_dir = stored_settings.default_download_dir.clone();
+        stored_settings.default_download_dir = "   ".to_string();
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&stored_settings)?)
+            .execute(&*pool)
+            .await?;
+
+        let mut service = SettingsService::new(pool.clone())?;
+        let loaded = service.load_settings().await?;
+        assert_eq!(loaded.default_download_dir, expected_download_dir);
+
+        let persisted: String = sqlx::query_scalar("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<Settings>(&persisted)?.default_download_dir,
+            expected_download_dir
+        );
 
         Ok(())
     }

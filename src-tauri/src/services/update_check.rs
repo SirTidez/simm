@@ -1,5 +1,5 @@
 use crate::services::depot_downloader::{
-    acquire_process_permit, unique_login_id, DepotDownloaderService,
+    try_acquire_process_permit, unique_login_id, DepotDownloaderService,
 };
 use crate::services::game_version::GameVersionService;
 use crate::services::settings::SettingsService;
@@ -27,6 +27,8 @@ const ALL_ENVIRONMENT_CHECK_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 #[derive(Debug, thiserror::Error)]
 enum ManifestProbeError {
+    #[error("DepotDownloader is busy with a game download or verification")]
+    Busy,
     #[error("Failed to start DepotDownloader manifest probe: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("DepotDownloader manifest probe I/O failed: {0}")]
@@ -875,8 +877,10 @@ impl UpdateCheckService {
         // Accept only a manifest-labelled line or DepotDownloader's structured
         // manifestid field. Arbitrary build IDs, timestamps, and account IDs
         // must never become a remote manifest baseline.
-        let labelled = Regex::new(r"(?im)^\s*manifest(?:\s*id)?\s*(?::|=|\s)\s*(\d+)\s*$")
-            .expect("manifest label regex is valid");
+        let labelled = Regex::new(
+            r"(?im)^\s*manifest(?:\s*id)?\s*(?::|=|\s)\s*(\d+)(?:\s+\([^\r\n)]*\))?\s*$",
+        )
+        .expect("manifest label regex is valid");
         if let Some(manifest_id) = labelled
             .captures(output)
             .and_then(|captures| captures.get(1))
@@ -1003,7 +1007,7 @@ impl UpdateCheckService {
                 .unwrap_or(false),
         );
 
-        let process_permit = acquire_process_permit().await;
+        let process_permit = try_acquire_process_permit().ok_or(ManifestProbeError::Busy)?;
         let child = cmd.spawn().map_err(ManifestProbeError::Spawn)?;
         let output = ManifestProbeTask::spawn(child, process_permit)
             .finish()
@@ -1077,6 +1081,13 @@ mod tests {
             )
             .as_deref(),
             Some("5738443694136269112")
+        );
+        assert_eq!(
+            UpdateCheckService::parse_manifest_id_from_probe_output(
+                "Manifest 2669402650689186460 (9/18/2026 10:57:23 PM)\n"
+            )
+            .as_deref(),
+            Some("2669402650689186460")
         );
         assert_eq!(
             UpdateCheckService::parse_manifest_id_from_probe_output(

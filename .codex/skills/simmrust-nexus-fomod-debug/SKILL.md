@@ -1,6 +1,6 @@
 ---
 name: simmrust-nexus-fomod-debug
-description: Diagnose and fix SIMM NexusMods integrations, nxm deeplink handling, OAuth/API key behavior, manual download completion, FOMOD parsing, runtime-selection prompts, and callback replay loops. Use when reports mention Nexus, Vortex handoff, simm OAuth callbacks, ModuleConfig.xml, FOMOD archives, repeated prompts, invalid_grant, or manual download failures.
+description: "Diagnose SIMM Nexus and FOMOD flows. Use when fixing OAuth, nxm callbacks, manual downloads, archive parsing, runtime prompts, or replay loops."
 ---
 
 # SIMM Nexus FOMOD Debug

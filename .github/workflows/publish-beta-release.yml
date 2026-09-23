@@ -440,6 +440,135 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-mod-integration:
+    needs: validate
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Resolve mod integration version
+        id: version
+        shell: pwsh
+        run: |
+          $projectPath = 'integrations/mod-integration/src/Simm.ModIntegration.Abstractions/Simm.ModIntegration.Abstractions.csproj'
+          $match = [regex]::Match((Get-Content $projectPath -Raw), '<Version>([^<]+)</Version>')
+          if (-not $match.Success -or [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) {
+            throw "Unable to determine the mod integration version from '$projectPath'."
+          }
+
+          "version=$($match.Groups[1].Value.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Download and verify MelonLoader build references
+        id: melonloader
+        shell: pwsh
+        run: |
+          $archiveUrl = 'https://github.com/LavaGang/MelonLoader/releases/download/v0.7.3/MelonLoader.x64.zip'
+          $expectedHash = '5b2b2f3d1cd42b59ec886c5bdc2663edae87a0097a4f4a8f58c0965a99dda416'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'MelonLoader.x64.v0.7.3.zip'
+          $extractPath = Join-Path $env:RUNNER_TEMP 'MelonLoader.x64.v0.7.3'
+
+          Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+          $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -cne $expectedHash) {
+            throw "MelonLoader v0.7.3 archive hash mismatch. Expected '$expectedHash', got '$actualHash'."
+          }
+
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
+          $monoCandidates = @(Get-ChildItem -Path $extractPath -Recurse -File -Filter 'MelonLoader.dll' | Where-Object {
+            $_.FullName -match '[\\/]net35[\\/]MelonLoader\.dll$'
+          })
+          $il2CppCandidates = @(Get-ChildItem -Path $extractPath -Recurse -File -Filter 'MelonLoader.dll' | Where-Object {
+            $_.FullName -match '[\\/]net6[\\/]MelonLoader\.dll$'
+          })
+          if ($monoCandidates.Count -ne 1 -or $il2CppCandidates.Count -ne 1) {
+            throw "Expected one net35 and one net6 MelonLoader reference, found $($monoCandidates.Count) and $($il2CppCandidates.Count)."
+          }
+
+          "mono=$($monoCandidates[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "il2cpp=$($il2CppCandidates[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build mod integration artifacts
+        shell: pwsh
+        run: |
+          .\integrations\mod-integration\build\Build-Integration.ps1 `
+            -MonoMelonLoaderAssembly '${{ steps.melonloader.outputs.mono }}' `
+            -Il2CppMelonLoaderAssembly '${{ steps.melonloader.outputs.il2cpp }}' `
+            -OutputDirectory 'artifacts/mod-integration-raw'
+
+      - name: Prepare and validate mod integration release assets
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $rawRoot = (Resolve-Path 'artifacts/mod-integration-raw').Path
+          $releaseRoot = 'artifacts/mod-integration'
+          New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+
+          $packageName = "Simm.ModIntegration.$version.nupkg"
+          $packageSource = Join-Path $rawRoot "packages/$packageName"
+          if (-not (Test-Path -LiteralPath $packageSource -PathType Leaf)) {
+            throw "Expected developer package '$packageSource'."
+          }
+          Copy-Item -LiteralPath $packageSource -Destination (Join-Path $releaseRoot $packageName) -Force
+
+          $runtimeEntries = @(
+            'Plugins/Simm.ModIntegration.Bridge.MelonLoader.dll',
+            'UserLibs/Simm.ModIntegration.Abstractions.dll',
+            'UserLibs/Simm.ModIntegration.Bridge.Core.dll'
+          )
+          foreach ($runtime in @('Mono', 'IL2CPP')) {
+            $runtimeRoot = Join-Path $rawRoot $runtime
+            Copy-Item -LiteralPath 'integrations/mod-integration/README.md' -Destination (Join-Path $runtimeRoot 'README.md') -Force
+            $zipName = "Simm.ModIntegration.Bridge.$runtime.$version.zip"
+            $zipPath = Join-Path $releaseRoot $zipName
+            Compress-Archive -Path (Join-Path $runtimeRoot '*') -DestinationPath $zipPath -CompressionLevel Optimal -Force
+
+            $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipPath).Path)
+            try {
+              $entryNames = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\\', '/') })
+              foreach ($entry in $runtimeEntries) {
+                if ($entryNames -cnotcontains $entry) {
+                  throw "Runtime archive '$zipName' is missing '$entry'."
+                }
+              }
+            } finally {
+              $archive.Dispose()
+            }
+          }
+
+          $packagePath = Join-Path $releaseRoot $packageName
+          $package = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $packagePath).Path)
+          try {
+            $packageEntries = @($package.Entries | ForEach-Object { $_.FullName.Replace('\\', '/') })
+            foreach ($entry in @(
+              'lib/netstandard2.1/Simm.ModIntegration.Abstractions.dll',
+              'lib/net6.0/Simm.ModIntegration.Abstractions.dll'
+            )) {
+              if ($packageEntries -cnotcontains $entry) {
+                throw "Developer package '$packageName' is missing '$entry'."
+              }
+            }
+          } finally {
+            $package.Dispose()
+          }
+
+      - name: Upload mod integration release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMM_Mod_Integration_${{ steps.version.outputs.version }}
+          path: artifacts/mod-integration/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish-beta-release:
     runs-on: ubuntu-latest
     permissions:
@@ -447,6 +576,7 @@ jobs:
     needs:
       - build-windows
       - build-linux
+      - build-mod-integration
     concurrency:
       group: publish-beta-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}
       cancel-in-progress: false
@@ -473,7 +603,8 @@ jobs:
           python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
             --artifacts-only `
             --artifact-dir artifacts `
-            --package-version $version
+            --package-version $version `
+            --mod-integration-version '${{ needs.build-mod-integration.outputs.version }}'
           if ($LASTEXITCODE -ne 0) {
             throw 'Beta release artifact validation failed.'
           }

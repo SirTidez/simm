@@ -38,6 +38,8 @@ function kindIcon(kind: TrackedDownload['kind']): IconName {
       return 'plug';
     case 'framework':
       return 'cubes';
+    case 'collection':
+      return 'layerGroup';
     default:
       return 'file';
   }
@@ -48,21 +50,34 @@ function isActiveStatus(status: TrackedDownload['status']) {
 }
 
 function isIndeterminate(download: TrackedDownload) {
+  const active = download.status === 'downloading' || download.status === 'queued' || download.status === 'validating';
   return (
-    download.kind !== 'game' &&
-    (download.status === 'downloading' || download.status === 'queued' || download.status === 'validating')
+    active && (
+      download.kind !== 'game'
+      || (
+        download.progress <= 0
+        && !(typeof download.downloadedBytes === 'number' && download.downloadedBytes > 0)
+      )
+    )
   );
 }
 
 interface DownloadsPanelProps {
   presentation?: 'panel' | 'popup';
   onClose?: () => void;
+  onOpenProfile?: (profileId: string) => void;
 }
 
 function progressText(download: TrackedDownload) {
   if (download.kind === 'game') {
+    if (hasUsableByteCounts(download)) {
+      return `${Math.round(download.progress)}% - ${formatBytes(download.downloadedBytes!)} / ${formatBytes(download.totalBytes!)}`;
+    }
+    if (typeof download.downloadedBytes === 'number' && download.downloadedBytes > 0) {
+      return `${formatBytes(download.downloadedBytes)} downloaded`;
+    }
     if (hasUsableFileCounts(download)) {
-      return `${Math.round(download.progress)}% - ${download.downloadedFiles} / ${download.totalFiles} files`;
+      return `${Math.round(download.progress)}%`;
     }
     return `${Math.round(download.progress)}%`;
   }
@@ -72,6 +87,24 @@ function progressText(download: TrackedDownload) {
   }
 
   return download.message || statusLabel(download.status);
+}
+
+function formatBytes(bytes: number) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Math.max(0, bytes);
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function hasUsableByteCounts(download: Pick<TrackedDownload, 'downloadedBytes' | 'totalBytes'>) {
+  const downloaded = typeof download.downloadedBytes === 'number' ? download.downloadedBytes : Number.NaN;
+  const total = typeof download.totalBytes === 'number' ? download.totalBytes : Number.NaN;
+  return Number.isFinite(downloaded) && Number.isFinite(total) && downloaded >= 0 && total > 0;
 }
 
 function hasUsableFileCounts(download: Pick<TrackedDownload, 'downloadedFiles' | 'totalFiles'>) {
@@ -84,7 +117,10 @@ function getProgressValue(download: TrackedDownload) {
   return Math.min(100, Math.max(0, download.progress));
 }
 
-function renderDownloadRow(download: TrackedDownload) {
+function renderDownloadRow(
+  download: TrackedDownload,
+  onOpenProfile?: (profileId: string) => void,
+) {
   const recentRow = !isActiveStatus(download.status);
   const localIcon = resolveImageSource(download.iconCachePath);
   const remoteIcon = resolveImageSource(download.iconUrl);
@@ -92,7 +128,20 @@ function renderDownloadRow(download: TrackedDownload) {
   const indeterminate = isIndeterminate(download);
 
   return (
-    <article className={`downloads-panel__row downloads-panel__row--${download.status} ${recentRow ? 'downloads-panel__row--recent' : 'downloads-panel__row--active'}`} key={download.id}>
+    <article
+      className={`downloads-panel__row downloads-panel__row--${download.status} ${recentRow ? 'downloads-panel__row--recent' : 'downloads-panel__row--active'} ${download.profileId ? 'downloads-panel__row--actionable' : ''}`}
+      key={download.id}
+      role={download.profileId ? 'button' : undefined}
+      tabIndex={download.profileId ? 0 : undefined}
+      onClick={download.profileId ? () => onOpenProfile?.(download.profileId!) : undefined}
+      onKeyDown={download.profileId ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpenProfile?.(download.profileId!);
+        }
+      } : undefined}
+      title={download.profileId ? 'Open the collection profile' : undefined}
+    >
       <div className="downloads-panel__row-main">
         <div className="downloads-panel__identity">
           {iconSource ? (
@@ -144,7 +193,7 @@ function renderDownloadRow(download: TrackedDownload) {
   );
 }
 
-export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPanelProps = {}) {
+export function DownloadsPanel({ presentation = 'panel', onClose, onOpenProfile }: DownloadsPanelProps = {}) {
   const { downloads } = useDownloadStatusStore();
 
   const { activeDownloads, recentDownloads } = useMemo(() => {
@@ -199,7 +248,7 @@ export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPan
             <div className="downloads-panel__section">
               <div className="downloads-panel__section-header">Active</div>
               <div className="downloads-panel__list">
-                {activeDownloads.map(renderDownloadRow)}
+                {activeDownloads.map((download) => renderDownloadRow(download, onOpenProfile))}
               </div>
             </div>
           )}
@@ -208,7 +257,7 @@ export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPan
             <div className="downloads-panel__section">
               <div className="downloads-panel__section-header">Recent</div>
               <div className="downloads-panel__list">
-                {visibleRecentDownloads.map(renderDownloadRow)}
+                {visibleRecentDownloads.map((download) => renderDownloadRow(download, onOpenProfile))}
               </div>
             </div>
           )}

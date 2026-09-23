@@ -163,6 +163,34 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
                 "group: publish-beta-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}",
                 "serializes Beta publication for the resolved release tag",
             ),
+            ("  build-mod-integration:", "defines a managed mod integration artifact build"),
+            (
+                "      - build-mod-integration",
+                "waits for managed mod integration artifacts before publication",
+            ),
+            ("actions/setup-dotnet@v4", "installs the SDK used to build managed integration artifacts"),
+            (
+                "MelonLoader/releases/download/v0.7.3/MelonLoader.x64.zip",
+                "uses the pinned MelonLoader build references",
+            ),
+            (
+                "5b2b2f3d1cd42b59ec886c5bdc2663edae87a0097a4f4a8f58c0965a99dda416",
+                "verifies the pinned MelonLoader reference archive",
+            ),
+            ("Build-Integration.ps1", "builds both managed bridge runtimes and the developer package"),
+            (
+                "foreach ($runtime in @('Mono', 'IL2CPP'))",
+                "packages both runtime-specific bridge deployment layouts",
+            ),
+            (
+                "Simm.ModIntegration.Bridge.$runtime.$version.zip",
+                "uses versioned bridge archive names",
+            ),
+            ("Simm.ModIntegration.$version.nupkg", "publishes the developer SDK package"),
+            (
+                "--mod-integration-version",
+                "validates managed integration artifacts before draft publication",
+            ),
         ]:
             if needle not in text:
                 issues.append(f"{workflow} does not show that it {description}.")
@@ -342,6 +370,14 @@ def expected_artifact_names(version: str) -> dict[str, str]:
     }
 
 
+def expected_mod_integration_artifact_names(version: str) -> list[str]:
+    return [
+        f"Simm.ModIntegration.{version}.nupkg",
+        f"Simm.ModIntegration.Bridge.Mono.{version}.zip",
+        f"Simm.ModIntegration.Bridge.IL2CPP.{version}.zip",
+    ]
+
+
 def check_version_identity(
     version_raw: str,
     label: str,
@@ -497,7 +533,11 @@ def read_checksums(path: Path) -> tuple[dict[str, str], list[str]]:
     return checksums, issues
 
 
-def check_artifacts(artifact_dir: Path, version: str) -> list[str]:
+def check_artifacts(
+    artifact_dir: Path,
+    version: str,
+    mod_integration_version: str | None = None,
+) -> list[str]:
     issues: list[str] = []
     expected = expected_artifact_names(version)
     required = [
@@ -508,6 +548,12 @@ def check_artifacts(artifact_dir: Path, version: str) -> list[str]:
         expected["linux-deb"],
         "SHA256SUMS",
     ]
+    mod_integration_names: list[str] = []
+    if mod_integration_version:
+        mod_integration_names = expected_mod_integration_artifact_names(
+            mod_integration_version
+        )
+        required.extend(mod_integration_names)
     for name in required:
         if not (artifact_dir / name).is_file():
             issues.append(f"Release artifact set is missing '{name}'.")
@@ -517,11 +563,24 @@ def check_artifacts(artifact_dir: Path, version: str) -> list[str]:
                 issues.append(
                     f"Release artifact set contains stale or wrong-version '{candidate.name}'."
                 )
+    if mod_integration_version:
+        expected_mod_integration = set(mod_integration_names)
+        for pattern in (
+            "Simm.ModIntegration.*.nupkg",
+            "Simm.ModIntegration.Bridge.Mono.*.zip",
+            "Simm.ModIntegration.Bridge.IL2CPP.*.zip",
+        ):
+            for candidate in artifact_dir.glob(pattern):
+                if candidate.name not in expected_mod_integration:
+                    issues.append(
+                        "Release artifact set contains stale or wrong-version "
+                        f"'{candidate.name}'."
+                    )
     checksum_path = artifact_dir / "SHA256SUMS"
     if checksum_path.is_file():
         checksums, checksum_issues = read_checksums(checksum_path)
         issues.extend(checksum_issues)
-        for name in expected.values():
+        for name in [*expected.values(), *mod_integration_names]:
             artifact = artifact_dir / name
             if not artifact.is_file():
                 continue
@@ -547,6 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--package-version")
     parser.add_argument("--minimum-version")
     parser.add_argument("--artifact-dir", type=Path)
+    parser.add_argument("--mod-integration-version")
     parser.add_argument("--artifacts-only", action="store_true")
     parser.add_argument("--version-only", action="store_true")
     return parser
@@ -572,7 +632,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.artifacts_only:
         if not args.artifact_dir or not args.package_version:
             raise SystemExit("--artifacts-only requires --artifact-dir and --package-version.")
-        issues.extend(check_artifacts(args.artifact_dir.resolve(), args.package_version))
+        issues.extend(
+            check_artifacts(
+                args.artifact_dir.resolve(),
+                args.package_version,
+                args.mod_integration_version,
+            )
+        )
     elif args.manifest:
         if not args.channel:
             raise SystemExit("--manifest requires --channel.")

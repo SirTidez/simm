@@ -17,8 +17,12 @@ export interface DownloadProgress {
   downloadId: string;
   /** Unique backend operation generation; changes when the same environment is retried. */
   operationId: string;
+  /** Whether DepotDownloader is installing/updating or verifying an existing install. */
+  operation?: 'download' | 'verify';
   status: 'queued' | 'downloading' | 'validating' | 'completed' | 'error' | 'cancelled';
   progress: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
   downloadedFiles?: number;
   totalFiles?: number;
   speed?: string;
@@ -40,7 +44,7 @@ export interface OneTimeDownloadCredentials {
 
 export type Runtime = 'IL2CPP' | 'Mono' | 'MONO';
 
-export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework';
+export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework' | 'collection';
 
 export interface TrackedDownload {
   id: string;
@@ -49,6 +53,8 @@ export interface TrackedDownload {
   contextLabel: string;
   status: 'queued' | 'downloading' | 'validating' | 'completed' | 'error' | 'cancelled';
   progress: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
   downloadedFiles?: number;
   totalFiles?: number;
   iconUrl?: string;
@@ -59,6 +65,10 @@ export interface TrackedDownload {
   finishedAt?: number | null;
   /** Present for game downloads so late events from an older run can be ignored. */
   operationId?: string;
+  /** Collection downloads open their generated profile when selected. */
+  profileId?: string;
+  /** Collection summaries remain available longer than ordinary completed rows. */
+  persistent?: boolean;
 }
 
 /** Result of `extract_game_version` (Steam entries include reconciled branch/runtime). */
@@ -289,6 +299,27 @@ export interface AppUpdatePreferences extends AppUpdateChannelPreferences {
   byChannel?: Partial<Record<AppUpdateChannel, AppUpdateChannelPreferences>> | null;
 }
 
+export interface MelonLoaderUpdateTarget {
+  environmentId: string;
+  environmentName: string;
+  currentVersion: string;
+  runtime: 'IL2CPP' | 'MONO';
+}
+
+export interface MelonLoaderUpdateNotice {
+  latestVersion: string;
+  releaseName: string;
+  publishedAt?: string | null;
+  releaseUrl: string;
+  targets: MelonLoaderUpdateTarget[];
+}
+
+export interface MelonLoaderUpdatePreferences {
+  lastCheckedAt?: string | null;
+  dismissedVersion?: string | null;
+  available?: MelonLoaderUpdateNotice | null;
+}
+
 export type AppUpdateChannel = 'stable' | 'beta';
 
 export type ExperienceMode = 'player' | 'powerUser';
@@ -322,6 +353,7 @@ export interface Settings {
   databaseBackupCount?: number;
   logRetentionDays?: number;
   appUpdate?: AppUpdatePreferences | null;
+  melonLoaderUpdate?: MelonLoaderUpdatePreferences | null;
   experienceMode?: ExperienceMode | null;
   showAdvancedGameTools?: boolean | null;
   windowCloseBehavior?: 'ask' | 'tray' | 'quit' | null;
@@ -635,11 +667,135 @@ export interface NexusMod {
   uploaded_time: string;
   updated_time: string;
   category_id: number;
+  category_name?: string;
   contains_adult_content: boolean;
   status: string;
+  direct_download_enabled?: boolean;
+  supports_vortex?: boolean;
+  tags?: string[];
   endorsement_count: number;
   unique_downloads: number;
   mod_downloads: number;
+}
+
+export type ModIntegrationPolicy = 'disabled' | 'ask' | 'automatic';
+
+export type ModIntegrationRequestStatus =
+  | 'update-available'
+  | 'up-to-date'
+  | 'queued'
+  | 'awaiting-user-approval'
+  | 'awaiting-user-source'
+  | 'already-managed'
+  | 'managed'
+  | 'denied'
+  | 'update-not-available'
+  | 'not-managed-by-simm'
+  | 'integration-disabled'
+  | 'simm-unavailable'
+  | 'invalid'
+  | 'failed';
+
+export interface ModIntegrationConfig {
+  environmentId: string;
+  policy: ModIntegrationPolicy;
+  protocolVersion: number;
+  port: number;
+  bridgeConfigPath?: string;
+  configured: boolean;
+  listening: boolean;
+  connectionError?: string;
+  pendingRequestCount: number;
+}
+
+export interface ModIntegrationRequestRecord {
+  id: string;
+  environmentId: string;
+  operation: 'checkForUpdate' | 'requestUpdate' | 'requestManagement';
+  status: ModIntegrationRequestStatus;
+  modFileName: string;
+  modName: string;
+  currentVersion?: string;
+  targetVersion?: string;
+  source?: string;
+  message?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NexusModsPage {
+  mods: NexusMod[];
+  totalCount: number;
+  offset: number;
+  count: number;
+  hasMore: boolean;
+}
+
+export interface NexusCollection {
+  id: number;
+  slug: string;
+  name: string;
+  summary: string;
+  category_name?: string;
+  curator_name: string;
+  curator_member_id?: number;
+  curator_avatar_url?: string;
+  tile_image_url?: string;
+  tile_image_alt?: string;
+  endorsements: number;
+  total_downloads: number;
+  overall_rating?: number;
+  overall_rating_count?: number;
+  first_published_at?: string;
+  updated_at?: string;
+  revision_number?: number;
+  revision_updated_at?: string;
+  mod_count: number;
+  file_size?: number;
+  contains_adult_content: boolean;
+}
+
+export interface NexusCollectionsPage {
+  collections: NexusCollection[];
+  totalCount: number;
+  offset: number;
+  count: number;
+  hasMore: boolean;
+}
+
+export interface NexusCollectionModFile {
+  collectionRevisionModId: string;
+  modId?: number;
+  fileId: number;
+  gameId?: number;
+  modName: string;
+  author?: string;
+  fileName: string;
+  version: string;
+  optional: boolean;
+  updatePolicy?: string;
+  sizeInBytes?: number;
+  uri?: string;
+  available: boolean;
+}
+
+export interface NexusCollectionExternalResource {
+  id: string;
+  name: string;
+  optional: boolean;
+  resourceType: string;
+  resourceUrl?: string;
+  version?: string;
+  author?: string;
+}
+
+export interface NexusCollectionRevisionPlan {
+  slug: string;
+  revisionId: string;
+  revisionNumber: number;
+  totalSize?: number;
+  modFiles: NexusCollectionModFile[];
+  externalResources: NexusCollectionExternalResource[];
 }
 
 export interface NexusModFile {
@@ -653,6 +809,10 @@ export interface NexusModFile {
   file_name: string;
   uploaded_timestamp: number;
   mod_version: string;
+  description?: string;
+  detected_file_extension?: string;
+  total_downloads?: number;
+  unique_downloads?: number;
 }
 
 export interface NexusDependencyCandidate {
@@ -683,6 +843,7 @@ export interface ModLibraryEntry {
   attachedUserData?: string[];
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceId?: string;
+  nexusFileId?: string;
   sourceVersion?: string;
   sourceUrl?: string;
   summary?: string;
@@ -720,6 +881,53 @@ export interface ModProfileManifest {
   updatedAt?: string | null;
   profile: ModProfileInfo;
   items: ModProfileItem[];
+  collection?: ModProfileCollection | null;
+}
+
+export type ModProfileCollectionSourceChoice = 'nexusmods' | 'thunderstore' | 'library';
+export type ModProfileCollectionItemStatus =
+  | 'pending'
+  | 'queued'
+  | 'downloading'
+  | 'ready'
+  | 'manualRequired'
+  | 'runtimeMismatch'
+  | 'error';
+
+export interface ModProfileCollectionThunderstoreMatch {
+  packageUuid: string;
+  versionUuid: string;
+  sourceId: string;
+  packageUrl: string;
+  runtime: 'IL2CPP' | 'Mono';
+}
+
+export interface ModProfileCollectionItem {
+  key: string;
+  nexusModId?: number | null;
+  /** Original file pinned by the Nexus collection revision. */
+  collectionFileId?: string | null;
+  /** Runtime-specific exact-version file SIMM resolves for this profile. */
+  nexusFileId: string;
+  requestedName: string;
+  requestedAuthor?: string | null;
+  requestedVersion: string;
+  requestedSizeInBytes?: number | null;
+  optional: boolean;
+  selected: boolean;
+  sourceChoice: ModProfileCollectionSourceChoice;
+  status: ModProfileCollectionItemStatus;
+  statusMessage?: string | null;
+  thunderstoreMatch?: ModProfileCollectionThunderstoreMatch | null;
+  runtimeMismatch?: boolean;
+}
+
+export interface ModProfileCollection {
+  slug: string;
+  name: string;
+  revisionNumber: number;
+  sourceUrl: string;
+  items: ModProfileCollectionItem[];
 }
 
 export interface ModProfileInfo {
@@ -765,6 +973,12 @@ export interface ModProfileImportPlanItem {
   message: string;
 }
 
+export interface ModProfileRemovalPlanItem {
+  item: ModProfileItem;
+  recoverable: boolean;
+  message: string;
+}
+
 export interface ModProfileImportSummary {
   total: number;
   alreadyInstalled: number;
@@ -779,6 +993,7 @@ export interface ModProfileImportPlan {
   profile: ModProfileInfo;
   targetEnvironmentId?: string | null;
   items: ModProfileImportPlanItem[];
+  removals: ModProfileRemovalPlanItem[];
   summary: ModProfileImportSummary;
 }
 
@@ -790,6 +1005,7 @@ export interface ModProfileApplyRequest {
 export interface ModProfileApplyResult {
   plan: ModProfileImportPlan;
   installed: number;
+  removed: number;
   skipped: number;
   unresolved: number;
   messages: string[];

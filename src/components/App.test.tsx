@@ -78,10 +78,12 @@ const windowMocks = vi.hoisted(() => ({
   minimize: vi.fn(),
   toggleMaximize: vi.fn(),
   close: vi.fn(),
+  requestUserAttention: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => windowMocks,
+  UserAttentionType: { Informational: 2 },
 }));
 
 vi.mock('../stores/environmentStore', () => ({
@@ -315,6 +317,23 @@ vi.mock('./DownloadsPanel', () => ({
   ),
 }));
 
+vi.mock('./ModIntegrationDialog', () => ({
+  ModIntegrationDialog: ({
+    isOpen,
+    environment,
+    onClose,
+  }: {
+    isOpen: boolean;
+    environment: { name: string };
+    onClose: () => void;
+  }) => isOpen ? (
+    <div role="dialog" aria-label="Mod Integration">
+      <span>Reviewing requests for {environment.name}</span>
+      <button onClick={onClose}>Close mod integration</button>
+    </div>
+  ) : null,
+}));
+
 describe('App', () => {
   it('formats home dashboard check timestamps without seconds or a four-digit year', () => {
     const localTimestampSeconds = Math.floor(new Date(2026, 6, 13, 17, 59, 29).getTime() / 1000);
@@ -376,6 +395,7 @@ describe('App', () => {
     windowMocks.minimize.mockReset();
     windowMocks.toggleMaximize.mockReset();
     windowMocks.close.mockReset();
+    windowMocks.requestUserAttention.mockReset();
     appRenderMocks.footerRenderCount = 0;
 
     windowMocks.isMaximized.mockResolvedValue(false);
@@ -384,6 +404,7 @@ describe('App', () => {
     windowMocks.minimize.mockResolvedValue(undefined);
     windowMocks.toggleMaximize.mockResolvedValue(undefined);
     windowMocks.close.mockResolvedValue(undefined);
+    windowMocks.requestUserAttention.mockResolvedValue(undefined);
 
     environmentStoreMocks.useEnvironmentStore.mockReset();
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({
@@ -456,6 +477,156 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Steam Runtime Changed' })).toBeTruthy();
     expect(screen.getByText(/Mono Missing Mod/)).toBeTruthy();
     expect(screen.getByText(/Those items remain disabled/)).toBeTruthy();
+  });
+
+  it('surfaces a new mod update approval request and opens its review dialog', async () => {
+    let integrationRequestHandler: ((event: { payload: { environmentId: string } }) => void) | null = null;
+    let pendingRequests: unknown[] = [];
+    listenMock.mockImplementation(async (eventName?: string, handler?: unknown) => {
+      if (eventName === 'mod_integration_requests_changed') {
+        integrationRequestHandler = handler as (event: { payload: { environmentId: string } }) => void;
+      }
+      return () => {};
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'list_mod_integration_requests') return Promise.resolve(pendingRequests);
+      if (command === 'get_telemetry_capability') return Promise.resolve({ available: false });
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'alternate-beta',
+          name: 'Alternate Beta',
+          appId: '3164500',
+          branch: 'alternate-beta',
+          outputDir: 'C:/Games/Alternate Beta',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+    await waitFor(() => expect(integrationRequestHandler).not.toBeNull());
+
+    pendingRequests = [
+      {
+        id: 'request-1',
+        environmentId: 'alternate-beta',
+        operation: 'requestUpdate',
+        status: 'awaiting-user-approval',
+        modFileName: 'PackRat-Mono.dll',
+        modName: 'PackRat',
+        currentVersion: '0.0.1.0',
+        targetVersion: '2.1.1.0',
+        source: 'local',
+        message: 'SIMM is waiting for the user to approve this update.',
+        createdAt: '2026-09-14T16:13:15Z',
+        updatedAt: '2026-09-14T16:13:15Z',
+      },
+    ];
+    await act(async () => {
+      const emitIntegrationRequest = integrationRequestHandler as unknown as (
+        event: { payload: { environmentId: string } },
+      ) => void;
+      emitIntegrationRequest({ payload: { environmentId: 'alternate-beta' } });
+    });
+
+    expect(await screen.findByText('Mod update request')).toBeTruthy();
+    expect(screen.getByText((_, element) => (
+      element?.tagName === 'P'
+      && element.textContent === 'PackRat requested an update from 0.0.1.0 to 2.1.1.0 for Alternate Beta.'
+    ))).toBeTruthy();
+    expect(windowMocks.requestUserAttention).toHaveBeenCalledWith(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review request' }));
+    expect(await screen.findByText('Reviewing requests for Alternate Beta')).toBeTruthy();
+  });
+
+  it('restores an awaiting mod update approval after the app reloads', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'list_mod_integration_requests') {
+        return Promise.resolve([
+          {
+            id: 'request-restored',
+            environmentId: 'beta',
+            operation: 'requestUpdate',
+            status: 'awaiting-user-approval',
+            modFileName: 'Example.dll',
+            modName: 'Example Mod',
+            currentVersion: '1.0.0.0',
+            targetVersion: '1.1.0.0',
+            source: 'thunderstore',
+            createdAt: '2026-09-14T16:00:00Z',
+            updatedAt: '2026-09-14T16:00:00Z',
+          },
+        ]);
+      }
+      if (command === 'get_telemetry_capability') return Promise.resolve({ available: false });
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'beta',
+          name: 'Beta',
+          appId: '3164500',
+          branch: 'beta',
+          outputDir: 'C:/Games/Beta',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Mod update request')).toBeTruthy();
+    expect(screen.getByText((_, element) => (
+      element?.tagName === 'P'
+      && element.textContent === 'Example Mod requested an update from 1.0.0.0 to 1.1.0.0 for Beta.'
+    ))).toBeTruthy();
+  });
+
+  it('restores a local mod management request and explains that SIMM will manage the existing install', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'list_mod_integration_requests') {
+        return Promise.resolve([{
+          id: 'management-restored',
+          environmentId: 'beta',
+          operation: 'requestManagement',
+          status: 'awaiting-user-source',
+          modFileName: 'LocalMod.dll',
+          modName: 'Local Mod',
+          currentVersion: '1.0.0.0',
+          source: 'local',
+          createdAt: '2026-09-14T16:30:00Z',
+          updatedAt: '2026-09-14T16:30:00Z',
+        }]);
+      }
+      if (command === 'get_telemetry_capability') return Promise.resolve({ available: false });
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [{
+        id: 'beta',
+        name: 'Beta',
+        appId: '3164500',
+        branch: 'beta',
+        outputDir: 'C:/Games/Beta',
+        runtime: 'IL2CPP',
+        status: 'completed',
+      }],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Mod management request')).toBeTruthy();
+    expect(screen.getByText((_, element) => (
+      element?.tagName === 'P'
+      && element.textContent === 'Local Mod asked SIMM to manage its existing local installation for Beta.'
+    ))).toBeTruthy();
   });
 
   it('shows a release and changelog feed on the Home dashboard', async () => {

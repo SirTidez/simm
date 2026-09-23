@@ -28,6 +28,14 @@ Only edit the surfaces the user requested or the release task truly requires.
 - Manifest validation should ensure `windows-x86_64` exists, URL points at the signed installer, and signature is present.
 - PowerShell JSON edits that add nested keys should operate on hashtables rather than `PSCustomObject` shapes.
 
+## Managed Mod Integration Artifacts
+
+- Manual Beta publication includes `Simm.ModIntegration.<version>.nupkg` for mod developers.
+- Publish separate `Simm.ModIntegration.Bridge.Mono.<version>.zip` and `Simm.ModIntegration.Bridge.IL2CPP.<version>.zip` archives.
+- Each runtime archive must preserve the deployment layout: the MelonLoader bridge under `Plugins` and the abstraction/core assemblies under `UserLibs`.
+- Resolve both runtime builds from a pinned MelonLoader release archive and verify its SHA-256 before using the assemblies as compiler references.
+- Include all managed integration assets in the release checksum and final draft asset verification gates.
+
 ## Changelog Rules
 
 - Follow the user-requested source of truth: committed history, branch history, or local changes.

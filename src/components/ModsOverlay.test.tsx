@@ -11,6 +11,9 @@ const apiMocks = vi.hoisted(() => ({
   checkModUpdates: vi.fn(),
   getModUpdatesSummary: vi.fn(),
   updateMod: vi.fn(),
+  deleteMod: vi.fn(),
+  disableMod: vi.fn(),
+  enableMod: vi.fn(),
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
   scanInstalledModForSecurity: vi.fn(),
@@ -23,6 +26,11 @@ const apiMocks = vi.hoisted(() => ({
   uploadMod: vi.fn(),
   exportEnvironmentProfile: vi.fn(),
   saveModProfileFile: vi.fn(),
+  getLocalModExistingSourceHint: vi.fn(),
+  previewLocalModSourceLink: vi.fn(),
+  getLocalModOwnershipCandidates: vi.fn(),
+  promoteLocalModToManaged: vi.fn(),
+  resolveModIntegrationRequest: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -91,6 +99,9 @@ describe('ModsOverlay', () => {
     apiMocks.checkModUpdates.mockReset();
     apiMocks.getModUpdatesSummary.mockReset();
     apiMocks.updateMod.mockReset();
+    apiMocks.deleteMod.mockReset();
+    apiMocks.disableMod.mockReset();
+    apiMocks.enableMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.scanInstalledModForSecurity.mockReset();
@@ -103,6 +114,11 @@ describe('ModsOverlay', () => {
     apiMocks.uploadMod.mockReset();
     apiMocks.exportEnvironmentProfile.mockReset();
     apiMocks.saveModProfileFile.mockReset();
+    apiMocks.getLocalModExistingSourceHint.mockReset();
+    apiMocks.previewLocalModSourceLink.mockReset();
+    apiMocks.getLocalModOwnershipCandidates.mockReset();
+    apiMocks.promoteLocalModToManaged.mockReset();
+    apiMocks.resolveModIntegrationRequest.mockReset();
     eventMocks.onModsChanged.mockReset();
     eventMocks.onModsSnapshotUpdated.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
@@ -119,6 +135,9 @@ describe('ModsOverlay', () => {
     apiMocks.checkModUpdates.mockResolvedValue([]);
     apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 0, updates: [] });
     apiMocks.updateMod.mockResolvedValue({ success: true });
+    apiMocks.deleteMod.mockResolvedValue(undefined);
+    apiMocks.disableMod.mockResolvedValue(undefined);
+    apiMocks.enableMod.mockResolvedValue(undefined);
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.getModSecurityScanReport.mockResolvedValue(null);
     apiMocks.scanInstalledModForSecurity.mockResolvedValue({
@@ -170,6 +189,18 @@ describe('ModsOverlay', () => {
       ],
     });
     apiMocks.saveModProfileFile.mockResolvedValue(undefined);
+    apiMocks.getLocalModExistingSourceHint.mockResolvedValue(null);
+    apiMocks.previewLocalModSourceLink.mockResolvedValue({
+      source: 'nexusmods',
+      sourceId: '123',
+      sourceUrl: 'https://www.nexusmods.com/schedule1/mods/123',
+      displayName: 'PackRat',
+      author: 'SirTidez',
+      versions: [{ key: 'file-1', version: '2.1.0.0', isLatest: true }],
+    });
+    apiMocks.getLocalModOwnershipCandidates.mockResolvedValue([]);
+    apiMocks.promoteLocalModToManaged.mockResolvedValue({ success: true, storageId: 'storage-1' });
+    apiMocks.resolveModIntegrationRequest.mockResolvedValue({});
     saveMock.mockResolvedValue('C:\\Profiles\\test-env.json');
     eventMocks.onModsChanged.mockResolvedValue(() => {});
     eventMocks.onModsSnapshotUpdated.mockImplementation(async (handler) => {
@@ -839,6 +870,199 @@ describe('ModsOverlay', () => {
 
     expect(document.querySelector('.workspace-collection-shell')).not.toBeNull();
     expect(document.querySelector('.mods-env-layout--grid')).toBeNull();
+  });
+
+  it('searches both providers and keeps a spaced Nexus title as a source candidate', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [{
+        name: 'PackRat-IL2CPP',
+        fileName: 'PackRat-IL2CPP.dll',
+        path: 'C:/env/Mods/PackRat-IL2CPP.dll',
+        version: '2.1.0.0',
+        author: 'SirTidez',
+        source: 'local',
+        managed: false,
+        disabled: false,
+      }],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.searchNexusMods.mockResolvedValue({
+      mods: [{
+        mod_id: 123,
+        name: 'Pack Rat',
+        author: 'SirTidez',
+        uploader: 'SirTidez',
+        version: '2.1.0.0',
+      }],
+    });
+
+    const view = render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        navigationState={{
+          modsTab: 'installed',
+          localSourceLinkRequest: {
+            requestId: 'management-1',
+            fileName: 'PackRat-IL2CPP.dll',
+          },
+        }}
+      />,
+    );
+    view.rerender(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        navigationState={{ modsTab: 'installed' }}
+      />,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'Link Mod Source' })).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.searchNexusMods).toHaveBeenCalledWith('schedule1', 'PackRat');
+      expect(apiMocks.searchThunderstoreByRuntime).toHaveBeenCalledWith('schedule-i', 'PackRat');
+    });
+    expect(document.querySelector('.workspace-inspector-link-panel__summary strong')?.textContent).toBe('PackRat');
+    expect(document.querySelector('.workspace-inspector-link-panel__summary span')?.textContent).toBe('PackRat-IL2CPP.dll');
+    expect(await screen.findByText('Pack Rat')).toBeTruthy();
+    expect(screen.getByText('NexusMods')).toBeTruthy();
+    expect(screen.getByText('Name + author match')).toBeTruthy();
+    expect(screen.getByText('Installed version found')).toBeTruthy();
+  });
+
+  it('supports Ctrl-click, Shift-click, Ctrl+A, and bulk disable for visible installed mods', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Alpha Mod',
+          fileName: 'Alpha.Mod.dll',
+          path: 'C:/env/Mods/Alpha.Mod.dll',
+          source: 'local',
+          disabled: false,
+        },
+        {
+          name: 'Bravo Mod',
+          fileName: 'Bravo.Mod.dll',
+          path: 'C:/env/Mods/Bravo.Mod.dll',
+          source: 'local',
+          disabled: false,
+        },
+        {
+          name: 'Charlie Mod',
+          fileName: 'Charlie.Mod.dll',
+          path: 'C:/env/Mods/Charlie.Mod.dll',
+          source: 'local',
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 3,
+    });
+    const onModsChanged = vi.fn();
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        onModsChanged={onModsChanged}
+      />
+    );
+
+    const alpha = await screen.findByRole('button', { name: 'Open details for Alpha Mod' });
+    const bravo = screen.getByRole('button', { name: 'Open details for Bravo Mod' });
+    const charlie = screen.getByRole('button', { name: 'Open details for Charlie Mod' });
+
+    fireEvent.click(alpha);
+    fireEvent.click(charlie, { shiftKey: true });
+    const bulkToolbar = await screen.findByRole('toolbar', { name: 'Selected mod actions' });
+    expect(within(bulkToolbar).getByText('3 mods selected')).toBeTruthy();
+    expect(alpha).toHaveAttribute('aria-pressed', 'true');
+    expect(bravo).toHaveAttribute('aria-pressed', 'true');
+    expect(charlie).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(bravo, { ctrlKey: true });
+    await waitFor(() => expect(within(bulkToolbar).getByText('2 mods selected')).toBeTruthy());
+    expect(bravo).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.keyDown(window, { key: 'a', ctrlKey: true });
+    await waitFor(() => expect(within(bulkToolbar).getByText('3 mods selected')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: /Disable selected/i }));
+    await waitFor(() => {
+      expect(apiMocks.disableMod).toHaveBeenCalledTimes(3);
+      expect(apiMocks.disableMod).toHaveBeenCalledWith('env-1', 'Alpha.Mod.dll');
+      expect(apiMocks.disableMod).toHaveBeenCalledWith('env-1', 'Bravo.Mod.dll');
+      expect(apiMocks.disableMod).toHaveBeenCalledWith('env-1', 'Charlie.Mod.dll');
+    });
+    expect(onModsChanged).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /Disable selected/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Enable selected/i })).not.toBeDisabled();
+  });
+
+  it('keeps Ctrl+A scoped away from the installed-mod search field', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Alpha Mod', fileName: 'Alpha.Mod.dll', path: 'C:/env/Mods/Alpha.Mod.dll', source: 'local' },
+        { name: 'Bravo Mod', fileName: 'Bravo.Mod.dll', path: 'C:/env/Mods/Bravo.Mod.dll', source: 'local' },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 2,
+    });
+
+    render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+
+    const search = await screen.findByPlaceholderText('Search installed mods');
+    fireEvent.keyDown(search, { key: 'a', ctrlKey: true });
+
+    expect(screen.queryByRole('toolbar', { name: 'Selected mod actions' })).toBeNull();
+  });
+
+  it('confirms and uninstalls multiple selected mods with a single list refresh', async () => {
+    const installedMods = [
+      {
+        name: 'Managed Mod',
+        fileName: 'Managed.Mod.dll',
+        path: 'C:/env/Mods/Managed.Mod.dll',
+        source: 'thunderstore',
+        managed: true,
+        modStorageId: 'managed-mod-storage',
+        disabled: false,
+      },
+      {
+        name: 'Local Mod',
+        fileName: 'Local.Mod.dll',
+        path: 'C:/env/Mods/Local.Mod.dll',
+        source: 'local',
+        managed: false,
+        disabled: false,
+      },
+    ];
+    apiMocks.getMods
+      .mockResolvedValueOnce({ mods: installedMods, modsDirectory: 'C:/env/Mods', count: 2 })
+      .mockResolvedValue({ mods: [], modsDirectory: 'C:/env/Mods', count: 0 });
+
+    render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+
+    await screen.findByRole('button', { name: 'Open details for Managed Mod' });
+    fireEvent.keyDown(window, { key: 'a', ctrlKey: true });
+    fireEvent.click(await screen.findByRole('button', { name: /Uninstall selected/i }));
+
+    expect(await screen.findByText('Uninstall 2 Selected Mods?')).toBeTruthy();
+    expect(screen.getByText(/shared-library downloads are retained/i)).toBeTruthy();
+    expect(screen.getByText(/local file will be permanently deleted/i)).toBeTruthy();
+    await new Promise((resolve) => window.setTimeout(resolve, 220));
+    fireEvent.click(screen.getByRole('button', { name: 'Uninstall 2 Mods' }));
+
+    await waitFor(() => {
+      expect(apiMocks.deleteMod).toHaveBeenCalledTimes(2);
+      expect(apiMocks.deleteMod).toHaveBeenCalledWith('env-1', 'Managed.Mod.dll');
+      expect(apiMocks.deleteMod).toHaveBeenCalledWith('env-1', 'Local.Mod.dll');
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('opens and closes the mod detail view from an installed mod card', async () => {

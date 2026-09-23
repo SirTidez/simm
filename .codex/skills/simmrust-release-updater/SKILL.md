@@ -1,6 +1,6 @@
 ---
 name: simmrust-release-updater
-description: Prepare, debug, and review SIMM changelog, versioning, release notes, GitHub Actions release workflows, Tauri updater manifests, Windows NSIS installer artifacts, and CI failures. Use for release or beta release tasks, updater JSON, signed installer artifacts, workflow PowerShell JSON mutation, changelog backfill, contributor credit normalization, or version alignment.
+description: "Prepare and diagnose SIMM releases. Use when changing version metadata, release workflows, signed installers, updater feeds, or changelogs."
 ---
 
 # SIMM Release Updater
@@ -16,6 +16,8 @@ description: Prepare, debug, and review SIMM changelog, versioning, release note
 ## Invariants
 
 - Tauri 2 Windows updater artifacts are a signed installer `.exe` plus `.exe.sig`.
+- Manual Beta releases include the versioned mod integration SDK package plus separate Mono and IL2CPP bridge deployment archives.
+- Build release bridge archives from a pinned, hash-verified MelonLoader reference package.
 - Workflow JSON mutation that adds nested keys should use hashtable-shaped PowerShell objects.
 - Public changelog entries should be feature-oriented, human-readable, and free of private contributor labels.
 - Version, package metadata, changelog, and updater surfaces should stay aligned when a release changes them.

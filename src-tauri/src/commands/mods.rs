@@ -154,7 +154,7 @@ pub(crate) async fn invalidate_mod_library_cache(reason: &'static str) {
     }
 }
 
-fn emit_environment_payload_changed_for_envs(
+pub(crate) fn emit_environment_payload_changed_for_envs(
     app: &AppHandle,
     environment_ids: impl IntoIterator<Item = String>,
 ) {
@@ -183,7 +183,7 @@ fn emit_environment_payload_changed_for_envs(
     }
 }
 
-async fn sync_active_profiles_for_envs(
+pub(crate) async fn sync_active_profiles_for_envs(
     pool: Arc<SqlitePool>,
     environment_ids: impl IntoIterator<Item = String>,
 ) {
@@ -233,7 +233,7 @@ fn detect_upload_kind(file_path: &str) -> UploadKind {
     }
 }
 
-async fn upload_mod_impl(
+pub(crate) async fn upload_mod_impl(
     db: Arc<SqlitePool>,
     settings: &Settings,
     environment_id: String,

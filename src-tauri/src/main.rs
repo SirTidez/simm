@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod cli;
 mod commands;
 mod config;
 mod db;
@@ -21,9 +22,13 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
-static DEPOT_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+static APP_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    if let Some(exit_code) = crate::cli::run_if_requested() {
+        std::process::exit(exit_code);
+    }
+
     // Initialize global logger FIRST to capture all output
     crate::utils::global_logger::init_global_logger();
     crate::utils::global_logger::init_logger_service();
@@ -131,7 +136,7 @@ fn main() {
                                     pool,
                                     app,
                                     true,
-                                    runtime_settings.snapshot().await,
+                                    runtime_settings,
                                 )
                                 .await
                             {
@@ -211,6 +216,7 @@ fn main() {
             commands::environments::import_local_environment,
             // Downloads
             commands::downloads::start_download,
+            commands::downloads::verify_environment_files,
             commands::downloads::cancel_download,
             commands::downloads::get_download_progress,
             // Auth
@@ -305,6 +311,9 @@ fn main() {
             commands::nexus_mods::get_nexus_mods_games,
             commands::nexus_mods::get_nexus_rate_limits,
             commands::nexus_mods::search_nexus_mods_mods,
+            commands::nexus_mods::browse_nexus_mods_page,
+            commands::nexus_mods::browse_nexus_collections_page,
+            commands::nexus_mods::get_nexus_collection_revision_plan,
             commands::nexus_mods::get_nexus_mods_latest_added,
             commands::nexus_mods::get_nexus_mods_latest_updated,
             commands::nexus_mods::get_nexus_mods_trending,
@@ -328,6 +337,10 @@ fn main() {
             commands::mod_update::update_mod,
             commands::mod_update::get_mod_updates_summary,
             commands::mod_update::get_all_mod_updates_summary,
+            commands::mod_integration::get_mod_integration_config,
+            commands::mod_integration::set_mod_integration_policy,
+            commands::mod_integration::list_mod_integration_requests,
+            commands::mod_integration::resolve_mod_integration_request,
             // Logs (game logs)
             commands::logs::get_log_files,
             commands::logs::read_log_file,
@@ -384,21 +397,32 @@ fn main() {
 
     app.run(|app_handle, event| match event {
         RunEvent::ExitRequested { code, api, .. }
-            if DEPOT_SHUTDOWN_STARTED
+            if APP_SHUTDOWN_STARTED
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok() =>
         {
             api.prevent_exit();
             let app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
+                if let Some(service) = app_handle
+                    .try_state::<crate::services::mod_integration::ModIntegrationService>(
+                ) {
+                    service.shutdown().await;
+                }
                 crate::commands::downloads::shutdown_downloads(&app_handle).await;
                 app_handle.exit(code.unwrap_or(0));
             });
         }
         RunEvent::Exit => {
-            // Forced exits may skip ExitRequested. Keep a synchronous bounded
-            // fallback so SIMM never intentionally leaves its child process.
-            if !DEPOT_SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+            // Framework-level forced exits may skip ExitRequested. Keep a synchronous
+            // fallback for owned listeners and download child processes. An OS hard
+            // kill cannot run cleanup; startup port recovery handles that case.
+            if !APP_SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+                if let Some(service) = app_handle
+                    .try_state::<crate::services::mod_integration::ModIntegrationService>(
+                ) {
+                    tauri::async_runtime::block_on(service.shutdown());
+                }
                 tauri::async_runtime::block_on(crate::commands::downloads::shutdown_downloads(
                     app_handle,
                 ));

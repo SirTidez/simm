@@ -16,8 +16,8 @@ use crate::types::{
     Environment, ModLibraryEntry, ModProfileApplyRequest, ModProfileApplyResult,
     ModProfileCaptureRequest, ModProfileExportRequest, ModProfileImportPlan,
     ModProfileImportPlanItem, ModProfileImportStatus, ModProfileImportSummary, ModProfileInfo,
-    ModProfileItem, ModProfileItemType, ModProfileManifest, ModProfileSaveRequest, ModSource,
-    Runtime, Settings, StoredModProfile,
+    ModProfileItem, ModProfileItemType, ModProfileManifest, ModProfileRemovalPlanItem,
+    ModProfileSaveRequest, ModSource, Runtime, Settings, StoredModProfile,
 };
 
 const PROFILE_KIND: &str = "simm.profile";
@@ -237,6 +237,7 @@ impl ModProfilesService {
                 exported_at: Utc::now().to_rfc3339(),
             },
             items,
+            collection: None,
         })
     }
 
@@ -452,10 +453,26 @@ impl ModProfilesService {
             items.push(plan_item);
         }
 
+        let removals = installed_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                plan_removals(
+                    snapshot,
+                    &target_environment
+                        .as_ref()
+                        .expect("snapshot requires target")
+                        .runtime,
+                    &items,
+                    &library.downloaded,
+                )
+            })
+            .unwrap_or_default();
+
         Ok(ModProfileImportPlan {
             profile: manifest.profile,
             target_environment_id,
             items,
+            removals,
             summary,
         })
     }
@@ -484,18 +501,43 @@ impl ModProfilesService {
             .await?;
         let mods_service = self.mods_service();
         let mut installed = 0usize;
+        let mut removed = 0usize;
         let mut skipped = 0usize;
         let mut unresolved = 0usize;
         let mut messages = Vec::new();
 
+        let partially_installed_storage_ids: HashSet<String> = plan
+            .items
+            .iter()
+            .filter(|item| item.status == ModProfileImportStatus::AlreadyInstalled)
+            .filter_map(|item| item.resolved_storage_id.clone())
+            .collect();
         let mut installed_storage_ids = HashSet::new();
         for item in &plan.items {
+            if !item.item.enabled {
+                skipped += 1;
+                continue;
+            }
             match item.status {
                 ModProfileImportStatus::ReadyToInstall => {
                     if let Some(storage_id) = item.resolved_storage_id.as_deref() {
                         if installed_storage_ids.insert(storage_id.to_string()) {
                             self.revalidate_target_environment(&target_fingerprint)
                                 .await?;
+                            if partially_installed_storage_ids.contains(storage_id) {
+                                mods_service
+                                    .uninstall_storage_mod_from_envs(
+                                        storage_id,
+                                        vec![target_environment_id.clone()],
+                                    )
+                                    .await
+                                    .with_context(|| {
+                                        format!(
+                                            "Failed to refresh partially installed package {}",
+                                            item.item.name
+                                        )
+                                    })?;
+                            }
                             match mods_service
                                 .install_storage_mod_to_envs(
                                     storage_id,
@@ -523,17 +565,21 @@ impl ModProfilesService {
                     skipped += 1;
                 }
                 _ => {
-                    unresolved += 1;
-                    messages.push(format!("{}: {}", item.item.name, item.message));
+                    skipped += 1;
+                    messages.push(format!(
+                        "{}: omitted from this activation. {}",
+                        item.item.name, item.message
+                    ));
                 }
             }
         }
 
-        let toggle_errors = self
-            .sync_profile_enabled_state(&target_environment, &plan)
+        let reconciliation = self
+            .reconcile_profile_state(&target_environment, &plan)
             .await?;
-        unresolved += toggle_errors.len();
-        messages.extend(toggle_errors);
+        removed += reconciliation.removed;
+        unresolved += reconciliation.errors.len();
+        messages.extend(reconciliation.errors);
         self.revalidate_target_environment(&target_fingerprint)
             .await?;
 
@@ -544,6 +590,7 @@ impl ModProfilesService {
         Ok(ModProfileApplyResult {
             plan: refreshed_plan,
             installed,
+            removed,
             skipped,
             unresolved,
             messages,
@@ -788,74 +835,136 @@ impl ModProfilesService {
         Ok(manifest)
     }
 
-    async fn sync_profile_enabled_state(
+    async fn reconcile_profile_state(
         &self,
         environment: &Environment,
         plan: &ModProfileImportPlan,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ProfileReconciliationResult> {
         let mods_service = self.mods_service();
         let snapshot =
             build_installed_snapshot(self.pool.clone(), &mods_service, environment).await?;
         let installed_items = installed_snapshot_items(&snapshot, &environment.runtime);
-        let desired: HashMap<String, bool> = plan
+        let desired: HashSet<String> = plan
             .items
             .iter()
             .filter(|item| {
-                item.status == ModProfileImportStatus::AlreadyInstalled
-                    || item.status == ModProfileImportStatus::ReadyToInstall
+                item.item.enabled
+                    && (item.status == ModProfileImportStatus::AlreadyInstalled
+                        || item.status == ModProfileImportStatus::ReadyToInstall)
             })
-            .map(|item| (profile_item_target_identity(&item.item), item.item.enabled))
+            .map(|item| profile_item_target_identity(&item.item))
             .collect();
+        let desired_storage_ids: HashSet<String> = plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.item.enabled
+                    && (item.status == ModProfileImportStatus::AlreadyInstalled
+                        || item.status == ModProfileImportStatus::ReadyToInstall)
+            })
+            .filter_map(|item| item.resolved_storage_id.clone())
+            .collect();
+        let explicitly_absent: HashSet<String> = plan
+            .items
+            .iter()
+            .filter(|item| {
+                !item.item.enabled
+                    || !matches!(
+                        item.status,
+                        ModProfileImportStatus::AlreadyInstalled
+                            | ModProfileImportStatus::ReadyToInstall
+                    )
+            })
+            .map(|item| profile_item_target_identity(&item.item))
+            .collect();
+        let storage_removal_counts: HashMap<String, usize> = installed_items
+            .iter()
+            .filter_map(|item| item.storage_id.as_ref())
+            .filter(|storage_id| !desired_storage_ids.contains(*storage_id))
+            .fold(HashMap::new(), |mut counts, storage_id| {
+                *counts.entry(storage_id.clone()).or_default() += 1;
+                counts
+            });
 
         let mut errors = Vec::new();
         for item in &plan.items {
             let key = profile_item_target_identity(&item.item);
-            if desired.contains_key(&key) {
+            if desired.contains(&key) {
                 if installed_items.iter().any(|installed| {
-                    profile_item_target_identity(installed) == key
-                        && installed.enabled == item.item.enabled
+                    profile_item_target_identity(installed) == key && installed.enabled
                 }) {
                     continue;
                 }
-                if let Err(error) = set_profile_item_enabled(
-                    self.pool.clone(),
-                    environment,
-                    &item.item,
-                    item.item.enabled,
-                )
-                .await
+                if let Err(error) =
+                    set_profile_item_enabled(self.pool.clone(), environment, &item.item, true).await
                 {
                     errors.push(format!(
                         "{}: failed to {}: {}",
                         profile_item_error_label(&item.item),
-                        if item.item.enabled {
-                            "enable"
-                        } else {
-                            "disable"
-                        },
+                        "enable",
                         error
                     ));
                 }
             }
         }
 
+        let mut removed = 0usize;
+        let mut removed_storage_ids = HashSet::new();
         for installed in installed_items {
             let key = profile_item_target_identity(&installed);
-            if !desired.contains_key(&key) && installed.enabled {
-                if let Err(error) =
-                    set_profile_item_enabled(self.pool.clone(), environment, &installed, false)
+            if desired.contains(&key)
+                || (installed
+                    .storage_id
+                    .as_ref()
+                    .is_some_and(|storage_id| desired_storage_ids.contains(storage_id))
+                    && installed.item_type != ModProfileItemType::Mod
+                    && !explicitly_absent.contains(&key))
+            {
+                continue;
+            }
+
+            let result = if let Some(storage_id) = installed.storage_id.as_deref() {
+                if desired_storage_ids.contains(storage_id) {
+                    remove_profile_item(self.pool.clone(), environment, &installed, true).await
+                } else {
+                    if !removed_storage_ids.insert(storage_id.to_string()) {
+                        continue;
+                    }
+                    mods_service
+                        .uninstall_storage_mod_from_envs(storage_id, vec![environment.id.clone()])
                         .await
-                {
+                        .map(|_| ())
+                }
+            } else {
+                remove_profile_item(self.pool.clone(), environment, &installed, false).await
+            };
+            match result {
+                Ok(()) => {
+                    removed += installed
+                        .storage_id
+                        .as_ref()
+                        .filter(|storage_id| !desired_storage_ids.contains(*storage_id))
+                        .and_then(|storage_id| storage_removal_counts.get(storage_id))
+                        .copied()
+                        .unwrap_or(1);
+                }
+                Err(error) => {
                     errors.push(format!(
-                        "{}: failed to disable: {}",
+                        "{}: failed to remove from the environment: {}",
                         profile_item_error_label(&installed),
                         error
                     ));
                 }
             }
         }
-        Ok(errors)
+        Ok(ProfileReconciliationResult { removed, errors })
     }
+}
+
+#[derive(Debug, Default)]
+struct ProfileReconciliationResult {
+    removed: usize,
+    errors: Vec<String>,
 }
 
 fn profile_from_row(
@@ -900,6 +1009,7 @@ fn empty_profile_manifest(name: &str, runtime: Runtime) -> ModProfileManifest {
             exported_at: Utc::now().to_rfc3339(),
         },
         items: Vec::new(),
+        collection: None,
     }
 }
 
@@ -1005,7 +1115,12 @@ fn build_managed_mod_items(
                 source_url: entry.and_then(|entry| entry.source_url.clone()),
                 runtime: Some(environment.runtime.clone()),
                 storage_id: Some(storage_id),
-                nexus_file_id: entry.and_then(|entry| parse_nexus_file_id(entry.tags.as_deref())),
+                nexus_file_id: entry.and_then(|entry| {
+                    entry
+                        .nexus_file_id
+                        .clone()
+                        .or_else(|| parse_nexus_file_id(entry.tags.as_deref()))
+                }),
                 manual_reason: None,
             }
             .into()
@@ -1173,14 +1288,27 @@ async fn build_installed_snapshot(
 ) -> Result<Value> {
     let mut snapshot = mods_service.list_mods(&environment.output_dir).await?;
     if let Some(object) = snapshot.as_object_mut() {
-        let plugins = PluginsService::new(pool)
+        let mut plugins = PluginsService::new(pool.clone())
             .list_plugins(&environment.output_dir)
             .await
             .context("Failed to list installed plugins for profile import preview")?;
-        let userlibs = UserLibsService::new()
+        let mut userlibs = UserLibsService::new()
             .list_user_libs(&environment.output_dir)
             .await
             .context("Failed to list installed UserLibs for profile import preview")?;
+        let ownership_rows = sqlx::query_scalar::<_, String>(
+            "SELECT data FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'",
+        )
+        .bind(&environment.id)
+        .fetch_all(pool.as_ref())
+        .await
+        .context("Failed to load installed package ownership for profile import preview")?;
+        let ownership: Vec<Value> = ownership_rows
+            .into_iter()
+            .filter_map(|data| serde_json::from_str(&data).ok())
+            .collect();
+        attach_snapshot_package_ownership(&mut plugins, "plugins", &ownership);
+        attach_snapshot_package_ownership(&mut userlibs, "userLibs", &ownership);
         object.insert(
             "plugins".to_string(),
             plugins
@@ -1197,6 +1325,36 @@ async fn build_installed_snapshot(
         );
     }
     Ok(snapshot)
+}
+
+fn attach_snapshot_package_ownership(snapshot: &mut Value, collection: &str, ownership: &[Value]) {
+    let Some(values) = snapshot.get_mut(collection).and_then(Value::as_array_mut) else {
+        return;
+    };
+    for value in values {
+        let Some(item_path) = read_string(value, "path") else {
+            continue;
+        };
+        let normalized_item_path = normalize_managed_relative_identity(&item_path);
+        let storage_id = ownership.iter().find_map(|metadata| {
+            let owns_path = metadata
+                .get("managedPaths")
+                .or_else(|| metadata.get("managed_paths"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|managed_path| {
+                    normalize_managed_relative_identity(managed_path) == normalized_item_path
+                });
+            owns_path
+                .then(|| read_string(metadata, "modStorageId"))
+                .flatten()
+        });
+        if let (Some(object), Some(storage_id)) = (value.as_object_mut(), storage_id) {
+            object.insert("modStorageId".to_string(), Value::String(storage_id));
+        }
+    }
 }
 
 fn plan_item(
@@ -1311,7 +1469,12 @@ fn installed_storage_id(
                         library
                             .iter()
                             .find(|entry| library_entry_storage_id_matches(entry, &storage_id))
-                            .and_then(|entry| parse_nexus_file_id(entry.tags.as_deref()))
+                            .and_then(|entry| {
+                                entry
+                                    .nexus_file_id
+                                    .clone()
+                                    .or_else(|| parse_nexus_file_id(entry.tags.as_deref()))
+                            })
                     });
                 if installed_file_id.as_deref() != Some(expected_file_id) {
                     return None;
@@ -1354,7 +1517,8 @@ fn installed_storage_id(
         }
     }
 
-    if let Some(environment) = target_environment {
+    if installed_profile_file_present(installed_mods, item) {
+        let environment = target_environment?;
         if let Some(storage_id) = installed_library_storage_id(library, environment, item) {
             return Some(storage_id);
         }
@@ -1386,7 +1550,6 @@ fn profile_item_identity(item: &ModProfileItem) -> String {
 }
 
 // Reconciliation operates on files within one validated target environment.
-// Plugin and UserLib listings do not carry package storage/source identities.
 fn profile_item_target_identity(item: &ModProfileItem) -> String {
     let path = normalize_managed_relative_identity(
         item.file_name
@@ -1452,6 +1615,7 @@ fn collect_installed_snapshot_items(
         let name = read_string(value, "name")
             .or_else(|| read_string(value, "fileName"))
             .unwrap_or_else(|| "Installed item".to_string());
+        let storage_id = installed_snapshot_storage_id(snapshot, value);
         items.push(ModProfileItem {
             item_type: item_type.clone(),
             name,
@@ -1466,11 +1630,117 @@ fn collect_installed_snapshot_items(
             source_version: read_string(value, "version"),
             source_url: read_string(value, "sourceUrl"),
             runtime: Some(runtime.clone()),
-            storage_id: read_string(value, "modStorageId"),
+            storage_id,
             nexus_file_id: None,
             manual_reason: None,
         });
     }
+}
+
+fn installed_snapshot_storage_id(snapshot: &Value, value: &Value) -> Option<String> {
+    if let Some(storage_id) = read_string(value, "modStorageId") {
+        return Some(storage_id);
+    }
+
+    let item_path = read_string(value, "path")?;
+    let normalized_item_path = normalize_managed_relative_identity(&item_path);
+    snapshot
+        .get("mods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|installed_mod| {
+            let owns_path = installed_mod
+                .get("managedPaths")
+                .or_else(|| installed_mod.get("managed_paths"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|managed_path| {
+                    normalize_managed_relative_identity(managed_path) == normalized_item_path
+                });
+            owns_path
+                .then(|| read_string(installed_mod, "modStorageId"))
+                .flatten()
+        })
+}
+
+fn plan_removals(
+    snapshot: &Value,
+    runtime: &Runtime,
+    plan_items: &[ModProfileImportPlanItem],
+    library: &[ModLibraryEntry],
+) -> Vec<ModProfileRemovalPlanItem> {
+    let desired: HashSet<String> = plan_items
+        .iter()
+        .filter(|item| {
+            item.item.enabled
+                && matches!(
+                    item.status,
+                    ModProfileImportStatus::AlreadyInstalled
+                        | ModProfileImportStatus::ReadyToInstall
+                )
+        })
+        .map(|item| profile_item_target_identity(&item.item))
+        .collect();
+    let desired_storage_ids: HashSet<&str> = plan_items
+        .iter()
+        .filter(|item| {
+            item.item.enabled
+                && matches!(
+                    item.status,
+                    ModProfileImportStatus::AlreadyInstalled
+                        | ModProfileImportStatus::ReadyToInstall
+                )
+        })
+        .filter_map(|item| item.resolved_storage_id.as_deref())
+        .collect();
+    let explicitly_absent: HashSet<String> = plan_items
+        .iter()
+        .filter(|item| {
+            !item.item.enabled
+                || !matches!(
+                    item.status,
+                    ModProfileImportStatus::AlreadyInstalled
+                        | ModProfileImportStatus::ReadyToInstall
+                )
+        })
+        .map(|item| profile_item_target_identity(&item.item))
+        .collect();
+
+    installed_snapshot_items(snapshot, runtime)
+        .into_iter()
+        .filter(|item| {
+            let identity = profile_item_target_identity(item);
+            !desired.contains(&identity)
+                && (!(item.item_type != ModProfileItemType::Mod
+                    && item
+                        .storage_id
+                        .as_deref()
+                        .is_some_and(|storage_id| desired_storage_ids.contains(storage_id)))
+                    || explicitly_absent.contains(&identity))
+        })
+        .map(|item| {
+            let recoverable = item.storage_id.as_deref().is_some_and(|storage_id| {
+                library
+                    .iter()
+                    .any(|entry| library_entry_storage_id_matches(entry, storage_id))
+            });
+            let message = if recoverable {
+                "Will be removed from this environment and remain available in the mod library."
+                    .to_string()
+            } else {
+                "Will be permanently removed from this environment because SIMM has no library copy to restore."
+                    .to_string()
+            };
+            ModProfileRemovalPlanItem {
+                item,
+                recoverable,
+                message,
+            }
+        })
+        .collect()
 }
 
 async fn set_profile_item_enabled(
@@ -1774,8 +2044,53 @@ fn library_entry_installed_in_environment_for_runtime(
 
 fn library_entry_nexus_file_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
     item.nexus_file_id.as_deref().is_none_or(|expected| {
-        parse_nexus_file_id(entry.tags.as_deref()).as_deref() == Some(expected)
+        entry
+            .nexus_file_id
+            .clone()
+            .or_else(|| parse_nexus_file_id(entry.tags.as_deref()))
+            .as_deref()
+            == Some(expected)
     })
+}
+
+async fn remove_profile_item(
+    pool: Arc<SqlitePool>,
+    environment: &Environment,
+    item: &ModProfileItem,
+    preserve_package: bool,
+) -> Result<()> {
+    let file_name = item
+        .file_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&item.name);
+    match item.item_type {
+        ModProfileItemType::Mod => {
+            let service = ModsService::new(pool);
+            if preserve_package {
+                service
+                    .delete_mod_file_only(&environment.output_dir, file_name)
+                    .await
+            } else {
+                service.delete_mod(&environment.output_dir, file_name).await
+            }
+        }
+        ModProfileItemType::Plugin => {
+            PluginsService::new(pool)
+                .delete_plugin(&environment.output_dir, file_name)
+                .await
+        }
+        ModProfileItemType::Userlib => {
+            let actual_name = if item.enabled {
+                file_name.to_string()
+            } else {
+                format!("{file_name}.disabled")
+            };
+            UserLibsService::new()
+                .delete_user_lib(&environment.output_dir, &actual_name)
+                .await
+        }
+    }
 }
 
 fn library_entry_version_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
@@ -2020,6 +2335,7 @@ fn plan_to_manifest(plan: &ModProfileImportPlan) -> ModProfileManifest {
         updated_at: None,
         profile: plan.profile.clone(),
         items: plan.items.iter().map(|item| item.item.clone()).collect(),
+        collection: None,
     }
 }
 
@@ -2060,6 +2376,7 @@ mod tests {
             attached_userdata: Vec::new(),
             source: Some(ModSource::Thunderstore),
             source_id: Some(source_id.to_string()),
+            nexus_file_id: None,
             source_version: Some("1.0.0".to_string()),
             source_url: None,
             summary: None,
@@ -2121,6 +2438,7 @@ mod tests {
                 exported_at: "2026-05-31T00:00:00Z".to_string(),
             },
             items: vec![profile_item()],
+            collection: None,
         }
     }
 
@@ -2215,7 +2533,11 @@ mod tests {
                 &[wanted],
                 Some(&serde_json::json!({})),
             );
-            assert_eq!(matching.status, ModProfileImportStatus::AlreadyInstalled);
+            assert_eq!(
+                matching.status,
+                ModProfileImportStatus::ReadyToInstall,
+                "stale library installation metadata must not override an empty target snapshot"
+            );
             assert_eq!(
                 matching.resolved_storage_id.as_deref(),
                 Some("wanted-file-storage")
@@ -2384,14 +2706,13 @@ mod tests {
                 resolved_storage_id: Some("missing-storage".to_string()),
                 message: "fixture".to_string(),
             }],
+            removals: Vec::new(),
             summary: ModProfileImportSummary::default(),
         };
 
-        let errors = service
-            .sync_profile_enabled_state(&environment, &plan)
-            .await?;
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("Missing.dll"));
+        let result = service.reconcile_profile_state(&environment, &plan).await?;
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("Missing.dll"));
         Ok(())
     }
 
@@ -2429,23 +2750,27 @@ mod tests {
             profile: profile_manifest().profile,
             target_environment_id: Some(environment.id.clone()),
             items: plan_items,
+            removals: Vec::new(),
             summary: ModProfileImportSummary::default(),
         };
-        let errors = service
-            .sync_profile_enabled_state(&environment, &plan)
-            .await?;
+        let result = service.reconcile_profile_state(&environment, &plan).await?;
         let plugin = PathBuf::from(&environment.output_dir).join("Plugins/LoaderPlugin.dll");
         let userlib = PathBuf::from(&environment.output_dir).join("UserLibs/Dependency.dll");
         assert!(plugin.exists() && userlib.exists(),
-            "Requested enabled companions were disabled: plugin_enabled={}, userlib_enabled={}, errors={errors:?}",
-            plugin.exists(), userlib.exists());
-        assert!(errors.is_empty(), "Unexpected errors: {errors:?}");
+            "Requested enabled companions were removed: plugin_enabled={}, userlib_enabled={}, errors={:?}",
+            plugin.exists(), userlib.exists(), result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "Unexpected errors: {:?}",
+            result.errors
+        );
         Ok(())
     }
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn apply_profile_installs_reconciles_and_only_activates_complete_results() -> Result<()> {
+    async fn apply_profile_projects_exact_available_state_and_activates_with_missing_items(
+    ) -> Result<()> {
         let temp = tempfile::tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
@@ -2523,7 +2848,8 @@ mod tests {
                 b"fixture"
             );
         }
-        assert!(output_dir.join("Mods/Optional.dll.disabled").exists());
+        assert!(!output_dir.join("Mods/Optional.dll").exists());
+        assert!(!output_dir.join("Mods/Optional.dll.disabled").exists());
         let exported = service.export_environment_profile(&environment.id).await?;
         assert_eq!(exported.items.len(), 3);
         assert!(exported
@@ -2534,6 +2860,14 @@ mod tests {
         for folder in ["Mods", "Plugins", "UserLibs"] {
             tokio::fs::write(output_dir.join(folder).join("Unrequested.dll"), b"other").await?;
         }
+        let removal_preview = service
+            .preview_profile_apply(&saved.id, environment.id.clone())
+            .await?;
+        assert_eq!(removal_preview.removals.len(), 3);
+        assert!(removal_preview
+            .removals
+            .iter()
+            .all(|removal| !removal.recoverable));
         for enabled_states in [
             [true, true, true],
             [false, true, false],
@@ -2556,27 +2890,28 @@ mod tests {
             let result = service
                 .apply_profile(&saved.id, environment.id.clone())
                 .await?;
-            assert_eq!(result.unresolved, 0, "{:?}", result.messages);
-            assert_eq!(result.installed, 0);
+            assert_eq!(
+                result.unresolved, 0,
+                "states={enabled_states:?}: {:?}",
+                result.messages
+            );
+            assert!(result.installed <= 1);
             for ((_, folder, name), enabled) in files.iter().zip(enabled_states) {
                 assert_eq!(output_dir.join(folder).join(name).exists(), enabled);
-                assert_eq!(
-                    output_dir
-                        .join(folder)
-                        .join(format!("{name}.disabled"))
-                        .exists(),
-                    !enabled
-                );
+                assert!(!output_dir
+                    .join(folder)
+                    .join(format!("{name}.disabled"))
+                    .exists());
             }
             for folder in ["Mods", "Plugins", "UserLibs"] {
                 assert!(!output_dir.join(folder).join("Unrequested.dll").exists());
-                assert!(output_dir
+                assert!(!output_dir
                     .join(folder)
                     .join("Unrequested.dll.disabled")
                     .exists());
             }
             assert!(!output_dir.join("Mods/Optional.dll").exists());
-            assert!(output_dir.join("Mods/Optional.dll.disabled").exists());
+            assert!(!output_dir.join("Mods/Optional.dll.disabled").exists());
         }
 
         let before: (String, Option<String>) = sqlx::query_as(
@@ -2590,7 +2925,8 @@ mod tests {
         let result = service
             .apply_profile(&missing.id, environment.id.clone())
             .await?;
-        assert_eq!(result.unresolved, 1);
+        assert_eq!(result.unresolved, 0, "{:?}", result.messages);
+        assert_eq!(result.skipped, 1);
         assert_eq!(
             result.plan.items[0].status,
             ModProfileImportStatus::NeedsDownload
@@ -2599,10 +2935,9 @@ mod tests {
         let after: (String, Option<String>) = sqlx::query_as(
             "SELECT active_profile_id, last_applied_at FROM environment_profiles WHERE environment_id = ?",
         ).bind(&environment.id).fetch_one(pool.as_ref()).await?;
-        assert_eq!(
-            after, before,
-            "an incomplete apply must preserve the last successful activation"
-        );
+        assert_eq!(after.0, missing.id);
+        assert!(after.1.is_some());
+        assert_ne!(after.0, before.0);
         Ok(())
     }
 
@@ -2709,7 +3044,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_item_marks_source_less_managed_plugin_already_installed_by_file() {
+    fn plan_item_reinstalls_when_library_metadata_is_stale_but_target_file_is_missing() {
         let env = test_environment(Runtime::Mono);
         let mut item = profile_item();
         item.item_type = ModProfileItemType::Plugin;
@@ -2728,7 +3063,7 @@ mod tests {
 
         let planned = plan_item(item, Some(&env), &[entry], Some(&serde_json::json!({})));
 
-        assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+        assert_eq!(planned.status, ModProfileImportStatus::ReadyToInstall);
         assert_eq!(
             planned.resolved_storage_id.as_deref(),
             Some("meshvault-storage")

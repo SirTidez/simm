@@ -45,7 +45,7 @@ describe('SteamAccountOverlay', () => {
     apiMocks.beginNexusOAuthLogin.mockResolvedValue({
       authorizeUrl: 'https://nexusmods.com/oauth/start',
       state: 'state-123',
-      redirectUri: 'simm://oauth',
+      redirectUri: 'simm://oauth/nexus/callback',
     });
   });
 
@@ -63,6 +63,23 @@ describe('SteamAccountOverlay', () => {
     });
 
     expect(screen.getByRole('button', { name: 'Waiting for Nexus authorization...' })).toBeTruthy();
+  });
+
+  it('refreshes the Nexus account after the registered protocol callback completes', async () => {
+    apiMocks.getNexusOAuthStatus
+      .mockResolvedValueOnce({ connected: false })
+      .mockResolvedValue({
+        connected: true,
+        account: { name: 'Test Nexus User', isPremium: true, canDirectDownload: true },
+      });
+
+    render(<SteamAccountOverlay isOpen={true} onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Login with Nexus' }));
+    window.dispatchEvent(new CustomEvent('nexus-oauth-result', {
+      detail: { success: true },
+    }));
+
+    expect(await screen.findByText('Test Nexus User')).toBeTruthy();
   });
 
   it('shows Steam QR login as the primary account action', async () => {

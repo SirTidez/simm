@@ -1,3 +1,4 @@
+use crate::services::mod_integration::is_mod_integration_infrastructure_file;
 use crate::types::{ModMetadata, ModSource};
 use anyhow::{Context, Result};
 use chrono;
@@ -745,7 +746,9 @@ impl PluginsService {
             if path.is_file() {
                 let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let lower_name = file_name.to_lowercase();
-                if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
+                if (lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled"))
+                    && !is_mod_integration_infrastructure_file(file_name)
+                {
                     let path_string = path.to_string_lossy().to_string();
                     dll_files.push((path_string, file_name.to_string()));
                 }
@@ -1302,6 +1305,13 @@ mod tests {
                 "v1.2.3",
             )
             .await?;
+        fs::write(
+            output_dir
+                .join("Plugins")
+                .join("Simm.ModIntegration.Bridge.MelonLoader.dll"),
+            b"simm infrastructure",
+        )
+        .await?;
 
         let status = service
             .get_mlvscan_installation_status(output_dir.to_string_lossy().as_ref())

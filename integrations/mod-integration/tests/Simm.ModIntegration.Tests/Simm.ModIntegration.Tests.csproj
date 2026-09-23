@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Simm.ModIntegration.Tests</AssemblyName>
+    <RootNamespace>Simm.ModIntegration.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Simm.ModIntegration.Abstractions/Simm.ModIntegration.Abstractions.csproj" />
+    <ProjectReference Include="../../src/Simm.ModIntegration.Bridge.Core/Simm.ModIntegration.Bridge.Core.csproj" />
+  </ItemGroup>
+</Project>

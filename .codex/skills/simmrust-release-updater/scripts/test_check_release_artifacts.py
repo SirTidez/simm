@@ -153,6 +153,48 @@ class ReleaseArtifactChecks(unittest.TestCase):
             self.assertTrue(any("does not match" in issue for issue in issues))
             self.assertTrue(any("stale or wrong-version" in issue for issue in issues))
 
+    def test_beta_artifacts_require_versioned_mod_integration_packages(self) -> None:
+        version = "0.8.7-beta.1"
+        mod_integration_version = "0.1.0"
+        names = release_check.expected_artifact_names(version)
+        integration_names = release_check.expected_mod_integration_artifact_names(
+            mod_integration_version
+        )
+        signature = test_signature()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in [*names.values(), *integration_names]:
+                (root / name).write_bytes(f"bytes:{name}".encode("utf-8"))
+            for platform in ("windows-x86_64", "linux-x86_64"):
+                (root / f"{names[platform]}.sig").write_text(
+                    signature, encoding="utf-8"
+                )
+            checksum_names = [*names.values(), *integration_names]
+            checksum_lines = [
+                f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}"
+                for name in checksum_names
+            ]
+            (root / "SHA256SUMS").write_text(
+                "\n".join(checksum_lines) + "\n", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                release_check.check_artifacts(
+                    root, version, mod_integration_version
+                ),
+                [],
+            )
+
+            missing_name = integration_names[1]
+            (root / missing_name).unlink()
+            stale_name = "Simm.ModIntegration.Bridge.Mono.0.0.9.zip"
+            (root / stale_name).write_bytes(b"stale")
+            issues = release_check.check_artifacts(
+                root, version, mod_integration_version
+            )
+            self.assertTrue(any(missing_name in issue for issue in issues))
+            self.assertTrue(any(stale_name in issue for issue in issues))
+
     def test_manifest_signature_must_match_artifact_sidecar(self) -> None:
         version = "0.8.7-beta.1"
         names = release_check.expected_artifact_names(version)

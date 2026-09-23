@@ -1,7 +1,7 @@
 use crate::services::depot_downloader::DepotDownloaderService;
 use crate::services::environment::EnvironmentService;
 use crate::services::settings::{RuntimeSettingsState, SettingsService};
-use crate::types::{DepotDownloadOptions, DownloadProgress};
+use crate::types::{DepotDownloadOptions, DepotOperation, DownloadProgress, EnvironmentType};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -88,12 +88,90 @@ pub async fn start_download(
     app: AppHandle,
     one_time_credentials: Option<OneTimeDownloadCredentials>,
 ) -> Result<serde_json::Value, String> {
+    start_depot_operation(
+        db,
+        runtime_settings,
+        environment_id,
+        app,
+        one_time_credentials,
+        DepotOperation::Download,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn verify_environment_files(
+    db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
+    environment_id: String,
+    app: AppHandle,
+    one_time_credentials: Option<OneTimeDownloadCredentials>,
+) -> Result<serde_json::Value, String> {
+    start_depot_operation(
+        db,
+        runtime_settings,
+        environment_id,
+        app,
+        one_time_credentials,
+        DepotOperation::Verify,
+    )
+    .await
+}
+
+async fn start_depot_operation(
+    db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
+    environment_id: String,
+    app: AppHandle,
+    one_time_credentials: Option<OneTimeDownloadCredentials>,
+    operation: DepotOperation,
+) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service
         .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
+
+    if operation == DepotOperation::Verify {
+        if matches!(
+            env.environment_type,
+            Some(EnvironmentType::Steam) | Some(EnvironmentType::Local)
+        ) {
+            return Err(
+                "File verification is only supported for SIMM-managed DepotDownloader environments."
+                    .to_string(),
+            );
+        }
+
+        let metadata = tokio::fs::metadata(&env.output_dir)
+            .await
+            .map_err(|_| {
+                "The environment folder is missing. Download or restore the environment before verifying its files."
+                    .to_string()
+            })?;
+        if !metadata.is_dir() {
+            return Err(
+                "The environment path is not a directory and cannot be verified.".to_string(),
+            );
+        }
+
+        let running_directories =
+            crate::services::game_session_monitor::running_schedule_directories()
+                .await
+                .map_err(|error| {
+                    format!("SIMM could not safely check whether Schedule I is running: {error}")
+                })?;
+        let environment_directory = crate::services::game_session_monitor::normalize_path(
+            std::path::Path::new(&env.output_dir),
+        );
+        if running_directories.contains(&environment_directory) {
+            return Err(format!(
+                "Close Schedule I for {} before verifying its game files.",
+                env.name
+            ));
+        }
+    }
 
     let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let settings = runtime_settings.snapshot().await;
@@ -134,6 +212,7 @@ pub async fn start_download(
     let depot_platform =
         DepotDownloaderService::resolve_depot_platform(&env.app_id, settings.platform.clone());
     let configured_depot_downloader = settings.depot_downloader_path.clone();
+    let previous_status = env.status.clone();
 
     let options = DepotDownloadOptions {
         app_id: env.app_id,
@@ -143,7 +222,7 @@ pub async fn start_download(
         password: one_time_password,
         remember_credentials,
         steam_guard: one_time_steam_guard,
-        validate: None,
+        validate: (operation == DepotOperation::Verify).then_some(true),
         os: Some(depot_platform),
         language: Some(settings.language),
         max_downloads: Some(settings.max_concurrent_downloads),
@@ -166,6 +245,7 @@ pub async fn start_download(
             options,
             app,
             configured_depot_downloader.as_deref(),
+            previous_status.clone(),
         )
         .await
     {
@@ -174,7 +254,7 @@ pub async fn start_download(
                 &environment_id,
                 vec![(
                     "status".to_string(),
-                    serde_json::to_value(&env.status).expect("environment status serializes"),
+                    serde_json::to_value(&previous_status).expect("environment status serializes"),
                 )],
             )
             .await
@@ -188,7 +268,11 @@ pub async fn start_download(
         return Err(error.to_string());
     }
 
-    Ok(serde_json::json!({ "success": true, "downloadId": environment_id }))
+    Ok(serde_json::json!({
+        "success": true,
+        "downloadId": environment_id,
+        "operation": operation
+    }))
 }
 
 #[tauri::command]

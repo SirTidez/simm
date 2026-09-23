@@ -28,8 +28,10 @@ import {
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
+import { ModIntegrationDialog } from './ModIntegrationDialog';
 import {
   createAsyncListenerScope,
   onAuthWaiting,
@@ -112,6 +114,18 @@ function profileFileName(name: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
   return `${slug || 'simm-profile'}.json`;
+}
+
+function formatProgressBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Math.max(0, bytes);
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function isLinuxMelonLoaderSetupMessage(message: string): boolean {
@@ -293,7 +307,7 @@ interface EnvironmentListProps {
 export type WorkspaceRoute =
   | { view: 'home' }
   | { view: 'environments' }
-  | { view: 'profiles' }
+  | { view: 'profiles'; profileId?: string | null }
   | { view: 'saveBackups' }
   | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
   | { view: 'securityReport' }
@@ -318,10 +332,11 @@ export function EnvironmentList({
   onOpenWorkspace,
   onSelectEnvironment
 }: EnvironmentListProps) {
-  const { environments, loading, error, progress, activeGameDownloadId, startDownload, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion, ensureEnvironments } = useEnvironmentStore();
+  const { environments, loading, error, progress, activeGameDownloadId, startDownload, verifyEnvironmentFiles, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion, ensureEnvironments } = useEnvironmentStore();
   const { library, ensureLibrary, refreshLibrary } = useModLibraryStore();
   const { settings } = useSettingsStore();
-  const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
+  const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string; operation?: 'download' | 'verify' }>({ isOpen: false, envId: null, waiting: false });
+  const depotOperationRef = useRef<Map<string, 'download' | 'verify'>>(new Map());
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
   const [descriptionValue, setDescriptionValue] = useState<string>('');
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -458,14 +473,16 @@ export function EnvironmentList({
   }>>>(new Map());
   const [loadingMelonLoaderReleases, setLoadingMelonLoaderReleases] = useState<Set<string>>(new Set());
   const [showMelonLoaderVersionSelector, setShowMelonLoaderVersionSelector] = useState<string | null>(null);
+  const [showNightlyMelonLoaderBuilds, setShowNightlyMelonLoaderBuilds] = useState(false);
   const [selectedMelonLoaderVersion, setSelectedMelonLoaderVersion] = useState<Map<string, string>>(new Map());
   const [installingMelonLoader, setInstallingMelonLoader] = useState<Set<string>>(new Set());
   const [launchingEnvironmentIds, setLaunchingEnvironmentIds] = useState<Set<string>>(new Set());
   const launchingEnvironmentIdsRef = useRef<Set<string>>(new Set());
   const [messageOverlay, setMessageOverlay] = useState<{ isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info' }>({ isOpen: false, title: '', message: '', type: 'info' });
-  const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; confirmText?: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
+  const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; confirmText?: string; cancelText?: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
   const [environmentMenu, setEnvironmentMenu] = useState<{ envId: string; x: number; y: number } | null>(null);
+  const [modIntegrationEnvironmentId, setModIntegrationEnvironmentId] = useState<string | null>(null);
   const [preferredLaunchMethod, setPreferredLaunchMethod] = useState<Map<string, 'steam' | 'direct'>>(() => {
     // Load from localStorage on init
     try {
@@ -629,16 +646,17 @@ export function EnvironmentList({
   const handleStartDownload = async (env: Environment) => {
     try {
       if (activeGameDownloadId && activeGameDownloadId !== env.id) {
-        showMessage('Game Operation In Progress', `${activeGameDownloadName ?? 'Another environment'} is already downloading or updating. Wait for it to finish before starting ${env.name}.`, 'info');
+        showMessage('Game Operation In Progress', `${activeGameDownloadName ?? 'Another environment'} is already downloading, updating, or being verified. Wait for it to finish before starting ${env.name}.`, 'info');
         return;
       }
       rememberEnvironment(env.id);
+      depotOperationRef.current.set(env.id, 'download');
       // Check if we have credentials
       const hasCredentials = settings?.steamUsername;
 
       if (!hasCredentials) {
         // Show authentication modal
-        setAuthModal({ isOpen: true, envId: env.id, waiting: false });
+        setAuthModal({ isOpen: true, envId: env.id, waiting: false, operation: 'download' });
         return;
       }
 
@@ -647,16 +665,59 @@ export function EnvironmentList({
     } catch (err: any) {
       // Check if error indicates authentication is required
       if (err?.response?.data?.requiresAuth || err?.message?.includes('authentication')) {
-        setAuthModal({ isOpen: true, envId: env.id, waiting: false });
+        setAuthModal({ isOpen: true, envId: env.id, waiting: false, operation: 'download' });
       } else {
         showMessage('Download Failed', `Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
       }
     }
   };
 
+  const handleVerifyEnvironmentFiles = async (env: Environment) => {
+    try {
+      if (activeGameDownloadId) {
+        showMessage(
+          'Game Operation In Progress',
+          `${activeGameDownloadName ?? 'Another environment'} is already downloading, updating, or being verified. Wait for it to finish before verifying ${env.name}.`,
+          'info',
+        );
+        return;
+      }
+
+      rememberEnvironment(env.id);
+      depotOperationRef.current.set(env.id, 'verify');
+      if (!settings?.steamUsername) {
+        setAuthModal({ isOpen: true, envId: env.id, waiting: false, operation: 'verify' });
+        return;
+      }
+
+      await verifyEnvironmentFiles(env.id);
+    } catch (err: any) {
+      if (err?.response?.data?.requiresAuth || err?.message?.toLowerCase().includes('authentication')) {
+        setAuthModal({ isOpen: true, envId: env.id, waiting: false, operation: 'verify' });
+      } else {
+        depotOperationRef.current.delete(env.id);
+        showMessage('Verification Failed', `Failed to start game file verification: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+      }
+    }
+  };
+
+  const handleVerifyRequest = (env: Environment) => {
+    setConfirmOverlay({
+      isOpen: true,
+      title: `Verify Game Files: ${env.name}`,
+      message: 'DepotDownloader will compare this environment with its selected Steam branch and reacquire missing or damaged official game files. Mods, Plugins, UserLibs, and other files that are not part of the Steam depot will remain in place. Close Schedule I before continuing.',
+      confirmText: 'Verify Files',
+      onConfirm: () => {
+        setConfirmOverlay({ isOpen: false, title: '', message: '', onConfirm: () => {} });
+        void handleVerifyEnvironmentFiles(env);
+      },
+    });
+  };
+
   const handleAuthenticated = async (credentials: { username: string; password: string; steamGuard: string; saveCredentials: boolean }) => {
     const environmentId = authModal.envId;
     if (!environmentId) return;
+    const operation = authModal.operation ?? depotOperationRef.current.get(environmentId) ?? 'download';
 
     // Switch to waiting state
     setAuthModal(prev => ({ ...prev, waiting: true, message: 'Authenticating with Steam...' }));
@@ -665,13 +726,27 @@ export function EnvironmentList({
       // Authenticate first (this stores session via -remember-password)
       // Authentication is handled in the modal's handleSubmit, so by the time we get here,
       // authentication should be complete. Now start the download.
-      setAuthModal(prev => ({ ...prev, waiting: true, message: 'Starting download...' }));
-      await startDownload(environmentId, credentials);
+      setAuthModal(prev => ({
+        ...prev,
+        waiting: true,
+        message: operation === 'verify' ? 'Starting game file verification...' : 'Starting download...',
+      }));
+      if (operation === 'verify') {
+        await verifyEnvironmentFiles(environmentId, credentials);
+      } else {
+        await startDownload(environmentId, credentials);
+      }
       // Close modal - download started
       setAuthModal({ isOpen: false, envId: null, waiting: false });
     } catch (err) {
       setAuthModal(prev => ({ ...prev, waiting: false }));
-      showMessage('Download Failed', `Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+      showMessage(
+        operation === 'verify' ? 'Verification Failed' : 'Download Failed',
+        operation === 'verify'
+          ? `Failed to start game file verification: ${err instanceof Error ? err.message : 'Unknown error'}`
+          : `Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
     }
   };
 
@@ -707,7 +782,7 @@ export function EnvironmentList({
           const env = environmentsRef.current.find(e => e.id === data.downloadId);
           if (data.error.toLowerCase().includes('password') || data.error.toLowerCase().includes('credential')) {
             if (env && !authModalRef.current.isOpen) {
-              setAuthModal({ isOpen: true, envId: data.downloadId, waiting: false });
+              setAuthModal({ isOpen: true, envId: data.downloadId, waiting: false, operation: depotOperationRef.current.get(data.downloadId) ?? 'download' });
             } else if (authModalRef.current.envId === data.downloadId) {
               setAuthModal(prev => ({ ...prev, waiting: false }));
             }
@@ -722,7 +797,7 @@ export function EnvironmentList({
               progress.message?.toLowerCase().includes('enter account password'))) {
             const env = environmentsRef.current.find(e => e.id === progress.downloadId);
             if (env && !authModalRef.current.isOpen) {
-              setAuthModal({ isOpen: true, envId: progress.downloadId, waiting: false });
+              setAuthModal({ isOpen: true, envId: progress.downloadId, waiting: false, operation: progress.operation ?? depotOperationRef.current.get(progress.downloadId) ?? 'download' });
             }
           }
         }));
@@ -776,8 +851,20 @@ export function EnvironmentList({
           }
         }));
 
-        listeners.register(() => onCompleteEvent(async ({ downloadId }) => {
+        listeners.register(() => onCompleteEvent(async ({ downloadId, operation }) => {
           const env = environmentsRef.current.find(e => e.id === downloadId);
+          const resolvedOperation = operation ?? depotOperationRef.current.get(downloadId) ?? 'download';
+          depotOperationRef.current.delete(downloadId);
+          if (resolvedOperation === 'verify') {
+            if (env) {
+              showMessage(
+                'Game Files Verified',
+                `${env.name} now matches its selected Steam branch. Any missing or damaged official game files were reacquired; non-depot mod files were left in place.`,
+                'success',
+              );
+            }
+            return;
+          }
           if (env) {
             void autoInstallMelonLoaderRef.current?.(downloadId);
           }
@@ -791,7 +878,9 @@ export function EnvironmentList({
                   setConfirmOverlay({
                     isOpen: true,
                     title: 'Branch Updated',
-                    message: 'The branch has been updated. Would you like to update the description to reflect what this new version means?',
+                    message: 'The branch update completed successfully. Choose whether to update its description to explain what this version is for.',
+                    confirmText: 'Update Description',
+                    cancelText: 'Keep Current Description',
                     onConfirm: () => {
                       setEditingDescription(downloadId);
                       setDescriptionValue(updatedEnv.description || '');
@@ -960,6 +1049,7 @@ export function EnvironmentList({
   const handleCancelDownload = async (env: Environment) => {
     try {
       await cancelDownload(env.id);
+      depotOperationRef.current.delete(env.id);
     } catch (err) {
       showMessage('Cancel Failed', `Failed to cancel download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
@@ -1142,10 +1232,10 @@ export function EnvironmentList({
     }
   };
 
-  const loadMelonLoaderReleases = useCallback(async (envId: string) => {
+  const loadMelonLoaderReleases = useCallback(async (envId: string, includeNightly = false) => {
     setLoadingMelonLoaderReleases(prev => new Set(prev).add(envId));
     try {
-      const releases = await ApiService.getMelonLoaderReleases(envId);
+      const releases = await ApiService.getMelonLoaderReleases(envId, includeNightly);
       setMelonLoaderReleases(prev => {
         const next = new Map(prev);
         next.set(envId, releases);
@@ -1161,14 +1251,18 @@ export function EnvironmentList({
           return next;
         });
       }
+      return true;
     } catch (err) {
       console.error('Failed to load MelonLoader releases:', err);
       setMessageOverlay({
         isOpen: true,
         title: 'Error',
-        message: 'Failed to load MelonLoader releases',
+        message: includeNightly
+          ? 'Failed to load MelonLoader nightly builds. Stable releases remain available.'
+          : 'Failed to load MelonLoader releases',
         type: 'error'
       });
+      return false;
     } finally {
       setLoadingMelonLoaderReleases(prev => {
         const next = new Set(prev);
@@ -1628,8 +1722,17 @@ export function EnvironmentList({
 
   const handleInstallMelonLoader = (env: Environment) => {
     // Load releases and show version selector
-    loadMelonLoaderReleases(env.id);
+    setShowNightlyMelonLoaderBuilds(false);
+    void loadMelonLoaderReleases(env.id, false);
     setShowMelonLoaderVersionSelector(env.id);
+  };
+
+  const handleNightlyMelonLoaderToggle = async (envId: string, checked: boolean) => {
+    setShowNightlyMelonLoaderBuilds(checked);
+    const loaded = await loadMelonLoaderReleases(envId, checked);
+    if (!loaded && checked) {
+      setShowNightlyMelonLoaderBuilds(false);
+    }
   };
 
   const autoInstallMelonLoader = useCallback(async (environmentId: string) => {
@@ -1710,6 +1813,7 @@ export function EnvironmentList({
 
   const closeMelonLoaderVersionSelector = useCallback(() => {
     setShowMelonLoaderVersionSelector(null);
+    setShowNightlyMelonLoaderBuilds(false);
     setSelectedMelonLoaderVersion(prev => {
       const next = new Map(prev);
       if (showMelonLoaderVersionSelector) {
@@ -1939,6 +2043,20 @@ export function EnvironmentList({
         },
       },
       {
+        key: 'mod-integration',
+        label: 'Mod Integration',
+        icon: 'fas fa-plug',
+        disabled: env.status !== 'completed',
+        onSelect: () => setModIntegrationEnvironmentId(env.id),
+      },
+      {
+        key: 'verify-files',
+        label: 'Verify Game Files',
+        icon: 'fas fa-shield-alt',
+        disabled: !['completed', 'error'].includes(env.status) || Boolean(activeGameDownloadId),
+        onSelect: () => handleVerifyRequest(env),
+      },
+      {
         key: 'delete',
         label: isSteam ? 'Clear Environment Records' : 'Delete Environment',
         icon: 'fas fa-trash',
@@ -1951,11 +2069,11 @@ export function EnvironmentList({
 
   const renderEnvironmentCard = (env: Environment) => {
     const prog = progress.get(env.id);
-    const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
+    const isDownloading = env.status === 'downloading' || prog?.status === 'queued' || prog?.status === 'downloading' || prog?.status === 'validating';
     const gameOperationInProgress = Boolean(activeGameDownloadId) && activeGameDownloadId !== env.id;
     const gameOperationTitle = activeGameDownloadName
-      ? `${activeGameDownloadName} is already downloading or updating.`
-      : 'Another game download or update is already running.';
+      ? `${activeGameDownloadName} is already downloading, updating, or being verified.`
+      : 'Another game download, update, or verification is already running.';
     const isSteam = isSteamEnvironment(env);
     const isCheckingUpdate = checkingEnvironments.has(env.id);
     const isCompleted = env.status === 'completed';
@@ -2221,12 +2339,12 @@ export function EnvironmentList({
             <div className="environment-card__action-row environment-card__action-row--single">
               <SimmButton variant="secondary" onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
                 <Icon name="fas fa-ban" />
-                <span>Cancel Download</span>
+                <span>{prog?.operation === 'verify' ? 'Cancel Verification' : 'Cancel Download'}</span>
               </SimmButton>
             </div>
           )}
 
-          {isCompleted && (
+          {isCompleted && !isDownloading && (
             <>
               <div className="environment-card__action-row environment-card__action-row--primary">
                 <SimmButton
@@ -2289,14 +2407,19 @@ export function EnvironmentList({
             </>
           )}
 
-          {prog && (
+          {isDownloading && prog && (
             <div className="progress-info environment-card__progress">
-              <div className="progress-bar">
+              <div className={`progress-bar${prog.progress <= 0 && !(typeof prog.downloadedBytes === 'number' && prog.downloadedBytes > 0) ? ' progress-bar--indeterminate' : ''}`}>
                 <div className="progress-fill" style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }} />
               </div>
               <p><strong>{Math.round(prog.progress)}%</strong>{prog.message ? ` • ${prog.message}` : ''}</p>
-              {typeof prog.downloadedFiles === 'number' && typeof prog.totalFiles === 'number' && prog.totalFiles > 0 && (
-                <p>Files: {prog.downloadedFiles} / {prog.totalFiles}</p>
+              {typeof prog.downloadedBytes === 'number' && prog.downloadedBytes > 0 && (
+                <p>
+                  Downloaded: {formatProgressBytes(prog.downloadedBytes)}
+                  {typeof prog.totalBytes === 'number' && prog.totalBytes > 0 ? ` / ${formatProgressBytes(prog.totalBytes)}` : ''}
+                  {prog.speed ? ` • ${prog.speed}` : ''}
+                  {prog.eta ? ` • ${prog.eta} remaining` : ''}
+                </p>
               )}
               {prog.speed && <p>Speed: {prog.speed}</p>}
             </div>
@@ -2307,7 +2430,7 @@ export function EnvironmentList({
               <Icon name="fas fa-folder-open" />
               <span>{env.outputDir}</span>
             </div>
-            {isCompleted && (
+            {isCompleted && !isDownloading && (
               <div className="environment-card__footer-meta">
                 <span className="environment-footer-chip">
                   <Icon name={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'} />
@@ -2496,6 +2619,7 @@ export function EnvironmentList({
         title={confirmOverlay.title}
         message={confirmOverlay.message}
         confirmText={confirmOverlay.confirmText}
+        cancelText={confirmOverlay.cancelText}
       />
 
       <ConfirmOverlay
@@ -2579,7 +2703,24 @@ export function EnvironmentList({
                     </div>
                     <div className="melonloader-dialog__stat-card">
                       <span className="melonloader-dialog__stat-label">Source</span>
-                      <strong className="melonloader-dialog__stat-value">GitHub</strong>
+                      <div className="melonloader-dialog__source-row">
+                        <strong className="melonloader-dialog__stat-value">GitHub</strong>
+                        <div
+                          className="melonloader-dialog__nightly-control"
+                          title="Nightly builds are experimental and unreleased."
+                        >
+                          <span>Nightlies</span>
+                          <Switch
+                            size="sm"
+                            checked={showNightlyMelonLoaderBuilds}
+                            onCheckedChange={(checked) => {
+                              void handleNightlyMelonLoaderToggle(showMelonLoaderVersionSelector, Boolean(checked));
+                            }}
+                            aria-label="Show MelonLoader nightly builds"
+                            disabled={loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector)}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -2627,7 +2768,7 @@ export function EnvironmentList({
                               )}
                               {release.isNightly ? (
                                 <span className="melonloader-dialog__tag melonloader-dialog__tag--nightly">
-                                  Alpha-Nightly
+                                  Nightly
                                 </span>
                               ) : release.prerelease && release.tag_name !== latestStableMelonLoaderTag && (
                                 <span className="melonloader-dialog__tag melonloader-dialog__tag--beta">
@@ -2715,6 +2856,17 @@ export function EnvironmentList({
         onToggleItem={handleToggleProfileItem}
         onSave={() => void handleSaveProfile()}
       />
+
+      {modIntegrationEnvironmentId && (() => {
+        const environment = environments.find((item) => item.id === modIntegrationEnvironmentId);
+        return environment ? (
+          <ModIntegrationDialog
+            isOpen={true}
+            environment={environment}
+            onClose={() => setModIntegrationEnvironmentId(null)}
+          />
+        ) : null;
+      })()}
 
       <div className="environments-grid">
         {sortEnvironmentsForDisplay(environments).map(renderEnvironmentCard)}

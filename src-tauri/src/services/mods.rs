@@ -3805,7 +3805,10 @@ impl ModsService {
             }
         };
 
-        let storage_dir = PathBuf::from(settings.default_download_dir).join("Mods");
+        let storage_dir = PathBuf::from(SettingsService::normalize_download_dir(
+            &settings.default_download_dir,
+        ))
+        .join("Mods");
         fs::create_dir_all(&storage_dir)
             .await
             .context("Failed to create mods storage directory")?;
@@ -4789,51 +4792,47 @@ impl ModsService {
             .await
             .context("Failed to read DLL file")?;
 
-        // Read first 1MB to search for version strings
-        let search_len = std::cmp::min(content.len(), 1024 * 1024);
-        let text = String::from_utf8_lossy(&content[..search_len]);
+        Self::extract_version_from_binary_content(&content)
+    }
 
-        // Look for AssemblyVersion or AssemblyFileVersion
-        let assembly_version_re =
-            Regex::new(r#"AssemblyVersion[^\x00]*?([0-9]+\.[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?)"#)
-                .context("Failed to compile regex")?;
-
-        if let Some(caps) = assembly_version_re.captures(&text) {
-            if let Some(version) = caps.get(1) {
-                return Ok(version.as_str().to_string());
+    fn extract_version_from_binary_content(content: &[u8]) -> Result<String> {
+        match portex::PeImage::parse(content) {
+            Ok(pe) => {
+                let cli = pe
+                    .clr_header()
+                    .context("Failed to parse the CLR header")?
+                    .context("DLL does not contain CLR metadata")?;
+                let metadata_bytes = pe
+                    .read_at_rva(cli.metadata_rva, cli.metadata_size as usize)
+                    .context("DLL CLR metadata range is invalid")?;
+                let metadata = clrmeta::Metadata::parse(metadata_bytes)
+                    .context("Failed to parse DLL CLR metadata")?;
+                let assembly = metadata
+                    .assembly()
+                    .context("DLL does not define a CLR assembly identity")?;
+                return Ok(assembly.version_string());
             }
-        }
-
-        let file_version_re =
-            Regex::new(r#"AssemblyFileVersion[^\x00]*?([0-9]+\.[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?)"#)
-                .context("Failed to compile regex")?;
-
-        if let Some(caps) = file_version_re.captures(&text) {
-            if let Some(version) = caps.get(1) {
-                return Ok(version.as_str().to_string());
-            }
-        }
-
-        // Fallback: look for any version-like pattern
-        let version_pattern = Regex::new(r#"\b([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)\b"#)
-            .context("Failed to compile regex")?;
-
-        for cap in version_pattern.captures_iter(&text) {
-            if let Some(version) = cap.get(1) {
-                let version_str = version.as_str();
-                let parts: Vec<&str> = version_str.split('.').collect();
-                // Avoid very large numbers that might be timestamps
-                if parts.len() >= 2 {
-                    if let Ok(major) = parts[0].parse::<u32>() {
-                        if major < 1000 {
-                            return Ok(version_str.to_string());
-                        }
-                    }
+            Err(_) => {
+                // A narrow text fallback keeps synthetic/import fixtures supported without
+                // treating an arbitrary dependency or product version as the DLL identity.
+                let search_len = std::cmp::min(content.len(), 1024 * 1024);
+                let text = String::from_utf8_lossy(&content[..search_len]);
+                let declared_version = Regex::new(
+                    r#"Assembly(?:File)?Version\s*\(\s*[\"']([0-9]+\.[0-9]+(?:\.[0-9]+(?:\.[0-9]+)?)?)[\"']\s*\)"#,
+                )
+                .context("Failed to compile declared assembly version regex")?;
+                if let Some(version) = declared_version
+                    .captures(&text)
+                    .and_then(|captures| captures.get(1))
+                {
+                    return Ok(version.as_str().to_string());
                 }
             }
         }
 
-        Err(anyhow::anyhow!("No version found in DLL binary"))
+        Err(anyhow::anyhow!(
+            "No CLR assembly version found in DLL binary"
+        ))
     }
 
     pub async fn list_mods(&self, game_dir: &str) -> Result<serde_json::Value> {
@@ -5591,7 +5590,23 @@ impl ModsService {
                 version_key = Self::normalize_runtime_suffix_token(&version_key);
             }
 
-            let key = format!("{}::{}::{}", key_name, source_id_key, version_key);
+            let nexus_file_id = if template_meta
+                .source
+                .as_ref()
+                .is_some_and(|source| matches!(source, ModSource::Nexusmods))
+            {
+                Self::nexus_file_id_from_mod_metadata(&template_meta)
+            } else {
+                None
+            };
+
+            let key = format!(
+                "{}::{}::{}::{}",
+                key_name,
+                source_id_key,
+                version_key,
+                nexus_file_id.as_deref().unwrap_or_default()
+            );
             let merged_into_existing = grouped.contains_key(&key);
             let key_for_debug = if merged_into_existing {
                 Some(key.clone())
@@ -5607,6 +5622,7 @@ impl ModsService {
                 attached_userdata: payload_summary.attached_userdata.clone(),
                 source: template_meta.source.clone(),
                 source_id: template_meta.source_id.clone(),
+                nexus_file_id: nexus_file_id.clone(),
                 source_version: template_meta.source_version.clone(),
                 source_url: template_meta.source_url.clone(),
                 summary: template_meta.summary.clone(),
@@ -7113,6 +7129,37 @@ exit 1
         self.save_mod_metadata(&mods_directory, &metadata_map)
             .await?;
 
+        Ok(())
+    }
+
+    /// Removes one tracked mod file from an environment without uninstalling the
+    /// rest of its shared-library package. Profile reconciliation uses this for
+    /// an explicitly excluded file when another file from the same package is kept.
+    pub async fn delete_mod_file_only(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
+        let mods_directory = self.get_mods_directory(game_dir);
+        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
+        let enabled_path = mods_directory.join(&relative_mod_path);
+        let disabled_path = PathBuf::from(format!("{}.disabled", enabled_path.to_string_lossy()));
+        let file_to_delete = if self.path_exists_or_symlink(&enabled_path).await {
+            enabled_path
+        } else if self.path_exists_or_symlink(&disabled_path).await {
+            disabled_path
+        } else {
+            return Err(anyhow::anyhow!("Mod file not found"));
+        };
+
+        if !self
+            .managed_mutation_path_is_inside_environment(&file_to_delete, game_dir)
+            .await
+        {
+            anyhow::bail!("Refusing to remove a mod path outside the environment");
+        }
+        let mut metadata_map = self.load_mod_metadata(&mods_directory).await?;
+        self.remove_path_if_exists(&file_to_delete).await?;
+
+        metadata_map.remove(mod_file_name);
+        self.save_mod_metadata(&mods_directory, &metadata_map)
+            .await?;
         Ok(())
     }
 
@@ -10084,6 +10131,41 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "requires SIMMRUST_TEST_ASSEMBLY_PATH and SIMMRUST_TEST_ASSEMBLY_VERSION"]
+    fn live_clr_assembly_version_matches_expected() -> Result<()> {
+        let path = std::env::var("SIMMRUST_TEST_ASSEMBLY_PATH")
+            .context("SIMMRUST_TEST_ASSEMBLY_PATH is required")?;
+        let expected = std::env::var("SIMMRUST_TEST_ASSEMBLY_VERSION")
+            .context("SIMMRUST_TEST_ASSEMBLY_VERSION is required")?;
+        let content = std::fs::read(&path).with_context(|| format!("Failed to read {path}"))?;
+
+        assert_eq!(
+            ModsService::extract_version_from_binary_content(&content)?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn binary_version_detection_rejects_unrelated_version_strings() {
+        let result = ModsService::extract_version_from_binary_content(
+            b"not-a-real-dotnet-assembly dependency-version=2.1.0.0",
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn binary_version_detection_keeps_explicit_text_fixture_support() -> Result<()> {
+        let version = ModsService::extract_version_from_binary_content(
+            br#"not-a-real-dotnet-assembly AssemblyVersion("1.2.3.4")"#,
+        )?;
+
+        assert_eq!(version, "1.2.3.4");
+        Ok(())
+    }
+
     async fn set_test_download_dir(pool: Arc<SqlitePool>, download_dir: &Path) -> Result<()> {
         let mut settings_service = SettingsService::new(pool)?;
         settings_service
@@ -12739,6 +12821,19 @@ mod tests {
             .join("Mods")
             .join("BetterDealerWalk.dll")
             .exists());
+
+        let library = service.get_mod_library().await?;
+        let nexus_entries = library
+            .downloaded
+            .iter()
+            .filter(|entry| entry.source_id.as_deref() == Some("1984"))
+            .collect::<Vec<_>>();
+        assert_eq!(nexus_entries.len(), 2);
+        let nexus_file_ids = nexus_entries
+            .iter()
+            .filter_map(|entry| entry.nexus_file_id.as_deref())
+            .collect::<HashSet<_>>();
+        assert_eq!(nexus_file_ids, HashSet::from(["1778698736", "1778698776"]));
 
         Ok(())
     }

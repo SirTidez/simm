@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.1;net6.0</TargetFrameworks>
+    <AssemblyName>Simm.ModIntegration.Bridge.Core</AssemblyName>
+    <RootNamespace>Simm.ModIntegration.Bridge</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Simm.ModIntegration.Abstractions/Simm.ModIntegration.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

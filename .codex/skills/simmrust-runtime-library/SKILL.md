@@ -1,6 +1,6 @@
 ---
 name: simmrust-runtime-library
-description: Preserve SIMM runtime-aware mod library behavior for mods, plugins, UserLibs, shared storage, metadata synchronization, managed copy installs, runtime prompts, compatibility badges, and mod update state. Use for changes under library management, environment installs, runtime detection, source metadata, or update summaries.
+description: "Maintain SIMM mod-library and environment behavior. Use when changing runtime selection, metadata, managed copies, installs, or update state."
 ---
 
 # SIMM Runtime Library

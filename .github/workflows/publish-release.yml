@@ -757,3 +757,139 @@ jobs:
           if ($betaManifest.version -cne $expectedBeta.version -or -not $betaManifest.platforms.'windows-x86_64' -or -not $betaManifest.platforms.'linux-x86_64') {
             throw "The default-branch Beta updater feed does not match the validated '$($expectedBeta.version)' fallback or prerelease."
           }
+
+  publish-nexus:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs:
+      - build-windows
+      - publish-release
+    concurrency:
+      group: publish-nexus-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Extract latest release changelog
+        id: nexus_changelog
+        env:
+          RELEASE_VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import uuid
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"].strip()
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          headings = list(re.finditer(r"(?m)^## \[([^\]]+)\]\s*$", text))
+
+          if not headings:
+              raise SystemExit("CHANGELOG.md contains no version section")
+
+          latest_version = headings[0].group(1)
+          if latest_version != version:
+              raise SystemExit(
+                  f"Latest changelog version {latest_version} does not match release version {version}"
+              )
+
+          end = headings[1].start() if len(headings) > 1 else len(text)
+          section = text[headings[0].end():end]
+          section = re.split(
+              r"(?m)^\s*-\s+Contributors:\s*$",
+              section,
+              maxsplit=1,
+          )[0].strip()
+
+          if not section:
+              raise SystemExit("Latest changelog section is empty")
+
+          delimiter = f"NEXUS_CHANGELOG_{uuid.uuid4().hex}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"text<<{delimiter}\n")
+              output.write(section + "\n")
+              output.write(f"{delimiter}\n")
+          PY
+
+      - name: Download published signed Setup Wizard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-windows.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/nexus
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "SIMM_${RELEASE_VERSION}_Setup.exe" \
+            --dir artifacts/nexus \
+            --clobber
+
+          test -f "artifacts/nexus/SIMM_${RELEASE_VERSION}_Setup.exe"
+
+      - name: Check for an existing Nexus file version
+        id: nexus_existing_version
+        env:
+          NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          RELEASE_VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          versions_json="$(curl --fail-with-body --retry 3 --retry-all-errors \
+            --header "apikey: ${NEXUSMODS_API_KEY}" \
+            --header 'User-Agent: SIMM GitHub Actions' \
+            --header 'Accept: application/json' \
+            "https://api.nexusmods.com/v3/mod-files/7231657/versions")"
+          existing_version_id="$(jq -r --arg version "${RELEASE_VERSION}" \
+            '.data.versions[]? | select(.version == $version) | .id' <<<"${versions_json}" | head -n 1)"
+
+          if [[ -n "${existing_version_id}" && "${existing_version_id}" != "null" ]]; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "version_id=${existing_version_id}" >> "${GITHUB_OUTPUT}"
+            echo "Nexus already has file version ${RELEASE_VERSION} (${existing_version_id}); the changelog will be retried without uploading the file again."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Add changelog to existing Nexus file version
+        if: steps.nexus_existing_version.outputs.exists == 'true'
+        env:
+          NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          RELEASE_VERSION: ${{ needs.build-windows.outputs.version }}
+          NEXUS_CHANGELOG: ${{ steps.nexus_changelog.outputs.text }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "${RELEASE_VERSION}" \
+            --arg changelog "${NEXUS_CHANGELOG}" \
+            '{version: $version, changelog: $changelog}' \
+            | curl --fail-with-body --retry 3 --retry-all-errors \
+                --request POST \
+                --header "apikey: ${NEXUSMODS_API_KEY}" \
+                --header 'User-Agent: SIMM GitHub Actions' \
+                --header 'Content-Type: application/json' \
+                --data-binary @- \
+                "https://api.nexusmods.com/v3/mods/31701153613526/changelogs"
+
+      - name: Upload Setup Wizard to Nexus Mods
+        if: steps.nexus_existing_version.outputs.exists != 'true'
+        uses: Nexus-Mods/upload-action@c96019556046053aa26044b44396cd38929daf23 # v1.0.0-beta.10
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: "7231657"
+          mod_id: "31701153613526"
+          filename: ${{ github.workspace }}/artifacts/nexus/SIMM_${{ needs.build-windows.outputs.version }}_Setup.exe
+          display_name: SIMM Setup Wizard
+          version: ${{ needs.build-windows.outputs.version }}
+          update_mod_version: true
+          changelog: ${{ steps.nexus_changelog.outputs.text }}

@@ -37,6 +37,8 @@ pub fn start_file_download_with_icon(
         context_label: context_label.into(),
         status: DownloadStatus::Downloading,
         progress: 0.0,
+        downloaded_bytes: None,
+        total_bytes: None,
         downloaded_files: Some(0),
         total_files: Some(1),
         icon_url,
