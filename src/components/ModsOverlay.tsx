@@ -1499,7 +1499,7 @@ export function ModsOverlay({
     }
   };
 
-  const handleUpdateMod = async (mod: ModInfo, securityOverride = false): Promise<void> => {
+  const handleUpdateMod = async (mod: ModInfo, securityOverride = false): Promise<'completed' | 'pending' | 'failed'> => {
     setUpdatingMod(mod.fileName);
     setError(null);
     try {
@@ -1508,9 +1508,9 @@ export function ModsOverlay({
         if (handleSecurityGateResponse(
           `Security Findings - ${mod.name}`,
           result,
-          () => handleUpdateMod(mod, true),
+          async () => { await handleUpdateMod(mod, true); },
         )) {
-          return;
+          return 'pending';
         }
         if (result.errorCode === 'nexus_auth_required' && onOpenAccounts) {
           setConfirmDialog({
@@ -1520,12 +1520,12 @@ export function ModsOverlay({
             cancelText: 'Dismiss',
             onConfirm: () => onOpenAccounts(),
           });
-          return;
+          return 'pending';
         }
         if (result.requiresManualDownload) {
           const sessionStarted = await beginManualNexusInstallSession(result);
           if (sessionStarted) {
-            return;
+            return 'pending';
           }
 
           if (!result.recoveryUrl) {
@@ -1542,7 +1542,7 @@ export function ModsOverlay({
             cancelText: 'Dismiss',
             onConfirm: () => openExternalSourceUrl(result.recoveryUrl),
           });
-          return;
+          return 'pending';
         }
         throw new Error(result.error || result.message || 'Failed to update mod');
       }
@@ -1553,8 +1553,10 @@ export function ModsOverlay({
       if (onModsChanged) {
         onModsChanged();
       }
+      return 'completed';
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update mod');
+      return 'failed';
     } finally {
       setUpdatingMod(null);
     }
@@ -1566,9 +1568,10 @@ export function ModsOverlay({
     if (targets.length === 0) return;
     setUpdatingAll(true);
     try {
-      // Sequential on purpose: each update refreshes the installed list and may open a security or Nexus prompt.
+      // A prompt hands control to the user. End this pass so later updates
+      // cannot replace its report, login prompt, or manual download session.
       for (const mod of targets) {
-        await handleUpdateMod(mod);
+        if (await handleUpdateMod(mod) !== 'completed') break;
       }
     } finally {
       setUpdatingAll(false);

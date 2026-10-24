@@ -1306,6 +1306,68 @@ describe('ModsOverlay', () => {
     });
   });
 
+  it.each([
+    'security confirmation',
+    'security block',
+    'Nexus login',
+    'Nexus manual session',
+    'Nexus recovery page',
+  ])('stops Update All at a pending %s instead of updating the next mod', async (pending) => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Alpha Mod', fileName: 'Alpha.dll', path: 'C:/env/Mods/Alpha.dll', source: 'nexusmods', managed: true, disabled: false, version: '1.0.0' },
+        { name: 'Bravo Mod', fileName: 'Bravo.dll', path: 'C:/env/Mods/Bravo.dll', source: 'thunderstore', managed: true, disabled: false, version: '1.0.0' },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 2,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 2,
+      updates: [
+        { modFileName: 'Alpha.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+        { modFileName: 'Bravo.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+      ],
+    });
+    const securityScan = {
+      summary: { state: 'review', verified: false, totalFindings: 1, threatFamilyCount: 0 },
+      policy: { enabled: true, requiresConfirmation: true, blocked: pending === 'security block', promptOnHighFindings: false, blockCriticalFindings: false },
+      files: [],
+    };
+    const result = pending.startsWith('security')
+      ? { success: false, securityScan, securityScanConfirmationRequired: pending === 'security confirmation', securityScanBlocked: pending === 'security block' }
+      : pending === 'Nexus login'
+        ? { success: false, errorCode: 'nexus_auth_required', error: 'Sign in before updating.' }
+        : { success: false, requiresManualDownload: true, recoveryUrl: 'https://www.nexusmods.com/schedule1/mods/1777?tab=files',
+            ...(pending === 'Nexus manual session' ? { modId: 1777, fileId: 42, gameId: 'schedule1', runtime: 'IL2CPP' } : {}) };
+    apiMocks.updateMod.mockResolvedValueOnce(result).mockResolvedValue({ success: true });
+    const onOpenSecurityReport = vi.fn();
+    render(<ModsOverlay isOpen onClose={() => {}} environmentId="env-1" navigationState={{ modsTab: 'updates' }}
+      onOpenSecurityReport={onOpenSecurityReport} onOpenAccounts={vi.fn()} />);
+
+    const updateAll = await screen.findByRole('button', { name: 'Update All (2)' });
+    await act(async () => { fireEvent.click(updateAll); });
+    await waitFor(() => expect(updateAll).toHaveTextContent('Update All (2)'));
+
+    expect(apiMocks.updateMod.mock.calls).toEqual([['env-1', 'Alpha.dll', false]]);
+    if (pending.startsWith('security')) {
+      expect(onOpenSecurityReport).toHaveBeenCalledOnce();
+      const request = onOpenSecurityReport.mock.calls[0][0];
+      expect(request.title).toBe('Security Findings - Alpha Mod');
+      if (pending === 'security confirmation') {
+        await act(async () => { await request.onConfirm(); });
+        expect(apiMocks.updateMod.mock.calls).toEqual([
+          ['env-1', 'Alpha.dll', false], ['env-1', 'Alpha.dll', true],
+        ]);
+      } else {
+        expect(request.onConfirm).toBeNull();
+      }
+    } else if (pending === 'Nexus manual session') {
+      expect(apiMocks.beginNexusManualDownloadSession).toHaveBeenCalledWith(expect.objectContaining({ environmentId: 'env-1', modId: 1777, fileId: 42 }));
+    } else {
+      expect(screen.getByText(pending === 'Nexus login' ? 'Nexus Login Required' : 'Manual Download Required')).toBeInTheDocument();
+    }
+  });
+
   it('leaves mods with a security exception out of Update All', async () => {
     const suspiciousScan = {
       state: 'review',

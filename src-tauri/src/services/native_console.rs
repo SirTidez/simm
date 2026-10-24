@@ -50,6 +50,32 @@ struct Session {
     viewport: NativeConsoleViewport,
     messages: Arc<Mutex<diagnostics::Diagnostics>>,
 }
+
+fn refresh_existing_session(
+    session: &mut Session,
+    mut snapshot: NativeConsoleSnapshot,
+    is_game_alive: impl FnOnce(&ProcessIdentity) -> bool,
+) -> Result<bool> {
+    let game_alive = read_json::<HelperStatus>(&session.directory.join("status.json"))
+        .ok()
+        .and_then(|status| status.process)
+        .map(|process| is_game_alive(&process));
+    let controller_stopped = match session.controller.as_mut() {
+        Some(child) => child.try_wait()?.is_some(),
+        None => true,
+    };
+    // A pop-out deliberately stops its controller while its game stays alive.
+    // All other completed controllers, and any dead game identity, need a new
+    // observer. Reconnection still waits for restoration before replacing it.
+    let reconnect = game_alive == Some(false)
+        || (controller_stopped
+            && !(session.snapshot.presentation == "popout" && game_alive == Some(true)));
+    snapshot.status = session.snapshot.status.clone();
+    snapshot.presentation = session.snapshot.presentation.clone();
+    session.snapshot = snapshot;
+    Ok(reconnect)
+}
+
 #[derive(Default)]
 pub struct NativeConsoleState {
     sessions: Mutex<HashMap<String, Session>>,
@@ -250,7 +276,7 @@ pub async fn open(
     }
     inventory.sort_by_key(|entry| (entry.kind.clone(), entry.name.to_lowercase()));
     let preferences = preferences(pool.as_ref(), environment_id).await?;
-    let mut snapshot = NativeConsoleSnapshot {
+    let snapshot = NativeConsoleSnapshot {
         supported: cfg!(windows),
         environment,
         profile_name: profile.as_ref().map(|p| p.0.clone()),
@@ -272,10 +298,27 @@ pub async fn open(
         },
         messages: Default::default(),
     };
-    if let Some(session) = state.sessions.lock().unwrap().get_mut(environment_id) {
-        snapshot.status = session.snapshot.status.clone();
-        snapshot.presentation = session.snapshot.presentation.clone();
-        session.snapshot = snapshot;
+    if state.sessions.lock().unwrap().contains_key(environment_id) {
+        let reconnect = {
+            let mut sessions = state.sessions.lock().unwrap();
+            let session = sessions
+                .get_mut(environment_id)
+                .context("Console session not found")?;
+            refresh_existing_session(session, snapshot, |process| {
+                #[cfg(windows)]
+                {
+                    windows::alive(process)
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = process;
+                    false
+                }
+            })?
+        };
+        if reconnect {
+            reconnect_helper(app, environment_id).await?;
+        }
         if navigate {
             app.emit(
                 "native_console_opened",
@@ -452,6 +495,12 @@ pub async fn retry(app: &AppHandle, environment_id: &str) -> Result<()> {
         !state.shutting_down.load(Ordering::Acquire),
         "SIMM is closing."
     );
+    reconnect_helper(app, environment_id).await
+}
+
+// The caller holds opening so restoration and replacement cannot interleave.
+async fn reconnect_helper(app: &AppHandle, environment_id: &str) -> Result<()> {
+    let state = app.state::<NativeConsoleState>();
     detach_helper(app, environment_id).await?;
     if let Some(session) = state.sessions.lock().unwrap().get_mut(environment_id) {
         // Never reuse control files while an old independent guard may still be exiting.
@@ -464,6 +513,9 @@ pub async fn retry(app: &AppHandle, environment_id: &str) -> Result<()> {
         session.snapshot.presentation = "docked".into();
         session.snapshot.process_id = None;
         session.snapshot.process_started_at = None;
+        session.snapshot.messages = Default::default();
+        session.messages = Default::default();
+        session.controller = None;
     }
     start_helper(app, environment_id)
 }
@@ -689,6 +741,110 @@ mod tests {
             viewport: Default::default(),
             messages: Default::default(),
         })
+    }
+
+    #[test]
+    fn reopening_reconnects_after_the_previous_controller_exits() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let mut session = test_session("a", scratch.path().join("a"), Default::default())?;
+        let mut command = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command
+                .args(["/D", "/C", "exit", "0"])
+                .creation_flags(0x08000000);
+        }
+        #[cfg(not(windows))]
+        command.args(["-c", "exit 0"]);
+        let mut controller = command.spawn()?;
+        controller.wait()?;
+        session.controller = Some(controller);
+        let refreshed = session.snapshot.clone();
+
+        assert!(
+            refresh_existing_session(&mut session, refreshed, |_| false)?,
+            "opening a retained session must reconnect when its controller has exited"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reopening_reuses_a_running_controller_and_refreshes_its_inventory() -> Result<()> {
+        use std::process::Stdio;
+        let scratch = tempfile::tempdir()?;
+        let mut session = test_session("a", scratch.path().join("a"), Default::default())?;
+        let mut command = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command
+                .args(["/D", "/C", "more"])
+                .creation_flags(0x08000000);
+        }
+        #[cfg(not(windows))]
+        command.args(["-c", "cat"]);
+        session.controller = Some(
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
+        let controller_id = session.controller.as_ref().unwrap().id();
+        let directory = session.directory.clone();
+        let mut refreshed = session.snapshot.clone();
+        refreshed.entries.push(NativeConsoleEntry {
+            name: "New mod".into(),
+            version: Some("2.0".into()),
+            version_source: None,
+            author: None,
+            file_name: Some("New.dll".into()),
+            enabled: true,
+            kind: "Mod".into(),
+        });
+        let reconnect = refresh_existing_session(&mut session, refreshed, |_| true)?;
+        let controller = session.controller.as_mut().unwrap();
+        // Closing this test-owned pipe releases the waiting shell even if a
+        // later assertion fails. No console or game process is involved.
+        drop(controller.stdin.take());
+        controller.wait()?;
+        assert!(!reconnect);
+        assert_eq!(controller.id(), controller_id);
+        assert_eq!(session.directory, directory);
+        assert_eq!(session.snapshot.entries[0].name, "New mod");
+        Ok(())
+    }
+
+    #[test]
+    fn reopening_keeps_a_live_popout_but_reconnects_after_its_game_exits() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let mut session = test_session("a", scratch.path().join("a"), Default::default())?;
+        session.snapshot.presentation = "popout".into();
+        write_json(
+            &session.directory.join("status.json"),
+            &HelperStatus {
+                status: "detached".into(),
+                process: Some(ProcessIdentity {
+                    pid: 123,
+                    created: 456,
+                    path: "C:/Game/Schedule I.exe".into(),
+                }),
+                diagnostic: None,
+            },
+        )?;
+        let refreshed = session.snapshot.clone();
+        assert!(!refresh_existing_session(&mut session, refreshed, |_| {
+            true
+        })?);
+        assert_eq!(session.snapshot.presentation, "popout");
+
+        let refreshed = session.snapshot.clone();
+        assert!(
+            refresh_existing_session(&mut session, refreshed, |_| false)?,
+            "pop-out mode must not retain the previous game's dead process identity"
+        );
+        Ok(())
     }
 
     #[tokio::test]

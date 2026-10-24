@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 import { LogsOverlay } from './LogsOverlay';
 import type { Environment } from '../types';
@@ -181,6 +181,45 @@ describe('LogsOverlay', () => {
     view.rerender(<LogsOverlay {...props} active />);
     expect(input).toHaveValue('Failure');
     await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledTimes(2));
+  });
+
+  it.each(['before', 'after'] as const)('keeps loaded history when a live refresh finishes %s pagination', async (finish) => {
+    const latest = makeLogFile({ name: 'Latest.log', path: 'C:/Games/Schedule I/MelonLoader/Latest.log', isLatest: true });
+    const tail = Array.from({ length: 4000 }, (_, index) => makeLogLine({ lineNumber: index + 101, content: `History line ${index + 101}` }));
+    const expanded = Array.from({ length: 4100 }, (_, index) => makeLogLine({ lineNumber: index + 1, content: `History line ${index + 1}` }));
+    const older = createDeferred<typeof expanded>();
+    const live = createDeferred<typeof tail>();
+    apiMocks.getLogFiles.mockResolvedValue([latest]);
+    apiMocks.readLogFile.mockResolvedValueOnce(tail)
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => live.promise)
+      .mockResolvedValue(expanded);
+    let update: ((event: { payload: unknown }) => void) | undefined;
+    listenMock.mockImplementation(async (name, handler) => { if (name === 'log-update') update = handler as typeof update; return () => {}; });
+    const { container } = render(<LogsOverlay isOpen active embedded environmentId="env-1" environment={environment} onClose={() => {}} />);
+    await screen.findByText('History line 101');
+    await waitFor(() => expect(update).toBeDefined());
+    const stream = container.querySelector('.logs-panel__stream') as HTMLDivElement;
+    Object.defineProperties(stream, {
+      scrollHeight: { configurable: true, value: 240000 },
+      clientHeight: { configurable: true, value: 720 },
+      scrollTop: { configurable: true, value: 100, writable: true },
+    });
+    fireEvent.scroll(stream);
+    await waitFor(() => expect(apiMocks.readLogFile).toHaveBeenLastCalledWith(latest.path, 8000));
+    await act(async () => { update?.({ payload: { sourcePath: latest.path, sessionId: 1, lines: [] } }); });
+    expect(apiMocks.readLogFile).toHaveBeenLastCalledWith(latest.path, 4000);
+
+    if (finish === 'before') await act(async () => { live.resolve(tail); });
+    await act(async () => { older.resolve(expanded); });
+    expect(screen.getByText('4,100 lines')).toBeInTheDocument();
+    if (finish === 'after') await act(async () => { live.resolve(tail); });
+
+    // A smaller in-flight live response must not evict the history just read.
+    expect(screen.getByText('4,100 lines')).toBeInTheDocument();
+    await act(async () => { update?.({ payload: { sourcePath: latest.path, sessionId: 1, lines: [] } }); });
+    expect(apiMocks.readLogFile).toHaveBeenLastCalledWith(latest.path, 8000);
+    expect(screen.getByText('4,100 lines')).toBeInTheDocument();
   });
 
   it('prefers the latest environment log when selecting the initial source', async () => {

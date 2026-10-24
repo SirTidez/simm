@@ -1234,11 +1234,21 @@ export function LogsOverlay({ isOpen, environmentId, onOpenModLibraryView, activ
         }
         if (embedded) {
           const request = ++contentRequestRef.current;
-          void ApiService.readLogFile(sourcePath, loadedLogLineLimitRef.current).then(lines => {
-            if (!listeners.isActive() || request !== contentRequestRef.current || selectedLogPathRef.current !== sourcePath || watchedSessionIdRef.current !== sessionId) return;
-            const file = logFiles.find(file => file.path === sourcePath);
-            setLogLines(file ? cacheLogLines(file, lines, loadedLogLineLimitRef.current) : lines);
-          }).catch(error => { if (listeners.isActive() && request === contentRequestRef.current) setError(String(error)); });
+          const refresh = async () => {
+            while (listeners.isActive() && request === contentRequestRef.current) {
+              const limit = loadedLogLineLimitRef.current;
+              const lines = await ApiService.readLogFile(sourcePath, limit);
+              if (!listeners.isActive() || request !== contentRequestRef.current || selectedLogPathRef.current !== sourcePath || watchedSessionIdRef.current !== sessionId) return;
+              // Pagination may have expanded the history during this read.
+              // Read that window again instead of evicting its older entries
+              // or caching a shorter response under the expanded limit.
+              if (limit !== loadedLogLineLimitRef.current) continue;
+              const file = logFiles.find(file => file.path === sourcePath);
+              setLogLines(file ? cacheLogLines(file, lines, limit) : lines);
+              return;
+            }
+          };
+          void refresh().catch(error => { if (listeners.isActive() && request === contentRequestRef.current) setError(String(error)); });
           return;
         }
         setLogLines((current) => {
