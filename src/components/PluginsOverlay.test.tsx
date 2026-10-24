@@ -22,6 +22,10 @@ vi.mock('../services/api', () => ({
   ApiService: apiMocks,
 }));
 
+const eventMocks = vi.hoisted(() => ({ onPluginsChanged: vi.fn() }));
+vi.mock('../services/events', () => eventMocks);
+let pluginsChangedHandler: ((event: { environmentId: string }) => void) | null = null;
+
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
@@ -40,6 +44,12 @@ const baseEnvironment: Environment = {
 
 describe('PluginsOverlay', () => {
   beforeEach(() => {
+    pluginsChangedHandler = null;
+    eventMocks.onPluginsChanged.mockReset();
+    eventMocks.onPluginsChanged.mockImplementation(async (handler) => {
+      pluginsChangedHandler = handler;
+      return () => {};
+    });
     apiMocks.getEnvironment.mockReset();
     apiMocks.getPlugins.mockReset();
     apiMocks.uploadPlugin.mockReset();
@@ -81,6 +91,38 @@ describe('PluginsOverlay', () => {
     cleanup();
   });
 
+  it('automatically refreshes plugin metadata and disabled status, retaining a trailing change', async () => {
+    let finishOld: (value: unknown) => void = () => {};
+    apiMocks.getPlugins.mockResolvedValueOnce({ plugins: [{ name: 'Local Plugin', fileName: 'Local.dll', path: 'C:/env/Plugins/Local.dll', author: 'Old author', version: '1.0' }], pluginsDirectory: 'C:/env/Plugins', count: 1 })
+      .mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }))
+      .mockResolvedValueOnce({ plugins: [{ name: 'Local Plugin', fileName: 'Local.dll', path: 'C:/env/Plugins/Local.dll.disabled', author: 'New author', version: '2.0', disabled: true }], pluginsDirectory: 'C:/env/Plugins', count: 1 });
+    render(<PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    await screen.findAllByText('Old author');
+    await act(async () => { pluginsChangedHandler?.({ environmentId: 'other-env' }); });
+    expect(apiMocks.getPlugins).toHaveBeenCalledTimes(1);
+    await act(async () => { pluginsChangedHandler?.({ environmentId: 'env-1' }); });
+    expect(apiMocks.getPlugins).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      pluginsChangedHandler?.({ environmentId: 'env-1' });
+      pluginsChangedHandler?.({ environmentId: 'env-1' });
+      finishOld({ plugins: [], pluginsDirectory: 'C:/env/Plugins', count: 0 });
+    });
+    expect((await screen.findAllByText('New author')).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy();
+    expect(apiMocks.getPlugins).toHaveBeenCalledTimes(3);
+  });
+
+  it('cleans up a plugin listener that registers after unmount', async () => {
+    let finishRegistration: (value: () => void) => void = () => {};
+    const stop = vi.fn();
+    eventMocks.onPluginsChanged.mockReturnValueOnce(new Promise(resolve => { finishRegistration = resolve; }));
+    const { unmount } = render(<PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    unmount();
+    await act(async () => { finishRegistration(stop); });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(apiMocks.getPlugins).not.toHaveBeenCalled();
+  });
+
   it('auto-selects the first plugin and renders inspector details', async () => {
     render(
       <PluginsOverlay
@@ -94,6 +136,23 @@ describe('PluginsOverlay', () => {
     expect(screen.getByText(/2 plugins · 1 disabled/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull();
     expect(await screen.findByText('C:/env/Plugins/MLVScan.dll')).toBeTruthy();
+  });
+
+  it('displays a local plugin author and version and supports author searches', async () => {
+    apiMocks.getPlugins.mockResolvedValue({
+      plugins: [
+        { name: 'Local Plugin', fileName: 'Local.dll', path: 'C:/env/Plugins/Local.dll', source: 'local', author: 'Plugin Author', version: '1.8.2' },
+        { name: 'Other Plugin', fileName: 'Other.dll', path: 'C:/env/Plugins/Other.dll', source: 'local' },
+      ], pluginsDirectory: 'C:/env/Plugins', count: 2,
+    });
+    const { container } = render(<PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    await screen.findAllByText('Local Plugin');
+    const row = container.querySelector('.env-assets-table tbody tr');
+    expect(row?.textContent).toContain('Plugin Author');
+    expect(row?.textContent).toContain('1.8.2');
+    fireEvent.change(screen.getByPlaceholderText('Search plugins'), { target: { value: 'plugin author' } });
+    expect(screen.queryByText('Other Plugin')).toBeNull();
+    expect(screen.getAllByText('Local Plugin').length).toBeGreaterThan(0);
   });
 
   it('filters plugins from the toolbar search', async () => {
@@ -136,7 +195,9 @@ describe('PluginsOverlay', () => {
     const { rerender } = render(
       <PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-a" />,
     );
+    await waitFor(() => expect(resolveA).toBeTypeOf('function'));
     rerender(<PluginsOverlay isOpen={true} onClose={() => {}} environmentId="env-b" />);
+    await waitFor(() => expect(resolveB).toBeTypeOf('function'));
 
     await act(async () => {
       resolveB?.({

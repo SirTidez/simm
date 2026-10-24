@@ -13,6 +13,7 @@ import {
   onUpdateAvailable,
   onUpdateCheckComplete,
   onModsChanged,
+  onModLibraryChanged,
   onPluginsChanged,
   onUserLibsChanged,
   onModUpdatesChecked,
@@ -33,6 +34,17 @@ const listenMock = vi.mocked(listen);
 describe('events', () => {
   beforeEach(() => {
     listenMock.mockReset();
+  });
+
+  it('onModLibraryChanged subscribes to shared storage invalidation', async () => {
+    const handler = vi.fn();
+    const stop = vi.fn();
+    listenMock.mockResolvedValueOnce(stop);
+    expect(await onModLibraryChanged(handler)).toBe(stop);
+    expect(listenMock).toHaveBeenCalledWith('mod_library_changed', expect.any(Function));
+    const callback = listenMock.mock.calls[0][1] as (event: { payload: null }) => void;
+    callback({ payload: null });
+    expect(handler).toHaveBeenCalledOnce();
   });
 
   it('onProgress forwards payload progress', async () => {

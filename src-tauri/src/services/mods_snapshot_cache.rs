@@ -61,6 +61,16 @@ pub async fn set(environment_id: String, snapshot: Value) {
     cache.insert(environment_id, snapshot);
 }
 
+/// Startup's background scan must not overwrite a newer watcher/IPC snapshot
+/// if a DLL changed while that scan was reading.
+pub async fn seed_if_missing(environment_id: String, snapshot: Value) {
+    MODS_SNAPSHOT_CACHE
+        .write()
+        .await
+        .entry(environment_id)
+        .or_insert(snapshot);
+}
+
 /// Atomically compares and replaces a snapshot under the cache write lock.
 /// The returned decision is the sole authority for publishing refresh events,
 /// preventing concurrent refreshes from emitting duplicate unchanged states.
@@ -109,6 +119,27 @@ mod tests {
             "version": version,
             "managed": false
         })
+    }
+
+    #[tokio::test]
+    async fn late_startup_seed_cannot_replace_new_author_version_or_enabled_status() {
+        let environment_id = format!("env-{}", Uuid::new_v4());
+        let mut original = mod_entry("Local", "1.0");
+        original["author"] = serde_json::json!("Old author");
+        original["disabled"] = serde_json::json!(false);
+        seed_if_missing(environment_id.clone(), snapshot(vec![original.clone()])).await;
+        let mut changed = original.clone();
+        changed["author"] = serde_json::json!("New author");
+        changed["version"] = serde_json::json!("2.0");
+        changed["disabled"] = serde_json::json!(true);
+        let current = snapshot(vec![changed]);
+        assert_eq!(
+            replace_if_changed(environment_id.clone(), current.clone()).await,
+            SnapshotReplacement::Changed
+        );
+        seed_if_missing(environment_id.clone(), snapshot(vec![original])).await;
+        assert_eq!(get(&environment_id).await, Some(current));
+        remove(&environment_id).await;
     }
 
     #[tokio::test]

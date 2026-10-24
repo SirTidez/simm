@@ -15,7 +15,7 @@ const apiMocks = vi.hoisted(() => ({
   revealPath: vi.fn(),
 }));
 
-const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
+const listenMock = vi.hoisted(() => vi.fn(async (_name?: string, _handler?: unknown) => () => {}));
 const saveMock = vi.hoisted(() => vi.fn());
 const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
@@ -127,6 +127,60 @@ describe('LogsOverlay', () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it('opens the latest log for a DLL source and severity, merges aliases, and shares its inspector', async () => {
+    const latest = makeLogFile({ name: 'Latest.log', path: 'C:/Games/Schedule I/MelonLoader/Latest.log', isLatest: true });
+    const archive = makeLogFile({ name: 'Older.log', path: 'C:/Games/Schedule I/MelonLoader/Logs/Older.log' });
+    apiMocks.getLogFiles.mockResolvedValue([latest, archive]);
+    apiMocks.readLogFile.mockResolvedValue([
+      makeLogLine({ lineNumber: 1, modTag: 'Test_mod', level: 'ERROR', content: 'First alias failure' }),
+      makeLogLine({ lineNumber: 2, modTag: 'TestMod', level: 'ERROR', content: 'Second alias failure' }),
+      makeLogLine({ lineNumber: 3, modTag: 'TestMod', level: 'WARN', content: 'Mod warning' }),
+      makeLogLine({ lineNumber: 4, modTag: 'Plugin', level: 'ERROR', content: 'Plugin failure' }),
+    ]);
+    const sidebar = document.createElement('div'); document.body.append(sidebar);
+    const view = render(<LogsOverlay isOpen active embedded sidebarTarget={sidebar} onClose={() => {}} environmentId="env-1" environment={environment}
+      focus={{ id: 1, severity: 'ERROR', source: { label: 'Mod · Test mod', tags: ['Test_mod', 'TestMod'] } }} />);
+    expect(await screen.findByText('First alias failure')).toBeInTheDocument();
+    expect(screen.getByText('Second alias failure')).toBeInTheDocument();
+    expect(screen.queryByText('Plugin failure')).not.toBeInTheDocument();
+    expect(screen.queryByText('Mod warning')).not.toBeInTheDocument();
+    fireEvent.click(view.container.querySelector('.logs-panel__line') as HTMLElement);
+    expect(sidebar.querySelector('.logs-panel__inspector')).not.toBeNull();
+    expect(view.container.querySelector('.logs-panel__inspector')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Logs' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Older.log/ }));
+    await waitFor(() => expect(apiMocks.readLogFile).toHaveBeenCalledWith(archive.path, 4000));
+    view.rerender(<LogsOverlay isOpen active embedded sidebarTarget={sidebar} onClose={() => {}} environmentId="env-1" environment={environment}
+      focus={{ id: 2, severity: 'WARN', source: { label: 'Mod · Test mod', tags: ['Test_mod', 'TestMod'] } }} />);
+    expect(await screen.findByText('Mod warning')).toBeInTheDocument();
+    expect(view.container.querySelector('.logs-panel__viewer-header h3')).toHaveTextContent('Latest.log');
+    expect(screen.queryByText('First alias failure')).not.toBeInTheDocument();
+    view.unmount(); sidebar.remove();
+  });
+
+  it('refreshes complete live messages and retains filters while the Logs tab is hidden', async () => {
+    const latest = makeLogFile({ name: 'Latest.log', path: 'C:/Games/Schedule I/MelonLoader/Latest.log', isLatest: true });
+    const initial = makeLogLine({ level: 'ERROR', modTag: 'TestMod', content: 'Failure from mod' });
+    apiMocks.getLogFiles.mockResolvedValue([latest]);
+    apiMocks.readLogFile.mockResolvedValue([initial]);
+    let update: ((event: { payload: unknown }) => void) | undefined;
+    listenMock.mockImplementation(async (name, handler) => { if (name === 'log-update') update = handler as typeof update; return () => {}; });
+    const props = { isOpen: true, embedded: true, environmentId: 'env-1', environment, onClose: () => {} };
+    const view = render(<LogsOverlay {...props} active />);
+    await screen.findByText('Failure from mod');
+    await waitFor(() => expect(update).toBeDefined());
+    apiMocks.readLogFile.mockResolvedValue([{ ...initial, content: 'Failure from mod\n  at TestMod.Load()' }]);
+    update?.({ payload: { sourcePath: latest.path, sessionId: 1, lines: [makeLogLine({ content: '  at TestMod.Load()' })] } });
+    expect(await screen.findByText(/Failure from mod.*at TestMod.Load\(\)/s)).toBeInTheDocument();
+    const input = view.container.querySelector('.logs-panel__search input')!;
+    fireEvent.change(input, { target: { value: 'Failure' } });
+    view.rerender(<LogsOverlay {...props} active={false} />);
+    await waitFor(() => expect(apiMocks.stopWatchingLog).toHaveBeenCalledWith(1));
+    view.rerender(<LogsOverlay {...props} active />);
+    expect(input).toHaveValue('Failure');
+    await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledTimes(2));
   });
 
   it('prefers the latest environment log when selecting the initial source', async () => {
@@ -667,7 +721,7 @@ describe('LogsOverlay', () => {
     fireEvent.click(within(modActivitySection as HTMLElement).getByRole('button', { name: /CoolMod/i }));
 
     await waitFor(() => {
-      expect(screen.getByText('Mod: CoolMod')).toBeTruthy();
+      expect(screen.getByText('Source: CoolMod')).toBeTruthy();
     });
     expect(screen.queryByText('AnotherMod threw an error')).toBeNull();
     expect(screen.queryByText('MelonLoader bootstrap finished')).toBeNull();

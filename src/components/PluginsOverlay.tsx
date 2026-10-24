@@ -6,6 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 
 import { ApiService } from '../services/api';
+import { onPluginsChanged as subscribePluginsChanged } from '../services/events';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
@@ -19,6 +20,7 @@ interface PluginInfo {
   fileName: string;
   path: string;
   version?: string;
+  author?: string;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   relatedMod?: string;
   disabled?: boolean;
@@ -101,6 +103,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
   } | null>(null);
   const [togglingPluginKey, setTogglingPluginKey] = useState<string | null>(null);
   const environmentGenerationRef = useRef(0);
+  const loadRequestRef = useRef(0);
 
   const loadEnvironment = useCallback(async (generation = environmentGenerationRef.current) => {
     const requestedEnvironmentId = environmentId;
@@ -113,25 +116,26 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
     }
   }, [environmentId]);
 
-  const loadPlugins = useCallback(async (generation = environmentGenerationRef.current) => {
+  const loadPlugins = useCallback(async (generation = environmentGenerationRef.current, showSpinner = true) => {
+    const request = ++loadRequestRef.current;
     const requestedEnvironmentId = environmentId;
-    setLoading(true);
-    setError(null);
+    if (showSpinner) { setLoading(true); setError(null); }
 
     try {
       const result = await ApiService.getPlugins(requestedEnvironmentId);
-      if (generation !== environmentGenerationRef.current) return;
+      if (generation !== environmentGenerationRef.current || request !== loadRequestRef.current) return;
       setPlugins(result.plugins.map((plugin) => ({
         ...plugin,
         source: plugin.source as PluginInfo['source'],
       })));
       setPluginsDirectory(result.pluginsDirectory);
+      setError(null);
     } catch (err) {
-      if (generation !== environmentGenerationRef.current) return;
-      setPlugins([]);
+      if (generation !== environmentGenerationRef.current || request !== loadRequestRef.current) return;
+      if (showSpinner) setPlugins([]);
       setError(err instanceof Error ? err.message : 'Failed to load plugins');
     } finally {
-      if (generation === environmentGenerationRef.current) setLoading(false);
+      if (generation === environmentGenerationRef.current && request === loadRequestRef.current) setLoading(false);
     }
   }, [environmentId]);
 
@@ -152,7 +156,38 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
     }
 
     void loadEnvironment(generation);
-    void loadPlugins(generation);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let running = false;
+    let pending = false;
+    const refresh = async (showSpinner = false) => {
+      if (running) { pending = true; return; }
+      running = true;
+      do {
+        pending = false;
+        await loadPlugins(generation, showSpinner);
+        showSpinner = false;
+      } while (!disposed && pending);
+      running = false;
+    };
+    void (async () => {
+      try {
+        const stop = await subscribePluginsChanged((event) => {
+          if (!disposed && event.environmentId === environmentId) void refresh();
+        });
+        if (disposed) stop();
+        else unlisten = stop;
+      } catch (error) {
+        console.warn('Failed to register plugin inventory listener:', error);
+      }
+      if (!disposed) void refresh(true);
+    })();
+    return () => {
+      disposed = true;
+      environmentGenerationRef.current += 1;
+      loadRequestRef.current += 1;
+      unlisten?.();
+    };
   }, [environmentId, isOpen, loadEnvironment, loadPlugins]);
 
   const filteredPlugins = useMemo(() => {
@@ -168,6 +203,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
       || getPluginSourceLabel(plugin.source).toLowerCase().includes(normalizedQuery)
       || (plugin.relatedMod || '').toLowerCase().includes(normalizedQuery)
       || (plugin.version || '').toLowerCase().includes(normalizedQuery)
+      || (plugin.author || '').toLowerCase().includes(normalizedQuery)
     ));
   }, [plugins, searchTerm]);
 
@@ -522,7 +558,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
                             <AssetThumbnail artwork={pluginArtwork(plugin)} name={plugin.name} glyph="plug" size={32} />
                             <span className="env-assets-row__text">
                               <span className="env-assets-row__name">{plugin.name}</span>
-                              <span className="env-assets-row__desc">{plugin.fileName}</span>
+                              <span className="env-assets-row__desc">{plugin.author ? `${plugin.author} · ` : ''}{plugin.fileName}</span>
                             </span>
                           </button>
                         </td>
@@ -589,6 +625,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
               <section className="ui-inspector__section">
                 <h4 className="ui-section-title">Details</h4>
                 <dl className="ui-kv">
+                  {selectedPlugin.author ? <><dt>Author</dt><dd>{selectedPlugin.author}</dd></> : null}
                   <dt>Version</dt>
                   <dd className="ui-mono">{selectedPlugin.version || 'Unknown'}</dd>
                   <dt>Source</dt>

@@ -4,6 +4,10 @@ import { SimmButton, SimmIconButton } from './primitives';
 
 export function launchStatusCopy(attempt: GameLaunchAttempt): string {
   if (attempt.detail) return attempt.detail;
+  if (attempt.state === 'checking' || attempt.state === 'slow') {
+    if (attempt.snapshot?.processState === 'running') return attempt.snapshot.loaderState === 'notInstalled' ? 'Schedule I is running.' : 'Schedule I is starting. Waiting for MelonLoader to initialize.';
+    return 'Waiting for Schedule I to start. This may take a moment.';
+  }
   if (attempt.state === 'exited') return 'Schedule I closed before MelonLoader startup was confirmed.';
   if (attempt.snapshot?.processState === 'running') return attempt.snapshot.loaderState === 'notInstalled' ? 'Schedule I is running.' : 'Schedule I is running; MelonLoader has not been confirmed.';
   if (attempt.snapshot?.processState === 'unknown') return 'SIMM could not inspect whether Schedule I is running. Startup remains unconfirmed.';

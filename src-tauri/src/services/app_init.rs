@@ -97,6 +97,14 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
     let startup_mods_service =
         ModsService::new(pool.clone()).with_runtime_settings(runtime_settings.snapshot().await);
     let startup_storage_dir = mods_storage_dir_from_runtime_settings(&runtime_settings).await;
+    if let Err(error) = watcher_arc
+        .lock()
+        .await
+        .watch_mod_library(&startup_storage_dir)
+        .await
+    {
+        log::warn!("Could not watch shared mod library: {error:#}");
+    }
     match startup_mods_service
         .migrate_legacy_symlink_installs_to_managed_copies_at(&startup_storage_dir)
         .await
@@ -138,7 +146,7 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
 
                     match mods_service.list_mods(&env.output_dir).await {
                         Ok(snapshot) => {
-                            mods_snapshot_cache::set(env.id.clone(), snapshot).await;
+                            mods_snapshot_cache::seed_if_missing(env.id.clone(), snapshot).await;
                         }
                         Err(err) => {
                             log::warn!(

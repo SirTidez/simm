@@ -35,15 +35,30 @@ pub async fn get_settings(
 
 #[tauri::command]
 pub async fn save_settings(
+    app: tauri::AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     runtime_settings: State<'_, RuntimeSettingsState>,
     updates: serde_json::Value,
 ) -> Result<(), String> {
+    let previous_directory = runtime_settings.snapshot().await.default_download_dir;
     let settings = runtime_settings
         .save_settings(db.inner().as_ref(), updates)
         .await
         .map_err(|e| e.to_string())?;
     LoggerService::apply_settings(&settings);
+
+    if settings.default_download_dir != previous_directory {
+        if let Err(error) = crate::services::filesystem_watcher::ensure_mod_library_watcher(
+            &app,
+            &std::path::Path::new(&settings.default_download_dir).join("Mods"),
+        )
+        .await
+        {
+            log::warn!("Could not watch changed mod library directory: {error:#}");
+        }
+        crate::commands::mods::invalidate_mod_library_cache("library directory changed").await;
+        crate::events::emit_mod_library_changed(&app).map_err(|error| error.to_string())?;
+    }
 
     Ok(())
 }

@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../../target/diagnostics/melon-metadata-fixtures/obj/$(MSBuildProjectName)/$(Case)/</BaseIntermediateOutputPath>
+    <OutputPath>$(MSBuildThisFileDirectory)../../../../target/diagnostics/melon-metadata-fixtures/bin/$(MSBuildProjectName)/$(Case)/</OutputPath>
+  </PropertyGroup>
+</Project>

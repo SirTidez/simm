@@ -287,7 +287,12 @@ impl LogsService {
         let (content, start_line) = Self::read_log_content(path, max_lines).await?;
         let mod_candidates = Self::load_mod_candidates_for_log(path).await;
 
-        Ok(Self::parse_log_lines(&content, start_line, &mod_candidates))
+        Ok(Self::parse_file_lines(
+            &content,
+            start_line,
+            &mod_candidates,
+            path,
+        ))
     }
 
     async fn read_log_content(path: &Path, max_lines: Option<usize>) -> Result<(String, usize)> {
@@ -687,6 +692,64 @@ impl LogsService {
             Some(split_at) => (bytes[..split_at].to_vec(), bytes[split_at..].to_vec()),
             None => (Vec::new(), bytes.to_vec()),
         }
+    }
+
+    fn parse_file_lines(
+        content: &str,
+        start_line: usize,
+        candidates: &[LogModCandidate],
+        path: &Path,
+    ) -> Vec<LogLine> {
+        if !path.components().any(|part| {
+            part.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("MelonLoader")
+        }) {
+            return Self::parse_log_lines(content, start_line, candidates);
+        }
+        use crate::services::melon_log::{expected_interop_notice, header, is_level, severity};
+        let mut entries = Vec::new();
+        let mut current: Option<LogLine> = None;
+        let finish = |mut entry: LogLine| {
+            if expected_interop_notice(
+                entry.level.as_deref().unwrap_or("INFO"),
+                entry.mod_tag.as_deref(),
+                &entry.content,
+                false,
+            ) {
+                entry.level = Some("INFO".into());
+            }
+            entry
+        };
+        for (index, raw) in content.lines().enumerate() {
+            let raw = raw.trim_start_matches('\u{feff}');
+            let (timestamp, tags, text) = header(raw);
+            if timestamp.is_some() || !tags.is_empty() || current.is_none() {
+                if let Some(entry) = current.take() {
+                    entries.push(finish(entry));
+                }
+                let source = tags
+                    .iter()
+                    .find(|tag| !is_level(tag))
+                    .map(|tag| (*tag).to_owned());
+                let category = Self::categorize_log(raw, &source);
+                current = Some(LogLine {
+                    line_number: start_line + index + 1,
+                    content: text.to_owned(),
+                    level: Some(severity(&tags).into()),
+                    timestamp: timestamp.map(str::to_owned),
+                    mod_tag: source,
+                    category,
+                });
+            } else if let Some(entry) = current.as_mut() {
+                entry.content.push('\n');
+                entry.content.push_str(raw);
+            }
+        }
+        if let Some(entry) = current {
+            entries.push(finish(entry));
+        }
+        entries
     }
 
     fn parse_log_lines(
@@ -1177,18 +1240,22 @@ impl LogsService {
         custom_time_start: Option<&str>,
         custom_time_end: Option<&str>,
         output_path: &str,
+        filter_mod_tags: Option<&[String]>,
     ) -> Result<()> {
         let log_lines = self.read_log_file(log_path, None).await?;
 
         // Normalize mod tag for comparison (removes spaces and converts to lowercase)
         let normalize_mod_tag = |tag: &str| -> String {
             tag.chars()
-                .filter(|c| !c.is_whitespace())
+                .filter(|c| c.is_alphanumeric())
                 .collect::<String>()
                 .to_lowercase()
         };
 
-        let normalized_filter_tag = filter_mod_tag.map(normalize_mod_tag);
+        let normalized_filter_tags: Vec<_> = match filter_mod_tags {
+            Some(tags) => tags.iter().map(|tag| normalize_mod_tag(tag)).collect(),
+            None => filter_mod_tag.map(normalize_mod_tag).into_iter().collect(),
+        };
         let normalized_filter_category = filter_category.map(|value| value.to_ascii_lowercase());
         let reference_dt = fs::metadata(Path::new(log_path))
             .await
@@ -1239,9 +1306,9 @@ impl LogsService {
                 }
 
                 // Filter by mod tag (normalized comparison)
-                if let Some(ref filter_tag_normalized) = normalized_filter_tag {
+                if !normalized_filter_tags.is_empty() {
                     if let Some(ref line_tag) = line.mod_tag {
-                        if normalize_mod_tag(line_tag) != *filter_tag_normalized {
+                        if !normalized_filter_tags.contains(&normalize_mod_tag(line_tag)) {
                             return false;
                         }
                     } else {
@@ -1504,10 +1571,11 @@ impl LogsService {
                         let previous_line_count = last_line_count;
 
                         if !lines.is_empty() {
-                            let log_lines = Self::parse_log_lines(
+                            let log_lines = Self::parse_file_lines(
                                 &file_content,
                                 previous_line_count,
                                 &mod_candidates,
+                                Path::new(&session.source_path),
                             );
 
                             // Emit event with new log lines
@@ -1816,7 +1884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_log_file_links_generic_il2cpp_entries_to_installed_mods() {
+    async fn melonloader_entries_preserve_the_emitter_instead_of_blaming_mod_names_in_text() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let game_dir = temp_dir.path().join("Schedule I");
         let mods_dir = game_dir.join("mods");
@@ -1856,16 +1924,16 @@ mod tests {
             .expect("read log file");
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].mod_tag.as_deref(), Some("PackRat"));
-        assert_eq!(lines[0].level.as_deref(), Some("WARN"));
+        assert_eq!(lines[0].mod_tag.as_deref(), Some("Il2CppInterop"));
+        assert_eq!(lines[0].level.as_deref(), Some("INFO"));
         assert!(matches!(lines[0].category, LogCategory::MelonLoader));
-        assert_eq!(lines[1].mod_tag.as_deref(), Some("AdvancedDealing"));
-        assert_eq!(lines[1].level.as_deref(), Some("ERROR"));
+        assert_eq!(lines[1].mod_tag.as_deref(), Some("Il2CppInterop"));
+        assert_eq!(lines[1].level.as_deref(), Some("INFO"));
         assert!(matches!(lines[1].category, LogCategory::MelonLoader));
     }
 
     #[tokio::test]
-    async fn read_log_file_keeps_generic_il2cpp_mod_tag_empty_without_installed_match() {
+    async fn melonloader_entries_do_not_infer_severity_from_message_text() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let game_dir = temp_dir.path().join("Schedule I");
         let melonloader_dir = game_dir.join("MelonLoader");
@@ -1889,9 +1957,73 @@ mod tests {
             .expect("read log file");
 
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].mod_tag, None);
-        assert_eq!(lines[0].level.as_deref(), Some("ERROR"));
+        assert_eq!(lines[0].mod_tag.as_deref(), Some("Il2CppInterop"));
+        assert_eq!(lines[0].level.as_deref(), Some("INFO"));
         assert!(matches!(lines[0].category, LogCategory::MelonLoader));
+    }
+
+    #[tokio::test]
+    async fn melonloader_severity_matches_console_and_only_the_exact_startup_notice_is_informational(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("MelonLoader");
+        fs::create_dir_all(&directory).await.unwrap();
+        let path = directory.join("Latest.log");
+        fs::write(&path, [
+            "[12:00:00.000] [PackRat] Error count is zero. Literal [ERROR] in message text.",
+            "[12:00:00.001] [ERROR] [Pack_Rat] Mod failed",
+            "  at PackRat.Load()",
+            "[12:00:00.002] [WARNING] [Il2CppInterop] Class::Init signatures have been exhausted, using a substitute!",
+            "[12:00:00.003] [WARNING] [Il2CppInterop] Class::Init signatures have been exhausted, using a substitute!",
+            "  Additional diagnostic context",
+            "[12:00:00.004] [ERROR] [Il2CppInterop] Unable to initialize interop",
+        ].join("\n")).await.unwrap();
+        let lines = LogsService::new()
+            .read_log_file(path.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.level.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["INFO", "ERROR", "INFO", "WARN", "ERROR"]
+        );
+        assert_eq!(lines[1].mod_tag.as_deref(), Some("Pack_Rat"));
+        assert!(lines[1].content.contains("at PackRat.Load()"));
+        assert!(lines[3].content.contains("Additional diagnostic context"));
+    }
+
+    #[tokio::test]
+    async fn filtered_export_includes_all_source_aliases_and_preserves_multiline_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("MelonLoader");
+        fs::create_dir_all(&directory).await.unwrap();
+        let path = directory.join("Latest.log");
+        let output = temp.path().join("export.txt");
+        fs::write(&path, "[12:00:00.000] [ERROR] [PackRat] First mod failure\n  at Load()\n[12:00:00.001] [ERROR] [Pack_Rat] Alias failure\n[12:00:00.002] [ERROR] [Other] Other failure\n").await.unwrap();
+        LogsService::new()
+            .export_logs(
+                path.to_str().unwrap(),
+                Some("ERROR"),
+                None,
+                None,
+                Some("Mod · PackRat"),
+                None,
+                None,
+                None,
+                output.to_str().unwrap(),
+                Some(&["PackRat".into(), "Pack_Rat".into()]),
+            )
+            .await
+            .unwrap();
+        let text = fs::read_to_string(output).await.unwrap();
+        assert!(
+            text.contains("First mod failure")
+                && text.contains("Alias failure")
+                && text.contains("at Load()")
+        );
+        assert!(!text.contains("Other failure"));
     }
 
     #[test]

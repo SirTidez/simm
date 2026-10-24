@@ -1,18 +1,26 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.9-beta.1]
 
+- Added a Windows Console tab within each environment page, with a shared Console/Logs session sidebar, per-environment View options, automatic opening after launch, native console pop-out/redock, and a confirmed Close Game action while preserving Steam launch ownership and game survival after SIMM closes.
+- Added local DLL author/version extraction and automatic inventory refresh across installed mods, plugins, and Mod Library, including enabled/disabled changes.
+- Added current-launch warning/error counts and per-mod/plugin attribution with source-filtered Logs navigation. Preserved parsed severity and multiline messages while treating only the expected interop startup notice as informational.
+- Improved Steam shortcut launch handling and added shared, nonmodal process-aware startup confirmation, late recovery for slow launches, and clearer startup messages.
+- Fixed Logs actions being covered by filters when the header wraps; kept actions within the viewer and custom time fields reachable in narrow or short windows.
+- Added README contributor credits with profile links and contribution summaries for the people who have worked on SIMM.
+- Pinned development and CI tooling to Node 22.23.4 and added toolchain validation to build and release workflows.
 - Reorganized SIMM around environment pages with Overview, Mods, Plugins, UserLibs, Config, and Logs tabs, a shared environment header, consistent status information, and per-environment launch preferences.
 - Simplified global navigation and moved downloads into the status bar, with a Home view that shows each environment's state and next action.
 - Unified desktop styling and theme tokens, improved text contrast and responsive layouts, and added shared mod thumbnails and game artwork across management tools.
 - Rebuilt mod, plugin, library, configuration, and log views; added environment tab counts and bulk mod updates that preserve security-review requirements.
-- Contributors: [DooDesch](https://github.com/DooDesch) designed and implemented the UI/UX redesign in [PR #33](https://github.com/SirTidez/simm/pull/33).
-
-## [0.8.9-beta.1]
 
 - Fixed new-branch download progress so small setup files cannot be mistaken for the full game size. Transferred bytes continue advancing when an earlier estimate is too small, and the total is recalculated from download milestones.
 - Kept active game downloads below a displayed 100% until completion, while showing the current file and measured bytes as SIMM calculates the total.
 - Made database migration checksums consistent across builds with different line endings and safely recovered previously applied mod-integration migrations when their expected schema is present.
+
+- Contributors:
+  - [DooDesch](https://github.com/DooDesch): UI/UX redesign, environment-page navigation, shared design system, management-tool layouts, and artwork integration in [PR #33](https://github.com/SirTidez/simm/pull/33).
+  - [SirTidez](https://github.com/SirTidez): Steam launch/startup handling, native console and shared session sidebar integration, DLL metadata and inventory refresh, log attribution and layout fixes, Node tooling updates, and beta preparation.
 
 ## [0.8.8]
 

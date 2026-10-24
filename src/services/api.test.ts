@@ -14,6 +14,19 @@ describe('ApiService', () => {
     invokeMock.mockReset();
   });
 
+  it('addresses native view options and pop-out by environment', async () => {
+    const preferences = { autoOpen: false, showGame: true, showProfile: false, showMods: true, showPaths: true, sidebarWidth: 440 };
+    invokeMock.mockResolvedValue(preferences);
+    await ApiService.getNativeConsolePreferences('mono');
+    await ApiService.saveNativeConsolePreferences('mono', preferences);
+    await ApiService.popOutNativeConsole('mono');
+    expect(invokeMock.mock.calls).toEqual([
+      ['get_native_console_preferences', { environmentId: 'mono' }],
+      ['save_native_console_preferences', { environmentId: 'mono', preferences }],
+      ['pop_out_native_console', { environmentId: 'mono' }],
+    ]);
+  });
+
   it('requests one independent launch snapshot with the original freshness timestamp', async () => {
     const snapshot = { environmentId: 'env', launchStartedAt: 1234, processState: 'unknown', loaderState: 'unavailable', logPath: '', modifiedAt: null, diagnostic: 'Inspection unavailable' };
     invokeMock.mockResolvedValueOnce(snapshot);

@@ -110,6 +110,10 @@ vi.mock('./ErrorBoundary', () => ({
   ErrorBoundary: ({ children }: { children: ReactNode }) => children,
 }));
 
+vi.mock('./NativeConsoleWindow', () => ({
+  EnvironmentStatus: ({ environmentId, onBack, initialTab }: { environmentId: string; onBack: () => void; initialTab?: string }) => <section aria-label="Environment status"><h1>Status: {environmentId}</h1><span>Initial status tab: {initialTab}</span><button onClick={onBack}>Back from status</button></section>,
+}));
+
 vi.mock('./EnvironmentList', () => ({
   EnvironmentList: ({
     onInitialDetectionComplete,
@@ -118,7 +122,7 @@ vi.mock('./EnvironmentList', () => ({
     focusedEnvironmentRequestId,
   }: {
     onInitialDetectionComplete?: () => void;
-    onOpenWorkspace?: (workspace: { view: 'wizard' }) => void;
+    onOpenWorkspace?: (workspace: { view: 'wizard' } | { view: 'logs'; environmentId: string }) => void;
     focusedEnvironmentId?: string | null;
     focusedEnvironmentRequestId?: number;
   }) => (
@@ -127,6 +131,7 @@ vi.mock('./EnvironmentList', () => ({
       <span>Focus Request: {focusedEnvironmentRequestId ?? 0}</span>
       <button onClick={onInitialDetectionComplete}>Finish Detection</button>
       <button onClick={() => onOpenWorkspace?.({ view: 'wizard' })}>Add Environment</button>
+      <button onClick={() => onOpenWorkspace?.({ view: 'logs', environmentId: 'steam-main' })}>Open legacy logs</button>
     </div>
   ),
 }));
@@ -448,6 +453,44 @@ describe('App', () => {
     await screen.findByRole('region', { name: 'Home' });
     expect(screen.queryByRole('button', { name: 'Telemetry' })).toBeNull();
     expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
+  });
+
+  it('keeps Console and Logs in the environment tab bar and out of global navigation', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({ environments: [{ id: 'steam-main', name: 'Main', appId: '3164500', branch: 'main', outputDir: 'C:/Games/Main', runtime: 'IL2CPP', status: 'completed' }, { id: 'alt-beta', name: 'Alternate Beta', appId: '3164500', branch: 'alternate-beta', outputDir: 'C:/Games/Alt', runtime: 'Mono', status: 'completed' }] });
+    render(<App />);
+    await screen.findByRole('region', { name: 'Home' });
+    const navigation = screen.getByRole('complementary', { name: 'Primary navigation' });
+    expect(within(navigation).queryByRole('button', { name: 'Logs' })).toBeNull();
+    expect(within(navigation).queryByRole('button', { name: 'Environment Status' })).toBeNull();
+    fireEvent.click(within(navigation).getByRole('button', { name: /^Main/ }));
+    const tabs = screen.getByRole('navigation', { name: 'Main sections' });
+    fireEvent.click(within(tabs).getByRole('button', { name: 'Console' }));
+    expect(await screen.findByText('Initial status tab: console')).toBeInTheDocument();
+    expect(within(tabs).getByRole('button', { name: 'Console' })).toHaveAttribute('aria-current', 'page');
+    fireEvent.click(within(navigation).getByRole('button', { name: /^Alternate Beta/ }));
+    expect(await screen.findByRole('heading', { name: 'Status: alt-beta' })).toBeInTheDocument();
+    expect(screen.getByText('Initial status tab: console')).toBeInTheDocument();
+    const alternateTabs = screen.getByRole('navigation', { name: 'Alternate Beta sections' });
+    fireEvent.click(within(alternateTabs).getByRole('button', { name: 'Logs' }));
+    expect(await screen.findByText('Initial status tab: logs')).toBeInTheDocument();
+    expect(within(alternateTabs).getByRole('button', { name: 'Logs' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('opens an automatically requested environment status inside the existing shell and navigates back', async () => {
+    let handler: ((event: { payload: { environmentId: string } }) => void) | undefined;
+    listenMock.mockImplementation(async (eventName, callback) => {
+      if (eventName === 'native_console_opened') handler = callback as typeof handler;
+      return () => {};
+    });
+    render(<App />);
+    await screen.findByRole('region', { name: 'Home' });
+    await waitFor(() => expect(handler).toBeDefined());
+    act(() => handler?.({ payload: { environmentId: 'steam-main' } }));
+    expect(await screen.findByRole('heading', { name: 'Status: steam-main' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'Primary navigation' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back from status' }));
+    expect(await screen.findByRole('region', { name: 'Home' })).toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command.includes('webview') && command.includes('create'))).toBe(false);
   });
 
   it('warns when a Steam runtime switch has no downloaded counterpart', async () => {
@@ -827,8 +870,10 @@ describe('App', () => {
     vi.useFakeTimers();
     await act(async () => { fireEvent.click(button); });
     expect(invokeMock).toHaveBeenCalledWith('inspect_game_launch', { environmentId: 'env-main', launchStartedAt: 12345 });
+    expect(screen.getByRole('status')).not.toHaveTextContent(/not been confirmed|startup remains unconfirmed|could not confirm/i);
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screen.getByText('Schedule I is taking longer to start')).toBeInTheDocument();
+    expect(screen.getByRole('status')).not.toHaveTextContent(/not been confirmed|startup remains unconfirmed|could not confirm/i);
     expect(screen.queryByRole('dialog', { name: /MelonLoader Launch Not Confirmed/ })).not.toBeInTheDocument();
     expect(dialogMocks.message).not.toHaveBeenCalled();
     confirmed = true;

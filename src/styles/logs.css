@@ -215,6 +215,8 @@
 
 .logs-panel__viewer-header {
   display: flex;
+  /* Wrapped actions must stay above the filters instead of shrinking under them. */
+  flex-shrink: 0;
   align-items: center;
   gap: var(--simm-space-4);
   min-height: 3.25rem;
@@ -251,6 +253,8 @@
 
 .logs-panel__header-actions {
   flex: none;
+  max-width: 100%;
+  flex-wrap: wrap;
   gap: var(--simm-space-2);
 }
 
@@ -260,6 +264,9 @@
 }
 
 .logs-panel__filters {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: var(--simm-space-2) var(--simm-space-4);
   border-bottom: 1px solid var(--simm-line);
 }
@@ -293,8 +300,15 @@
   height: var(--simm-control-h);
 }
 
+.logs-panel__custom-range {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .logs-panel__custom-range input {
   width: 10rem;
+  max-width: 100%;
   height: var(--simm-control-h);
   font-family: var(--simm-font-mono);
   font-size: var(--simm-text-xs);
@@ -335,7 +349,7 @@
 
 .logs-panel__viewer-body {
   position: relative;
-  flex: 1 1 auto;
+  flex: 1 0 6rem;
   min-height: 0;
   background: var(--simm-sunken);
 }

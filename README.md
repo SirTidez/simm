@@ -78,7 +78,7 @@ React component -> `ApiService` -> `invoke()` -> Rust command -> service -> resu
 ## Prerequisites
 
 - **Rust (stable)**: https://rustup.rs/
-- **Node.js v22.12+**: https://nodejs.org/
+- **Node.js 22.23.4+ (22.x) or 24.22.1+ (24.x)**: https://nodejs.org/
 - **Bun 1.3.x**: https://bun.sh/
 
 Linux Schedule I support runs the Windows game through Steam Proton. MelonLoader installs require Protontricks so SIMM can apply the game prefix prerequisites:
@@ -90,10 +90,14 @@ SIMM can install the Linux DepotDownloader release into `~/.local/bin` when Depo
 
 ## Node.js Version
 
-The frontend toolchain is validated against Node 22 in CI and now requires Node 22.12 or newer locally.
+The pinned build baseline is Node **22.23.4**. The supported range is `^22.23.4 || ^24.22.1`, covering patched Node 22 and Node 24 releases. Earlier patches and other major versions are outside this toolchain's supported range.
 
-- If you use `nvm`, run `nvm use` at the repo root to pick up the checked-in `.nvmrc`
-- GitHub Actions uses Node 22 for all frontend jobs, so local validation should use the same baseline
+- If you use `nvm`, install and select the version in `.nvmrc` (currently `nvm install 22.23.4`, then `nvm use 22.23.4`).
+- GitHub Actions explicitly selects Node for every Bun job. Frontend CI runs on both 22.23.4 and 24.22.1; backend and release jobs use `.nvmrc`.
+- Bun remains the package manager. Node is also required because build/test tools use Node shebangs. Node is a development/build dependency; the installed SIMM desktop application uses Rust/Tauri and the system WebView.
+- Rebuild Linux/Flatpak Docker images without `-SkipImageBuild` to pick up the patched Node default. Reusing an old image preserves its old runtime.
+
+See the [toolchain upgrade plan](docs/superpowers/plans/2026-10-21-node-toolchain-security.md) for the compatibility checks, package acceptance gates, and rollback policy.
 
 ## Windows Installer
 
@@ -429,6 +433,18 @@ The file **`app-icon.png`** in the project root is the source image for the appl
 - Route all frontend backend calls through `src/services/api.ts`
 - Keep shared types synchronized between `src-tauri/src/types.rs` and `src/types/index.ts`
 - Run `cargo fmt` for Rust changes and keep TypeScript checks clean
+
+## Contributors
+
+Thanks to the people who have contributed code, design, fixes, and tooling to SIMM.
+
+| Contributor | Contributions include |
+| --- | --- |
+| [SirTidez](https://github.com/SirTidez) | Project maintenance, core development, mod-management workflows, and release tooling. |
+| [DooDesch](https://github.com/DooDesch) | UI/UX redesign, environment-page navigation, the shared design system, and artwork integration. |
+| [ESTONlA](https://github.com/ESTONlA) | Discord Rich Presence, custom themes, environment identity handling, and UI performance improvements. |
+| [HazDS](https://github.com/HazDS) | Support for importing and deleting local environments. |
+| [ifBars](https://github.com/ifBars) | Mod installation and scanning, Steam launching, Nexus file handling, and profile sharing. |
 
 ## License
 

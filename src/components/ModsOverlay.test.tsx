@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ModsOverlay } from './ModsOverlay';
 import type { Environment } from '../types';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -94,6 +94,9 @@ describe('ModsOverlay', () => {
         fileName: string;
         path: string;
         source?: string;
+        author?: string;
+        version?: string;
+        disabled?: boolean;
       }>;
       modsDirectory: string;
       count: number;
@@ -256,6 +259,49 @@ describe('ModsOverlay', () => {
     );
 
     expect((await screen.findAllByText('S1API.Mono.MelonLoader.dll')).length).toBeGreaterThan(0);
+  });
+
+  it('displays local author and version in the list and filters by author', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Local Mod', fileName: 'Local.dll', path: 'C:/env/Mods/Local.dll', source: 'local', author: 'Local Author', version: '2.7.1-beta.4+local', managed: false },
+        { name: 'Other Mod', fileName: 'Other.dll', path: 'C:/env/Mods/Other.dll', source: 'local', author: 'Another Author' },
+      ], modsDirectory: 'C:/env/Mods', count: 2,
+    });
+    const { container } = render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    await screen.findAllByText('Local Mod');
+    const row = Array.from(container.querySelectorAll('.env-assets-table tbody tr')).find((item) => item.textContent?.includes('Local Mod')) as HTMLElement;
+    expect(row).toHaveTextContent('Local Author');
+    expect(within(row).getByText('2.7.1-beta.4+local')).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('Search installed mods'), { target: { value: 'local author' } });
+    expect(screen.queryByText('Other Mod')).toBeNull();
+    expect(screen.getAllByText('Local Mod').length).toBeGreaterThan(0);
+  });
+
+  it('keeps watcher author, version and enabled status when an older initial read finishes late', async () => {
+    let finishOld: (value: unknown) => void = () => {};
+    apiMocks.getMods.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }));
+    render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    await waitFor(() => expect(apiMocks.getMods).toHaveBeenCalledTimes(1));
+    const current = { name: 'Watched Mod', fileName: 'Watched.dll', path: 'C:/env/Mods/Watched.dll.disabled', source: 'local', author: 'New author', version: '2.0.0', disabled: true };
+    modsSnapshotHandler?.({ environmentId: 'env-1', snapshot: { mods: [current], modsDirectory: 'C:/env/Mods', count: 1 } });
+    expect((await screen.findAllByText('New author')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('2.0.0').length).toBeGreaterThan(0);
+    await act(async () => { finishOld({ mods: [{ ...current, author: 'Old author', version: '1.0.0', disabled: false }], modsDirectory: 'C:/env/Mods', count: 1 }); });
+    await waitFor(() => expect(screen.queryByText('Old author')).toBeNull());
+    expect(screen.getAllByText('2.0.0').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy();
+  });
+
+  it('cleans up a watcher subscription that resolves after unmount', async () => {
+    let finishRegistration: (value: () => void) => void = () => {};
+    const stop = vi.fn();
+    eventMocks.onModsSnapshotUpdated.mockReturnValueOnce(new Promise(resolve => { finishRegistration = resolve; }));
+    const { unmount } = render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    unmount();
+    finishRegistration(stop);
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(apiMocks.getMods).not.toHaveBeenCalled();
   });
 
   it('uses one installed-mod snapshot projection for a watcher batch', async () => {

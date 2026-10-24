@@ -59,6 +59,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 const eventMocks = vi.hoisted(() => ({
+  onModLibraryChanged: vi.fn(),
   createAsyncListenerScope: vi.fn(() => ({
     register: vi.fn(),
     dispose: vi.fn(),
@@ -428,6 +429,7 @@ describe("ModLibraryOverlay", () => {
       eventMocks.onUpdateCheckComplete,
       eventMocks.onRuntimeSwitch,
       eventMocks.onModsChanged,
+      eventMocks.onModLibraryChanged,
       eventMocks.onModsSnapshotUpdated,
       eventMocks.onPluginsChanged,
       eventMocks.onUserLibsChanged,
@@ -451,6 +453,20 @@ describe("ModLibraryOverlay", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("shows extracted local author and version in library rows", async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [makeEntry({
+      displayName: "Local Library Mod", author: "Local Library Author",
+      sourceVersion: "2.7.1-beta.4+local", installedVersion: "2.7.1-beta.4+local",
+    })] });
+    const { container } = renderLibraryOverlay({ libraryTab: "library" });
+    await screen.findAllByText("Local Library Mod");
+    const row = Array.from(container.querySelectorAll('.lib-row--downloaded')).find((item) => item.textContent?.includes('Local Library Mod'));
+    expect(row?.textContent).toContain('Local Library Author');
+    expect(row?.textContent).toContain('2.7.1-beta.4+local');
+    fireEvent.change(screen.getByPlaceholderText('Filter by mod, author, or version'), { target: { value: 'local library author' } });
+    expect(screen.getAllByText('Local Library Mod').length).toBeGreaterThan(0);
   });
 
   it("shows S1API update state in featured downloads when installed version is behind", async () => {

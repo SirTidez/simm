@@ -11,7 +11,7 @@ import {
 } from './environmentPresentation';
 import { useEnvironmentTabCounts, type EnvironmentTabCounts } from './useEnvironmentTabCounts';
 
-export type EnvironmentWorkspaceTab = 'overview' | 'mods' | 'plugins' | 'userLibs' | 'config' | 'logs';
+export type EnvironmentWorkspaceTab = 'overview' | 'mods' | 'plugins' | 'userLibs' | 'config' | 'console' | 'logs';
 
 const TABS: ReadonlyArray<{ id: EnvironmentWorkspaceTab; label: string; icon: IconName }> = [
   { id: 'overview', label: 'Overview', icon: 'hardDrive' },
@@ -19,6 +19,7 @@ const TABS: ReadonlyArray<{ id: EnvironmentWorkspaceTab; label: string; icon: Ic
   { id: 'plugins', label: 'Plugins', icon: 'plug' },
   { id: 'userLibs', label: 'UserLibs', icon: 'book' },
   { id: 'config', label: 'Config', icon: 'fileCode' },
+  { id: 'console', label: 'Console', icon: 'terminal' },
   { id: 'logs', label: 'Logs', icon: 'fileLines' },
 ];
 
@@ -59,6 +60,7 @@ interface EnvironmentWorkspaceHeaderProps {
   launching: boolean;
   onSelectTab: (tab: EnvironmentWorkspaceTab) => void;
   onLaunch: () => void;
+  nativeConsoleSupported?: boolean;
 }
 
 /**
@@ -72,6 +74,7 @@ export function EnvironmentWorkspaceHeader({
   launching,
   onSelectTab,
   onLaunch,
+  nativeConsoleSupported = true,
 }: EnvironmentWorkspaceHeaderProps) {
   const status = summarizeEnvironmentStatus(environment, modUpdateCount);
   const gameVersion = environmentGameVersion(environment);
@@ -107,7 +110,7 @@ export function EnvironmentWorkspaceHeader({
         </SimmButton>
       </div>
       <nav className="ui-tabs-line env-header__tabs" aria-label={`${environment.name} sections`}>
-        {TABS.map((tab) => {
+        {TABS.filter(tab => tab.id !== 'console' || nativeConsoleSupported).map((tab) => {
           const badge = tabBadge(tab.id, counts, modUpdateCount);
           return (
             <button

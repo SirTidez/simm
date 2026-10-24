@@ -6,7 +6,7 @@ param(
     [string] $Image = "simm-linux-builder:ubuntu22.04",
     [string] $UbuntuVersion = "22.04",
     [string] $BunVersion = "latest",
-    [string] $NodeVersion = "22.12.0",
+    [string] $NodeVersion = "22.23.4",
     [string] $RustToolchain = "stable",
     [switch] $SkipImageBuild,
     [switch] $Help
@@ -25,7 +25,7 @@ Options:
   -Image <name:tag>               Docker image tag. Defaults to simm-linux-builder:ubuntu22.04.
   -UbuntuVersion <version>        Ubuntu base image version. Defaults to 22.04.
   -BunVersion <version|latest>    Bun version to install. Defaults to latest.
-  -NodeVersion <version>          Node.js version to install. Defaults to 22.12.0.
+  -NodeVersion <version>          Node.js version to install. Defaults to 22.23.4.
   -RustToolchain <toolchain>      Rust toolchain to install. Defaults to stable.
   -SkipImageBuild                 Reuse the existing Docker image.
   -Help                           Show this help text.

@@ -215,6 +215,28 @@ pub async fn launch_game(
         })?;
 
     log::info!("Launch dispatched: environment={}, method={}, started_at={}; game startup is not yet confirmed", environment_id, method_str, launch_started_at);
+    // Observation/docking is independent of launch success and never changes Steam arguments.
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        let pool = db.inner().clone();
+        let id = environment_id.clone();
+        tauri::async_runtime::spawn(async move {
+            match crate::services::native_console::preferences(pool.as_ref(), &id).await {
+                Ok(preferences) if preferences.auto_open => {
+                    if let Err(error) =
+                        crate::services::native_console::open(&app, pool, &id, true).await
+                    {
+                        log::warn!(
+                            "Game launch was dispatched, but Console could not open: {error:#}"
+                        );
+                    }
+                }
+                Err(error) => log::warn!("Could not load Console preferences: {error:#}"),
+                _ => {}
+            }
+        });
+    }
     Ok(serde_json::json!({
         "success": true,
         "executablePath": result,

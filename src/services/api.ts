@@ -26,6 +26,9 @@ import type {
   LaunchGameResult,
   MelonLoaderLaunchVerification,
   GameLaunchInspection,
+  NativeConsolePreferences,
+  NativeConsoleSnapshot,
+  NativeConsoleViewport,
   ModProfileApplyRequest,
   ModProfileApplyResult,
   OneTimeDownloadCredentials,
@@ -124,6 +127,31 @@ export class ApiService {
   // Settings
   static async getSettings(): Promise<Settings> {
     return invoke('get_settings');
+  }
+
+  static async getNativeConsolePreferences(environmentId: string): Promise<NativeConsolePreferences> {
+    return invoke('get_native_console_preferences', { environmentId });
+  }
+  static async saveNativeConsolePreferences(environmentId: string, preferences: NativeConsolePreferences): Promise<NativeConsolePreferences> {
+    return invoke('save_native_console_preferences', { environmentId, preferences });
+  }
+  static async openNativeConsole(environmentId: string, navigate = true): Promise<void> {
+    return invoke('open_native_console', { environmentId, navigate });
+  }
+  static async getNativeConsoleSnapshot(environmentId: string): Promise<NativeConsoleSnapshot> {
+    return invoke('get_native_console_snapshot', { environmentId });
+  }
+  static async retryNativeConsole(environmentId: string): Promise<void> {
+    return invoke('retry_native_console', { environmentId });
+  }
+  static async popOutNativeConsole(environmentId: string): Promise<void> {
+    return invoke('pop_out_native_console', { environmentId });
+  }
+  static async closeNativeConsoleGame(environmentId: string): Promise<void> {
+    return invoke('close_native_console_game', { environmentId });
+  }
+  static async updateNativeConsoleViewport(environmentId: string, viewport: NativeConsoleViewport): Promise<void> {
+    return invoke('update_native_console_viewport', { environmentId, viewport });
   }
 
   static async saveSettings(settings: Partial<Settings>): Promise<{ success: boolean }> {
@@ -824,6 +852,7 @@ export class ApiService {
       fileName: string;
       path: string;
       version?: string;
+      author?: string;
       source?: string;
       relatedMod?: string;
       disabled?: boolean;
@@ -2045,7 +2074,8 @@ export class ApiService {
     timePeriod: string | null,
     customTimeStart: string | null,
     customTimeEnd: string | null,
-    outputPath: string
+    outputPath: string,
+    filterModTags?: string[],
   ): Promise<void> {
     return invoke('export_logs', {
       logPath,
@@ -2057,6 +2087,7 @@ export class ApiService {
       customTimeStart,
       customTimeEnd,
       outputPath,
+      ...(filterModTags?.length ? { filterModTags } : {}),
     });
   }
 

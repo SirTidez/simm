@@ -18,6 +18,7 @@ import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
 import { Icon } from './Icon';
+import { NativeConsoleSettings } from './NativeConsoleWindow';
 import {
   Dialog,
   DialogHeader,
@@ -1952,6 +1953,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                 <SettingsGroup id="window" title="Window">
                   <WindowBehaviorSettingsPanel />
+                  {(settings?.platform ?? 'windows') === 'windows' ? <NativeConsoleSettings /> : null}
                 </SettingsGroup>
               </div>
             </div>

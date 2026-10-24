@@ -1147,3 +1147,73 @@ export interface GameLaunchInspection {
   modifiedAt: number | null;
   diagnostic: string | null;
 }
+
+export interface NativeConsolePreferences {
+  autoOpen: boolean;
+  showProfile: boolean;
+  showMods: boolean;
+  showGame: boolean;
+  showPaths: boolean;
+  sidebarWidth: number;
+}
+
+export interface NativeConsoleSnapshot {
+  supported: boolean;
+  environment: Environment;
+  profileName: string | null;
+  profileRuntime: string | null;
+  profileUpdatedAt: string | null;
+  entries: Array<{ name: string; version: string | null; versionSource: 'melonInfo' | 'assembly' | 'installMetadata' | null; author: string | null; fileName: string | null; enabled: boolean; kind: string }>;
+  preferences: NativeConsolePreferences;
+  presentation: 'docked' | 'popout';
+  status: 'waitingForGame' | 'waitingForConsole' | 'docked' | 'poppedOut' | 'detached' | 'exited' | 'unavailable';
+  processId: number | null;
+  processStartedAt: number | null;
+  inventoryUpdatedAt: number;
+  diagnostic: string | null;
+  messages: NativeConsoleMessages;
+}
+
+export interface NativeConsoleMessages {
+  errors: number;
+  warnings: number;
+  entries: NativeConsoleMessage[];
+  omitted: number;
+  generation: number;
+  state: 'waiting' | 'reading' | 'ready' | 'unavailable';
+  diagnostic: string | null;
+  sources: NativeConsoleSourceCounts[];
+}
+
+export interface NativeConsoleMessageOrigin {
+  name: string;
+  fileName: string | null;
+  kind: string;
+}
+
+export interface NativeConsoleSourceCounts {
+  source: string | null;
+  origin: NativeConsoleMessageOrigin | null;
+  errors: number;
+  warnings: number;
+}
+
+export interface NativeConsoleMessage {
+  id: number;
+  lineNumber: number;
+  level: 'error' | 'warning';
+  timestamp: string | null;
+  source: string | null;
+  origin: NativeConsoleMessageOrigin | null;
+  message: string;
+  truncated: boolean;
+}
+
+export interface NativeConsoleViewport {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  revision: number;
+}

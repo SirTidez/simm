@@ -3,6 +3,10 @@ import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, MelonLo
 
 export type EventUnlisten = () => void;
 
+export async function onNativeConsoleOpened(handler: (data: { environmentId: string }) => void): Promise<EventUnlisten> {
+  return listen<{ environmentId: string }>('native_console_opened', (event) => handler(event.payload));
+}
+
 /**
  * Own asynchronous Tauri listener registration for a React effect.
  *
@@ -127,6 +131,7 @@ export interface ModsSnapshotUpdatedEvent {
       fileName: string;
       path: string;
       version?: string;
+      author?: string;
       source?: string;
       sourceUrl?: string;
       disabled?: boolean;
@@ -261,6 +266,10 @@ export async function onModsChanged(handler: (data: ModsChangedEvent) => void): 
   return await listen<ModsChangedEvent>('mods_changed', (event) => {
     handler(event.payload);
   });
+}
+
+export async function onModLibraryChanged(handler: () => void): Promise<() => void> {
+  return await listen<null>('mod_library_changed', () => handler());
 }
 
 export async function onModsSnapshotUpdated(handler: (data: ModsSnapshotUpdatedEvent) => void): Promise<() => void> {

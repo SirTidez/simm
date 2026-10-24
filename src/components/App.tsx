@@ -14,6 +14,7 @@ import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-
 import { AppDialogProvider, useAppDialogs } from './AppDialogProvider';
 import { GameLaunchStoreProvider, isLaunchPending, useGameLaunchStore } from '../stores/gameLaunchStore';
 import { GameLaunchStatus } from './GameLaunchStatus';
+import { EnvironmentStatus } from './NativeConsoleWindow';
 import { relaunch } from '@tauri-apps/plugin-process';
 import type { WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
@@ -32,6 +33,7 @@ import {
   onMelonLoaderUpdateAvailable,
   onModIntegrationRequestsChanged,
   onRuntimeSwitch,
+  onNativeConsoleOpened,
 } from '../services/events';
 import { logger } from '../services/logger';
 import {
@@ -198,10 +200,6 @@ const PluginsOverlay = lazyNamed(
 const UserLibsOverlay = lazyNamed(
   () => import('./UserLibsOverlay'),
   (module) => module.UserLibsOverlay,
-);
-const LogsOverlay = lazyNamed(
-  () => import('./LogsOverlay'),
-  (module) => module.LogsOverlay,
 );
 const SaveBackupsWorkspace = lazyNamed(
   () => import('./SaveBackupsWorkspace'),
@@ -1631,6 +1629,15 @@ function AppContent() {
     pushWorkspace(workspace);
   }, [activeWorkspace, pushWorkspace, replaceWorkspace]);
 
+  useEffect(() => {
+    const listeners = createAsyncListenerScope(error => logger.error('Console navigation listener failed', error));
+    listeners.register(() => onNativeConsoleOpened(({ environmentId }) => {
+      setSelectedEnvironmentId(environmentId);
+      openWorkspace({ view: 'console', environmentId });
+    }));
+    return listeners.dispose;
+  }, [openWorkspace]);
+
   const openSecurityReportWorkspace = useCallback((reportState: SecurityReportWorkspaceRequest) => {
     pushWorkspace(
       { view: 'securityReport' },
@@ -2459,16 +2466,14 @@ function AppContent() {
             environmentId={workspace.environmentId}
           />
         ) : null;
+      case 'console':
       case 'logs':
-        return 'environmentId' in workspace && getEnvironmentById(workspace.environmentId) ? (
-          <LogsOverlay
-            isOpen={true}
-            onClose={onCloseHandler}
-            environmentId={workspace.environmentId}
-            environment={getEnvironmentById(workspace.environmentId)!}
-            onOpenModLibraryView={openLibraryFromLogs}
-          />
-        ) : null;
+        return <EnvironmentStatus key={workspace.environmentId} environmentId={workspace.environmentId}
+          environment={getEnvironmentById(workspace.environmentId) ?? undefined}
+          embedded initialTab={workspace.view === 'logs' ? 'logs' : 'console'}
+          nativeConsoleSupported={(settings?.platform ?? 'windows') === 'windows'}
+          onBack={onCloseHandler} onOpenModLibraryView={openLibraryFromLogs}
+          onSelectTab={tab => replaceWorkspace({ view: tab, environmentId: workspace.environmentId })} />;
       case 'config':
         return 'environmentId' in workspace && getEnvironmentById(workspace.environmentId) ? (
           <ConfigurationOverlay
@@ -2482,7 +2487,7 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, telemetryAvailable, updateWorkspaceEntry]);
+  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, replaceWorkspace, selectedEnvironmentId, settings, skipSetupGuide, telemetryAvailable, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
@@ -2569,9 +2574,10 @@ function AppContent() {
         selectEnvironmentForShell(environmentId);
         openWorkspace({ view: 'userLibs', environmentId });
         return;
+      case 'console':
       case 'logs':
         selectEnvironmentForShell(environmentId);
-        openWorkspace({ view: 'logs', environmentId });
+        openWorkspace({ view: activeWorkspace.view, environmentId });
         return;
       case 'config':
         selectEnvironmentForShell(environmentId);
@@ -2597,6 +2603,7 @@ function AppContent() {
       case 'plugins':
       case 'userLibs':
       case 'config':
+      case 'console':
       case 'logs':
         return activeWorkspace.view;
       default:
@@ -2682,6 +2689,7 @@ function AppContent() {
                     modUpdateCount={modUpdateCounts.get(workspaceEnvironment.id) ?? 0}
                     launching={isLaunchPending(launchAttempts.get(workspaceEnvironment.id))}
                     onSelectTab={selectEnvironmentWorkspaceTab}
+                    nativeConsoleSupported={(settings?.platform ?? 'windows') === 'windows'}
                     onLaunch={() => launchEnvironment(workspaceEnvironment)}
                   />
                   <div className={`env-workspace__body env-workspace__body--${environmentWorkspaceTab}`}>

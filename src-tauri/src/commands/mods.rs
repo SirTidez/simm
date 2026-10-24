@@ -141,6 +141,7 @@ const MOD_LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 struct ModLibraryCacheEntry {
     loaded_at: Instant,
+    storage_directory: std::path::PathBuf,
     library: ModLibraryResult,
 }
 
@@ -595,18 +596,28 @@ pub async fn get_mods_count(
 
 #[tauri::command]
 pub async fn get_mod_library(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<serde_json::Value, String> {
+    let settings = runtime_settings.snapshot().await;
+    let storage_directory = Path::new(&settings.default_download_dir).join("Mods");
+    if let Err(error) =
+        crate::services::filesystem_watcher::ensure_mod_library_watcher(&app, &storage_directory)
+            .await
+    {
+        log::warn!("Could not watch shared mod library: {error:#}");
+    }
     let mut cache = MOD_LIBRARY_CACHE.lock().await;
     if let Some(entry) = cache.as_ref() {
-        if entry.loaded_at.elapsed() <= MOD_LIBRARY_CACHE_TTL {
+        if entry.storage_directory == storage_directory
+            && entry.loaded_at.elapsed() <= MOD_LIBRARY_CACHE_TTL
+        {
             return serde_json::to_value(entry.library.clone()).map_err(|e| e.to_string());
         }
     }
 
-    let mods_service = ModsService::new(db.inner().clone())
-        .with_runtime_settings(runtime_settings.snapshot().await);
+    let mods_service = ModsService::new(db.inner().clone()).with_runtime_settings(settings);
     let library = mods_service
         .get_mod_library()
         .await
@@ -614,6 +625,7 @@ pub async fn get_mod_library(
 
     *cache = Some(ModLibraryCacheEntry {
         loaded_at: Instant::now(),
+        storage_directory,
         library: library.clone(),
     });
 
@@ -1909,6 +1921,7 @@ mod tests {
     async fn library_cache_invalidation_discards_a_fresh_entry_after_snapshot_completion() {
         *MOD_LIBRARY_CACHE.lock().await = Some(ModLibraryCacheEntry {
             loaded_at: Instant::now(),
+            storage_directory: std::path::PathBuf::from("test-library"),
             library: ModLibraryResult {
                 downloaded: Vec::new(),
             },

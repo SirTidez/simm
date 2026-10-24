@@ -58,7 +58,7 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 serial_test = "3.0"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "handleapi", "minwinbase", "winbase", "wincon", "winnt", "winuser", "shellapi", "dpapi", "wincrypt"] }
+winapi = { version = "0.3", features = ["fileapi", "handleapi", "minwinbase", "winbase", "wincon", "winnt", "winuser", "shellapi", "dpapi", "wincrypt", "processthreadsapi"] }
 winreg = "0.55"
 tauri-plugin-single-instance = { version = "2.4.1", features = ["deep-link"] }
 

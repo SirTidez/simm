@@ -9,9 +9,11 @@ const apiMocks = vi.hoisted(() => ({
 
 let modsChangedHandler: (() => void) | null = null;
 let modsSnapshotHandler: (() => void) | null = null;
+let libraryChangedHandler: (() => void) | null = null;
 let metadataRefreshHandler:
   ((status: { activeCount: number; running: boolean }) => void) | null = null;
 const eventMocks = vi.hoisted(() => ({
+  onModLibraryChanged: vi.fn(),
   onModsChanged: vi.fn(),
   onModsSnapshotUpdated: vi.fn(),
   onPluginsChanged: vi.fn(),
@@ -45,10 +47,18 @@ function LibraryActions() {
   );
 }
 
+function LibraryDetailsProbe() {
+  const { library, ensureLibrary } = useModLibraryStore();
+  useEffect(() => { void ensureLibrary(); }, [ensureLibrary]);
+  const entry = library?.downloaded[0];
+  return <output>{entry ? `${entry.author}:${entry.installedVersion}:${entry.files?.join(',')}` : 'waiting'}</output>;
+}
+
 describe("ModLibraryStoreProvider", () => {
   beforeEach(() => {
     modsChangedHandler = null;
     modsSnapshotHandler = null;
+    libraryChangedHandler = null;
     metadataRefreshHandler = null;
     apiMocks.getModLibrary.mockReset();
     Object.values(eventMocks).forEach((listener) => listener.mockReset());
@@ -59,6 +69,10 @@ describe("ModLibraryStoreProvider", () => {
     });
     eventMocks.onModsSnapshotUpdated.mockImplementation(async (handler) => {
       modsSnapshotHandler = handler;
+      return () => {};
+    });
+    eventMocks.onModLibraryChanged.mockImplementation(async (handler) => {
+      libraryChangedHandler = handler;
       return () => {};
     });
     eventMocks.onModMetadataRefreshStatus.mockImplementation(
@@ -75,6 +89,30 @@ describe("ModLibraryStoreProvider", () => {
   });
 
   afterEach(cleanup);
+
+  it("refreshes local metadata and renamed DLLs after a shared library filesystem event", async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [{ storageId: 'local', author: 'Old author', installedVersion: '1.0', files: ['Local.dll'] }] })
+      .mockResolvedValueOnce({ downloaded: [{ storageId: 'local', author: 'New author', installedVersion: '2.0', files: ['Local.dll.disabled'] }] });
+    render(<ModLibraryStoreProvider><LibraryDetailsProbe /></ModLibraryStoreProvider>);
+    await screen.findByText('Old author:1.0:Local.dll');
+    await act(async () => { libraryChangedHandler?.(); });
+    expect(await screen.findByText('New author:2.0:Local.dll.disabled')).toBeTruthy();
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains one follow-up when a DLL changes again during a library refresh", async () => {
+    let finishOld: (value: unknown) => void = () => {};
+    apiMocks.getModLibrary.mockResolvedValueOnce({ downloaded: [] })
+      .mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }))
+      .mockResolvedValueOnce({ downloaded: [{ storageId: 'new', author: 'Latest author', installedVersion: '3.0', files: ['Local.dll'] }] });
+    render(<ModLibraryStoreProvider><LibraryDetailsProbe /></ModLibraryStoreProvider>);
+    await waitFor(() => expect(libraryChangedHandler).not.toBeNull());
+    await act(async () => { libraryChangedHandler?.(); });
+    await act(async () => { libraryChangedHandler?.(); libraryChangedHandler?.(); finishOld({ downloaded: [] }); });
+    expect(await screen.findByText('Latest author:3.0:Local.dll')).toBeTruthy();
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(3);
+  });
 
   it("shares one initial snapshot request between passive consumers", async () => {
     render(
@@ -250,7 +288,8 @@ describe("ModLibraryStoreProvider", () => {
   });
 
   it("cleans up each shared library event listener on unmount", async () => {
-    const unlisteners = Array.from({ length: 6 }, () => vi.fn());
+    const unlisteners = Array.from({ length: 7 }, () => vi.fn());
+    eventMocks.onModLibraryChanged.mockResolvedValueOnce(unlisteners[6]);
     eventMocks.onModsChanged.mockResolvedValueOnce(unlisteners[0]);
     eventMocks.onModsSnapshotUpdated.mockResolvedValueOnce(unlisteners[1]);
     eventMocks.onPluginsChanged.mockResolvedValueOnce(unlisteners[2]);

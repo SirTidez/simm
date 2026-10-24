@@ -1137,12 +1137,12 @@ export function ModsOverlay({
 
   const loadDownloadedLibrary = useCallback(async () => {
     try {
-      const library = sharedLibrary ?? await ensureLibrary();
+      const library = await ensureLibrary();
       setDownloadedMods(library.downloaded || []);
     } catch (err) {
       console.warn('Failed to load downloaded mod library:', err);
     }
-  }, [ensureLibrary, sharedLibrary]);
+  }, [ensureLibrary]);
 
   const refreshDownloadedLibrary = useCallback(async () => {
     try {
@@ -1186,18 +1186,22 @@ export function ModsOverlay({
   useEffect(() => {
     if (isOpen && environmentId) {
       void loadEnvironment();
-      void loadModsPanelData();
       void refreshNexusDownloadAccess();
 
       // Listen for filesystem changes
       let unlistenModsSnapshot: (() => void) | null = null;
+      let disposed = false;
 
       const setupListener = async () => {
         try {
-          unlistenModsSnapshot = await onModsSnapshotUpdated((data) => {
-            if (data.environmentId !== environmentId || !data.snapshot) {
+          const unlisten = await onModsSnapshotUpdated((data) => {
+            if (disposed || data.environmentId !== environmentId || !data.snapshot) {
               return;
             }
+
+            // A complete watcher snapshot supersedes any older IPC read that
+            // is still in flight for this view.
+            activeLoadRequestRef.current += 1;
 
             const normalizedMods = (data.snapshot.mods || []).map(mod => ({
               ...mod,
@@ -1206,16 +1210,26 @@ export function ModsOverlay({
 
             setMods(previous => mergeModSnapshots(previous, normalizedMods));
             setModsDirectory(data.snapshot.modsDirectory || '');
+            setHasLoadedMods(true);
+            setLoading(false);
+            setError(null);
             void loadCachedModUpdates();
           });
+          if (disposed) unlisten();
+          else unlistenModsSnapshot = unlisten;
         } catch (error) {
           console.error('Failed to set up mods changed listener:', error);
+        } finally {
+          // Subscribe before taking the initial snapshot to close the gap
+          // between mounting the view and the first DLL change.
+          if (!disposed) void loadModsPanelData();
         }
       };
 
       void setupListener();
 
       return () => {
+        disposed = true;
         activeLoadRequestRef.current += 1;
         if (unlistenModsSnapshot) unlistenModsSnapshot();
       };
@@ -2494,6 +2508,7 @@ export function ModsOverlay({
       return mod.name.toLowerCase().includes(query)
         || mod.fileName.toLowerCase().includes(query)
         || (mod.summary || '').toLowerCase().includes(query)
+        || (mod.author || '').toLowerCase().includes(query)
         || (mod.version || '').toLowerCase().includes(query);
     }), [installedSearchTerm, modListFilter, modUpdates, mods, modsTab]);
 
@@ -3582,6 +3597,7 @@ export function ModsOverlay({
                     <span className="env-assets-row__text">
                       <span className="env-assets-row__name">{mod.name}</span>
                       <span className="env-assets-row__desc">
+                        {mod.author ? <span>{mod.author} · </span> : null}
                         <span className="env-assets-row__desc-source">{getSourceLabel(mod.source)} · </span>
                         {mod.summary || mod.fileName}
                       </span>

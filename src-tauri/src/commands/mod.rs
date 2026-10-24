@@ -16,6 +16,7 @@ pub mod mod_integration;
 pub mod mod_profiles;
 pub mod mod_update;
 pub mod mods;
+pub mod native_console;
 pub mod nexus_mods;
 pub mod plugins;
 pub mod save_backups;

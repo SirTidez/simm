@@ -303,6 +303,7 @@ export type WorkspaceRoute =
   | { view: 'plugins'; environmentId: string }
   | { view: 'userLibs'; environmentId: string }
   | { view: 'logs'; environmentId: string }
+  | { view: 'console'; environmentId: string }
   | { view: 'config'; environmentId: string }
   | { view: 'settings' }
   | { view: 'telemetry' }

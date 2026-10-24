@@ -1057,8 +1057,10 @@ describe('EnvironmentList', () => {
     const button = await screen.findByRole('button', { name: 'Play' });
     vi.useFakeTimers();
     await act(async () => { fireEvent.click(button); });
+    expect(screen.getByRole('status')).not.toHaveTextContent(/not been confirmed|startup remains unconfirmed|could not confirm/i);
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screen.getByText('Schedule I is taking longer to start')).toBeInTheDocument();
+    expect(screen.getByRole('status')).not.toHaveTextContent(/not been confirmed|startup remains unconfirmed|could not confirm/i);
     expect(screen.queryByTestId('message-overlay')).not.toBeInTheDocument();
     apiMocks.inspectGameLaunch.mockImplementation(async (environmentId, launchStartedAt) => ({ environmentId, launchStartedAt, processState: 'running', loaderState: 'confirmed', logPath: '', modifiedAt: 12345, diagnostic: null }));
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
