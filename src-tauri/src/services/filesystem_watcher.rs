@@ -470,11 +470,21 @@ mod tests {
     async fn start_and_stop_watching_existing_dir() -> Result<()> {
         let service = FileSystemWatcherService::new();
         let temp = tempdir()?;
+        // The service watches the parent to survive directory recreation.
+        // Keep that parent inside the fixture instead of recursively watching /tmp.
+        let mods = temp.path().join("Mods");
+        std::fs::create_dir(&mods)?;
 
         service
-            .start_watching("env-1", temp.path().to_string_lossy().as_ref(), "mods")
+            .start_watching("env-1", mods.to_string_lossy().as_ref(), "mods")
             .await?;
+        {
+            let watchers = service.watchers.read().await;
+            assert_eq!(watchers.len(), 1);
+            assert_eq!(watchers["env-1-mods"].directory, mods);
+        }
         service.stop_watching("env-1", "mods").await?;
+        assert!(service.watchers.read().await.is_empty());
 
         Ok(())
     }
@@ -560,13 +570,33 @@ mod tests {
         let service = FileSystemWatcherService::new();
         let temp = tempdir()?;
 
-        service
-            .start_watching("env-1", temp.path().to_string_lossy().as_ref(), "mods")
-            .await?;
-        service
-            .start_watching("env-1", temp.path().to_string_lossy().as_ref(), "plugins")
-            .await?;
+        // Each recursively watched parent belongs to this fixture, even when
+        // the host's shared temporary directory contains unreadable siblings.
+        for (environment_id, watch_type) in [
+            ("env-1", "mods"),
+            ("env-1", "plugins"),
+            ("env-1", "userlibs"),
+            ("env-2", "mods"),
+        ] {
+            let directory = temp.path().join(environment_id).join(watch_type);
+            std::fs::create_dir_all(&directory)?;
+            service
+                .start_watching(
+                    environment_id,
+                    directory.to_string_lossy().as_ref(),
+                    watch_type,
+                )
+                .await?;
+        }
+        assert_eq!(service.watchers.read().await.len(), 4);
+
         service.stop_watching_environment("env-1").await?;
+        let watchers = service.watchers.read().await;
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(
+            watchers["env-2-mods"].directory,
+            temp.path().join("env-2/mods")
+        );
 
         Ok(())
     }
