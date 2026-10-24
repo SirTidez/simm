@@ -1,6 +1,6 @@
 import { useGameLaunchStore, type GameLaunchAttempt } from '../stores/gameLaunchStore';
 import { Icon } from './Icon';
-import { SimmButton } from './primitives';
+import { SimmButton, SimmIconButton } from './primitives';
 
 export function launchStatusCopy(attempt: GameLaunchAttempt): string {
   if (attempt.detail) return attempt.detail;
@@ -28,23 +28,30 @@ export function GameLaunchStatusView({ attempts, checkAgain, dismissNotice, onVi
   if (visible.length === 0) return null;
   return (
     <section className="game-launch-status" aria-label="Game launch status">
-      {visible.map((attempt) => (
-        <div key={attempt.attemptId} className="game-launch-status__notice" role="status" aria-live="polite" aria-atomic="true">
-          <Icon name="circleInfo" aria-hidden="true" />
-          <div className="game-launch-status__content">
-            <strong>{attempt.state === 'slow' ? 'Schedule I is taking longer to start' : attempt.state === 'checking' ? 'Starting Schedule I' : 'Schedule I startup status'}</strong>
-            <span className="game-launch-status__environment">{attempt.environmentName}</span>
-            <p>{launchStatusCopy(attempt)}</p>
-            {attempt.snapshot?.diagnostic ? <p>{attempt.snapshot.diagnostic}</p> : null}
-            {attempt.snapshot?.logPath ? <span className="game-launch-status__path">{attempt.snapshot.logPath}</span> : null}
+      {visible.map((attempt) => {
+        const checking = attempt.state === 'checking';
+        return (
+          <div key={attempt.attemptId} className="game-launch-status__notice" role="status" aria-live="polite" aria-atomic="true">
+            <Icon name={checking ? 'spinner' : 'circleInfo'} spin={checking} className="game-launch-status__icon" aria-hidden="true" />
+            <div className="game-launch-status__content">
+              <div className="game-launch-status__title">
+                <strong>{attempt.state === 'slow' ? 'Schedule I is taking longer to start' : checking ? 'Starting Schedule I' : 'Schedule I startup status'}</strong>
+                <span className="game-launch-status__environment">{attempt.environmentName}</span>
+              </div>
+              <p className="game-launch-status__body">{launchStatusCopy(attempt)}</p>
+              {attempt.snapshot?.diagnostic ? <p className="game-launch-status__detail">{attempt.snapshot.diagnostic}</p> : null}
+              {attempt.snapshot?.logPath ? <span className="game-launch-status__path">{attempt.snapshot.logPath}</span> : null}
+            </div>
+            <div className="game-launch-status__actions">
+              {['unconfirmed', 'exited'].includes(attempt.state) ? <SimmButton variant="ghost" size="sm" onClick={() => checkAgain(attempt.environmentId)}>Check Again</SimmButton> : null}
+              <SimmButton variant="secondary" size="sm" onClick={() => onViewLogs(attempt.environmentId)}>View Logs</SimmButton>
+              <SimmIconButton aria-label="Dismiss" title="Dismiss" onClick={() => dismissNotice(attempt.environmentId)}>
+                <Icon name="times" />
+              </SimmIconButton>
+            </div>
           </div>
-          <div className="game-launch-status__actions">
-            <SimmButton className="btn btn-secondary" variant="outline" size="sm" onClick={() => onViewLogs(attempt.environmentId)}>View logs</SimmButton>
-            {['unconfirmed', 'exited'].includes(attempt.state) ? <SimmButton className="btn btn-secondary" variant="outline" size="sm" onClick={() => checkAgain(attempt.environmentId)}>Check again</SimmButton> : null}
-            <SimmButton className="btn btn-secondary" variant="ghost" size="sm" onClick={() => dismissNotice(attempt.environmentId)}>Dismiss</SimmButton>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </section>
   );
 }

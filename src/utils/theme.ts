@@ -139,8 +139,8 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     root.style.setProperty('--border-color', '#cfd8e4');
     root.style.setProperty('--card-bg-color', '#ffffff');
     root.style.setProperty('--card-border-color', '#d9e2ee');
-    root.style.setProperty('--text-secondary', '#607086');
-    root.style.setProperty('--text-tertiary', '#7d8998');
+    root.style.setProperty('--text-secondary', '#536277');
+    root.style.setProperty('--text-tertiary', '#5b687a');
     root.style.setProperty('--input-bg-color', '#ffffff');
     root.style.setProperty('--input-border-color', '#c3d0de');
     root.style.setProperty('--input-text-color', '#1f2835');
@@ -170,13 +170,13 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     root.style.setProperty('--update-version-color', '#b96f17');
     root.style.setProperty('--update-version-bg', 'rgba(233, 163, 74, 0.16)');
     applySharedThemeTokens(root, {
-      appTextColorSecondary: '#607086',
-      textTertiary: '#7d8998',
+      appTextColorSecondary: '#536277',
+      textTertiary: '#5b687a',
       workspaceStroke: '#d9e2ee',
       workspaceStrokeSoft: '#cfd8e4',
       workspaceTitleColor: '#1f2835',
-      workspaceCopyColor: '#607086',
-      workspaceEyebrowColor: '#7d8998',
+      workspaceCopyColor: '#536277',
+      workspaceEyebrowColor: '#5b687a',
       workspaceSurfaceCard: '#ffffff',
       workspaceSurfaceCardStrong: '#f7f9fc',
       workspaceSurfaceMuted: '#ffffff',
@@ -193,7 +193,7 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     root.style.setProperty('--card-bg-color', '#1a2433');
     root.style.setProperty('--card-border-color', '#2b3950');
     root.style.setProperty('--text-secondary', '#9aabc6');
-    root.style.setProperty('--text-tertiary', '#75859d');
+    root.style.setProperty('--text-tertiary', '#8696ae');
     root.style.setProperty('--input-bg-color', '#101824');
     root.style.setProperty('--input-border-color', '#2b3a50');
     root.style.setProperty('--input-text-color', '#edf4ff');
@@ -224,12 +224,12 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     root.style.setProperty('--primary-btn-hover', '#5c98e6');
     applySharedThemeTokens(root, {
       appTextColorSecondary: '#9aabc6',
-      textTertiary: '#75859d',
+      textTertiary: '#8696ae',
       workspaceStroke: '#2b3950',
       workspaceStrokeSoft: '#243246',
       workspaceTitleColor: '#edf4ff',
       workspaceCopyColor: '#9aabc6',
-      workspaceEyebrowColor: '#75859d',
+      workspaceEyebrowColor: '#8696ae',
       workspaceSurfaceCard: '#1a2433',
       workspaceSurfaceCardStrong: '#151d2a',
       workspaceSurfaceMuted: '#101824',
@@ -246,7 +246,7 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     root.style.setProperty('--card-bg-color', '#1d2631');
     root.style.setProperty('--card-border-color', '#344253');
     root.style.setProperty('--text-secondary', '#a4afbf');
-    root.style.setProperty('--text-tertiary', '#7f8d9e');
+    root.style.setProperty('--text-tertiary', '#8c99aa');
     root.style.setProperty('--input-bg-color', '#151d27');
     root.style.setProperty('--input-border-color', '#334154');
     root.style.setProperty('--input-text-color', '#eef3fb');
@@ -277,12 +277,12 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     root.style.setProperty('--bg-pattern', 'radial-gradient(circle at 16% -10%, rgba(83, 127, 197, 0.13), transparent 34%), radial-gradient(circle at 88% 108%, rgba(63, 88, 128, 0.11), transparent 42%)');
     applySharedThemeTokens(root, {
       appTextColorSecondary: '#a4afbf',
-      textTertiary: '#7f8d9e',
+      textTertiary: '#8c99aa',
       workspaceStroke: '#344253',
       workspaceStrokeSoft: '#2b3644',
       workspaceTitleColor: '#e9eef6',
       workspaceCopyColor: '#a4afbf',
-      workspaceEyebrowColor: '#7f8d9e',
+      workspaceEyebrowColor: '#8c99aa',
       workspaceSurfaceCard: '#1d2631',
       workspaceSurfaceCardStrong: '#1a222d',
       workspaceSurfaceMuted: '#151d27',

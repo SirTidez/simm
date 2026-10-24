@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
-import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
+import { ModThumbnail, type ModArtwork, type ModThumbnailSize } from './media/ModThumbnail';
+import { useModArtwork } from './media/useModArtwork';
 import { SimmButton } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface UserLibInfo {
   name: string;
@@ -35,32 +37,41 @@ function getUserLibKey(userLib: UserLibInfo): string {
 function formatFileSize(bytes?: number): string {
   if (bytes === undefined) return 'Unknown';
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+/** Library artwork when the file belongs to a known mod, otherwise a neutral type glyph in the same box. */
+function AssetThumbnail({
+  artwork,
+  name,
+  glyph,
+  size,
+}: {
+  artwork: ModArtwork | null;
+  name: string;
+  glyph: string;
+  size: ModThumbnailSize;
+}) {
+  if (artwork) return <ModThumbnail {...artwork} name={name} size={size} />;
   return (
-    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
+    <span className="ui-thumb" style={{ '--ui-thumb-size': `${size}px` } as CSSProperties} aria-hidden="true">
+      <Icon name={glyph} />
+    </span>
   );
 }
 
-function InspectorEmpty({ children }: { children: string }) {
-  return (
-    <Empty className="workspace-collection__inspector-empty">
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
-  );
+/** True when a click landed on a control inside a row (switch, button), not on the row itself. */
+function isInteractiveTarget(target: EventTarget | null, row: HTMLElement): boolean {
+  if (!(target instanceof Element)) return false;
+  const control = target.closest('button, a, input, select, textarea, [role="switch"], [role="checkbox"]');
+  return Boolean(control && row.contains(control));
 }
 
 export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Props) {
   const [userLibs, setUserLibs] = useState<UserLibInfo[]>([]);
+  const lookupArtwork = useModArtwork();
+  const userLibArtwork = (userLib: UserLibInfo) => lookupArtwork(userLib.fileName) ?? lookupArtwork(userLib.name);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [userLibsDirectory, setUserLibsDirectory] = useState('');
@@ -274,12 +285,6 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
           onSelect: () => void handleOpenFolder(),
         },
         {
-          key: 'reload',
-          label: 'Reload',
-          icon: 'rotate',
-          onSelect: () => void loadUserLibs(),
-        },
-        {
           key: 'delete',
           label: 'Delete',
           icon: 'trash',
@@ -308,188 +313,270 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
         cancelText="Cancel"
       />
 
-      <div className="mods-overlay workspace-collection-shell">
-      <WorkspacePageHeader
-        eyebrow={environment?.name || 'Environment'}
-        title="UserLibs"
-        description={`Manage shared runtime libraries and UserLibs folder contents for ${environment?.name || 'this environment'}.`}
-      />
-
-      <div className="workspace-collection">
-        <div className="workspace-collection__main">
-          <div className="workspace-collection__header">
-            <div className="workspace-collection__nav">
-              <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--summary">
-                <strong>{environment?.name || 'Environment'}</strong>
-                <span>{environment?.runtime || 'Unknown'} • Runtime support libraries</span>
-              </div>
-
-              <div className="workspace-collection__summary">
-                <div className="workspace-collection__summary-chip">
-                  <span>UserLibs</span>
-                  <strong>{userLibs.length}</strong>
-                </div>
-                <div className="workspace-collection__summary-chip">
-                  <span>Disabled</span>
-                  <strong>{disabledCount}</strong>
-                </div>
-                <div className="workspace-collection__summary-chip">
-                  <span>Folder</span>
-                  <strong>{userLibsDirectory ? 'Ready' : 'Unavailable'}</strong>
-                </div>
-              </div>
-            </div>
-
-            <div className="workspace-collection__toolbar">
-              <div className="workspace-collection__toolbar-search">
+      <div className={`env-assets ui-split${userLibs.length === 0 && !loading ? ' env-assets--solo' : ''}`}>
+        <section className="env-assets__main" aria-label="UserLibs">
+          <div className="env-assets__head">
+            <div className="ui-toolbar env-assets__bar">
+              <div className="env-assets-search">
+                <Icon name="search" className="env-assets-search__icon" />
                 <Input
-                  type="text"
+                  type="search"
                   value={searchTerm}
                   onChange={(event) => setSearchTerm(event.target.value)}
                   placeholder="Search user libraries"
+                  aria-label="Search user libraries"
                 />
               </div>
-              <div className="workspace-collection__toolbar-group">
-                <SimmButton onClick={() => void handleUploadClick()} className="btn btn-primary btn-small" disabled={uploading}>
-                  {uploading ? 'Uploading...' : 'Add UserLib'}
-                </SimmButton>
-                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
+              <SimmButton
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Reload UserLibs"
+                title="Reload UserLibs"
+                onClick={() => void loadUserLibs()}
+                disabled={loading}
+              >
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'rotate'} />
+              </SimmButton>
+              <span className="ui-toolbar__spacer" />
+              <div className="ui-toolbar__group env-assets__actions">
+                <SimmButton type="button" variant="secondary" onClick={() => void handleOpenFolder()}>
+                  <Icon name="folderOpen" />
                   Open Folder
                 </SimmButton>
-                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void loadUserLibs()} disabled={loading}>
-                  Reload
+                <SimmButton type="button" variant="default" onClick={() => void handleUploadClick()} disabled={uploading}>
+                  <Icon name={uploading ? 'fas fa-spinner fa-spin' : 'plus'} />
+                  {uploading ? 'Adding...' : 'Add UserLib'}
                 </SimmButton>
               </div>
             </div>
-
             {userLibsDirectory && (
-              <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--path">
-                <span className="workspace-collection__path-label">UserLibs Directory</span>
-                <code className="workspace-collection__path-value">{userLibsDirectory}</code>
-              </div>
+              <p className="env-assets__summary ui-truncate" title={userLibsDirectory}>
+                {userLibs.length} {userLibs.length === 1 ? 'library' : 'libraries'}
+                {disabledCount > 0 ? ` · ${disabledCount} disabled` : ''}
+                {' · '}
+                <code className="ui-mono">{userLibsDirectory}</code>
+              </p>
             )}
           </div>
 
-          <div className="workspace-collection__content">
-            {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
-            {!error && loading && <CollectionEmpty>Loading user libraries...</CollectionEmpty>}
-            {!error && !loading && userLibs.length === 0 && (
-              <CollectionEmpty>No user libraries found for this environment.</CollectionEmpty>
+          <div className="env-assets__content">
+            {error && (
+              <div className="env-assets__notices">
+                <div className="ui-callout ui-callout--danger env-assets-error" role="alert">
+                  <span className="env-assets-error__text">{error}</span>
+                  <span className="ui-toolbar__group">
+                    <SimmButton type="button" variant="outline" size="sm" onClick={() => void loadUserLibs()}>
+                      Retry
+                    </SimmButton>
+                    <SimmButton type="button" variant="ghost" size="sm" onClick={() => setError(null)}>
+                      Dismiss
+                    </SimmButton>
+                  </span>
+                </div>
+              </div>
             )}
-            {!error && !loading && userLibs.length > 0 && filteredUserLibs.length === 0 && (
-              <CollectionEmpty>No user libraries match this search.</CollectionEmpty>
-            )}
-            {!error && !loading && filteredUserLibs.length > 0 && (
-              <div className="workspace-collection__list">
-                {filteredUserLibs.map((userLib) => {
-                  const userLibKey = getUserLibKey(userLib);
-                  const isSelected = selectedUserLibKey === userLibKey;
-                  return (
-                    <div
-                      key={userLibKey}
-                      className={`workspace-collection__row workspace-file-row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelectedUserLibKey(userLibKey)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          setSelectedUserLibKey(userLibKey);
-                        }
-                      }}
-                      onContextMenu={(event) => openContextMenu(event, userLib)}
-                    >
-                      <div className="workspace-file-row__icon">
-                        <Icon name={userLib.isDirectory ? 'folderTree' : 'fileCode'} />
-                      </div>
-                      <div className="workspace-collection__row-body">
-                        <div className="workspace-collection__row-title">{userLib.name}</div>
-                        <div className="workspace-collection__row-meta">
-                          {userLib.disabled ? (
-                            <span className="workspace-pill workspace-pill--danger">Disabled</span>
-                          ) : (
-                            <span className="workspace-pill workspace-pill--success">Enabled</span>
-                          )}
-                          <span className="workspace-pill">{userLib.isDirectory ? 'Directory' : 'File'}</span>
-                          <span className="workspace-pill">{formatFileSize(userLib.size)}</span>
-                        </div>
-                        <p className="workspace-collection__row-summary">{userLib.fileName}</p>
-                      </div>
+            {loading && userLibs.length === 0 && (
+              <div className="env-assets-skeleton" aria-busy="true" aria-label="Loading UserLibs">
+                {Array.from({ length: 4 }, (_, index) => (
+                  <div key={index} className="env-assets-skeleton__row">
+                    <Skeleton className="env-assets-skeleton__icon" />
+                    <div className="env-assets-skeleton__text">
+                      <Skeleton className="env-assets-skeleton__line" />
+                      <Skeleton className="env-assets-skeleton__line env-assets-skeleton__line--short" />
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
             )}
+            {!error && !loading && userLibs.length === 0 && (
+              <div className="ui-empty env-assets-empty">
+                <span className="ui-empty__emblem" aria-hidden="true"><Icon name="book" /></span>
+                <h3 className="ui-empty__title">No UserLibs in this environment</h3>
+                <p className="ui-empty__copy">
+                  UserLibs are shared libraries that mods and plugins depend on. MelonLoader loads them first.
+                  Most arrive with the mods that need them; add one here only when a mod asks for it.
+                </p>
+                <div className="env-assets-empty__actions">
+                  <SimmButton type="button" variant="secondary" onClick={() => void handleUploadClick()} disabled={uploading}>
+                    {uploading ? 'Adding...' : 'Add UserLib File'}
+                  </SimmButton>
+                </div>
+              </div>
+            )}
+            {!loading && userLibs.length > 0 && filteredUserLibs.length === 0 && (
+              <div className="ui-empty env-assets-empty">
+                <span className="ui-empty__emblem" aria-hidden="true"><Icon name="search" /></span>
+                <h3 className="ui-empty__title">No UserLibs match</h3>
+                <p className="ui-empty__copy">Nothing in this environment matches &quot;{searchTerm.trim()}&quot;.</p>
+                <div className="env-assets-empty__actions">
+                  <SimmButton type="button" variant="secondary" onClick={() => setSearchTerm('')}>
+                    Clear Search
+                  </SimmButton>
+                </div>
+              </div>
+            )}
+            {filteredUserLibs.length > 0 && (
+              <table className="ui-table env-assets-table">
+                <colgroup>
+                  <col />
+                  <col className="env-assets-table__col-type" />
+                  <col className="env-assets-table__col-size" />
+                  <col className="env-assets-table__col-status" />
+                  <col className="env-assets-table__col-toggle" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Type</th>
+                    <th scope="col" className="env-assets-table__num">Size</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" className="env-assets-table__toggle">Enabled</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredUserLibs.map((userLib) => {
+                    const userLibKey = getUserLibKey(userLib);
+                    const isSelected = selectedUserLibKey === userLibKey;
+                    return (
+                      <tr
+                        key={userLibKey}
+                        className={`ui-row env-assets-row${userLib.disabled ? ' env-assets-row--disabled' : ''}`}
+                        aria-selected={isSelected}
+                        onClick={(event) => {
+                          if (isInteractiveTarget(event.target, event.currentTarget)) return;
+                          setSelectedUserLibKey(userLibKey);
+                        }}
+                        onContextMenu={(event) => openContextMenu(event, userLib)}
+                      >
+                        <td>
+                          <button
+                            type="button"
+                            className="env-assets-row__open"
+                            aria-pressed={isSelected}
+                            onClick={() => setSelectedUserLibKey(userLibKey)}
+                          >
+                            <AssetThumbnail
+                              artwork={userLibArtwork(userLib)}
+                              name={userLib.name}
+                              glyph={userLib.isDirectory ? 'folderTree' : 'book'}
+                              size={32}
+                            />
+                            <span className="env-assets-row__text">
+                              <span className="env-assets-row__name">{userLib.name}</span>
+                              {userLib.fileName !== userLib.name && (
+                                <span className="env-assets-row__desc">{userLib.fileName}</span>
+                              )}
+                            </span>
+                          </button>
+                        </td>
+                        <td className="env-assets-row__muted">{userLib.isDirectory ? 'Folder' : 'File'}</td>
+                        <td className="env-assets-row__muted env-assets-table__num">
+                          {userLib.isDirectory && userLib.size === undefined ? '—' : formatFileSize(userLib.size)}
+                        </td>
+                        <td>{userLib.disabled && <span className="ui-tag">Disabled</span>}</td>
+                        <td className="env-assets-table__toggle">
+                          <Switch
+                            checked={!userLib.disabled}
+                            disabled={togglingUserLibKey === userLibKey}
+                            aria-label={`${userLib.name} enabled`}
+                            onCheckedChange={() => void handleToggleUserLib(userLib)}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
-        </div>
+        </section>
 
-        <aside className="workspace-collection__inspector">
+        <aside className="ui-inspector env-assets__inspector" aria-label="UserLib details">
           {!selectedUserLib && (
-            <InspectorEmpty>
-              Select a user library to review its role and environment actions.
-            </InspectorEmpty>
+            <div className="ui-empty env-assets-empty env-assets-empty--inspector">
+              <p className="ui-empty__copy">Select a user library to see its file details and actions.</p>
+            </div>
           )}
           {selectedUserLib && (
-              <div className="workspace-inspector-card">
-                <div className="workspace-inspector-card__header workspace-inspector-card__header--file">
-                  <div className="workspace-file-row__icon workspace-file-row__icon--large">
-                    <Icon name={selectedUserLib.isDirectory ? 'folderTree' : 'fileCode'} />
+            <>
+              <div className="env-assets-inspector__head">
+                <AssetThumbnail
+                  artwork={userLibArtwork(selectedUserLib)}
+                  name={selectedUserLib.name}
+                  glyph={selectedUserLib.isDirectory ? 'folderTree' : 'book'}
+                  size={48}
+                />
+                <div className="env-assets-inspector__titles">
+                  <h3 className="env-assets-inspector__title">{selectedUserLib.name}</h3>
+                  <div className="ui-meta">
+                    <span>{selectedUserLib.isDirectory ? 'Folder' : 'File'}</span>
+                    {selectedUserLib.size !== undefined && <span>{formatFileSize(selectedUserLib.size)}</span>}
                   </div>
-                <div>
-                  <h3>{selectedUserLib.name}</h3>
-                  <div className="workspace-inspector-card__subtle">
-                    {selectedUserLib.isDirectory ? 'Directory' : 'File'} • {formatFileSize(selectedUserLib.size)}
+                  <div className="env-assets-inspector__status">
+                    {selectedUserLib.disabled
+                      ? <span className="ui-tag">Disabled</span>
+                      : <span className="ui-status ui-status--ok">Enabled</span>}
                   </div>
                 </div>
               </div>
 
-              <div className="workspace-inspector-card__metrics">
-                <div><span>Status</span><strong>{selectedUserLib.disabled ? 'Disabled' : 'Enabled'}</strong></div>
-                <div><span>Type</span><strong>{selectedUserLib.isDirectory ? 'Directory' : 'File'}</strong></div>
-                <div><span>Size</span><strong>{formatFileSize(selectedUserLib.size)}</strong></div>
-              </div>
-
-              <div className="workspace-inspector-card__field">
-                <label>File Name</label>
-                <div className="workspace-inspector-card__value">{selectedUserLib.fileName}</div>
-              </div>
-
-              <div className="workspace-inspector-card__field">
-                <label>Path</label>
-                <div className="workspace-inspector-card__value workspace-inspector-card__value--path">{selectedUserLib.path}</div>
-              </div>
-
-              <div className="workspace-inspector-card__actions">
+              <div className="env-assets-inspector__actions">
                 <SimmButton
-                  className={selectedUserLib.disabled ? 'btn btn-primary' : 'btn btn-secondary'}
+                  type="button"
+                  variant={selectedUserLib.disabled ? 'secondary' : 'outline'}
                   onClick={() => void handleToggleUserLib(selectedUserLib)}
                   disabled={togglingUserLibKey === getUserLibKey(selectedUserLib)}
                 >
+                  <Icon name={selectedUserLib.disabled ? 'toggleOn' : 'toggleOff'} />
                   {selectedUserLib.disabled ? 'Enable' : 'Disable'}
                 </SimmButton>
-                <SimmButton className="btn btn-secondary" onClick={() => setPendingDelete(selectedUserLib)} disabled={deletingUserLibKey === getUserLibKey(selectedUserLib)}>
-                  Delete
-                </SimmButton>
-                <SimmButton className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
+                <SimmButton type="button" variant="outline" onClick={() => void handleOpenFolder()}>
+                  <Icon name="folderOpen" />
                   Open Folder
                 </SimmButton>
-                <SimmButton className="btn btn-secondary" onClick={() => void loadUserLibs()} disabled={loading}>
-                  Reload
-                </SimmButton>
               </div>
-            </div>
+
+              <section className="ui-inspector__section">
+                <h4 className="ui-section-title">Details</h4>
+                <dl className="ui-kv">
+                  <dt>Type</dt>
+                  <dd>{selectedUserLib.isDirectory ? 'Folder' : 'File'}</dd>
+                  <dt>Size</dt>
+                  <dd>{formatFileSize(selectedUserLib.size)}</dd>
+                  <dt>File</dt>
+                  <dd className="ui-mono">{selectedUserLib.fileName}</dd>
+                  <dt>Path</dt>
+                  <dd className="ui-mono">{selectedUserLib.path}</dd>
+                </dl>
+              </section>
+
+              <div className="ui-danger-zone env-assets-danger">
+                <SimmButton
+                  type="button"
+                  variant="destructive"
+                  onClick={() => setPendingDelete(selectedUserLib)}
+                  disabled={deletingUserLibKey === getUserLibKey(selectedUserLib)}
+                >
+                  <Icon name="trash" />
+                  Delete
+                </SimmButton>
+                <p className="env-assets-danger__note">
+                  Deletes it from the UserLibs folder of {environment?.name || 'this environment'}. Mods that need it may stop loading.
+                </p>
+              </div>
+            </>
           )}
         </aside>
-      </div>
 
-      {contextMenu && (
-        <AnchoredContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={contextMenu.items}
-          onClose={() => setContextMenu(null)}
-        />
-      )}
+        {contextMenu && (
+          <AnchoredContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            items={contextMenu.items}
+            onClose={() => setContextMenu(null)}
+          />
+        )}
       </div>
     </>
   );

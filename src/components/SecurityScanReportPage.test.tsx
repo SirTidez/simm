@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { SecurityScanReportPage } from './SecurityScanReportPage';
 
+// Library artwork comes from the app-wide Mod Library store; these surfaces render without it here.
+vi.mock('./media/useModArtwork', () => ({ useModArtwork: () => () => null }));
+
 describe('SecurityScanReportPage', () => {
   afterEach(() => {
     cleanup();

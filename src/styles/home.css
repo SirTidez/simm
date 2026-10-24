@@ -1,0 +1,232 @@
+/*
+ * Home: "ready to play". One row per environment, each with its status and
+ * exactly one next step; release notes stay quiet underneath.
+ */
+
+.app-home-main {
+  overflow: auto;
+  container-type: inline-size;
+}
+
+.home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-6);
+  width: 100%;
+  max-width: 64rem;
+  padding: var(--simm-space-6) var(--simm-space-8) var(--simm-space-8);
+}
+
+.home__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-4);
+}
+
+.home__title {
+  margin: 0;
+  font-size: var(--simm-text-xl);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  color: var(--simm-text);
+}
+
+.home__section {
+  display: flex;
+  flex-direction: column;
+}
+
+.home__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius-lg);
+  background: var(--simm-panel);
+  overflow: hidden;
+}
+
+.home-env {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--simm-space-5);
+  min-height: 3.5rem;
+  padding: var(--simm-space-2) var(--simm-space-4) var(--simm-space-2) var(--simm-space-2);
+}
+
+.home-env + .home-env {
+  border-top: 1px solid var(--simm-line);
+}
+
+.home-env__identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: var(--simm-space-2) var(--simm-space-3);
+  border: 0;
+  border-radius: var(--simm-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.home-env__identity:hover {
+  background: var(--simm-hover);
+}
+
+.home-env__name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--simm-text-base);
+  font-weight: 600;
+  color: var(--simm-text);
+}
+
+.home-env__meta {
+  font-size: var(--simm-text-xs);
+}
+
+.home-env__status {
+  justify-self: end;
+}
+
+.home-env__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+}
+
+.home-env__play {
+  min-width: 6rem;
+}
+
+/* The selected environment leads: same anatomy, more room. */
+.home-env--primary {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  min-height: 5.5rem;
+  padding: var(--simm-space-3) var(--simm-space-5) var(--simm-space-3) var(--simm-space-3);
+}
+
+.home-env__art {
+  width: 11.5rem;
+  border-radius: var(--simm-radius);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--simm-text) 8%, transparent);
+}
+
+.home-env--primary .home-env__name {
+  font-size: var(--simm-text-lg);
+}
+
+.home-env--primary .home-env__meta {
+  font-size: var(--simm-text-sm);
+}
+
+.home-env--primary .home-env__play {
+  height: 2.5rem;
+  min-width: 8.5rem;
+  padding: 0 var(--simm-space-6);
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+}
+
+.home__loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-3);
+}
+
+.home__skeleton {
+  height: 3.5rem;
+  border-radius: var(--simm-radius-lg);
+}
+
+.home__skeleton--primary {
+  height: 5.5rem;
+}
+
+.home__empty {
+  border: 1px dashed var(--simm-line-strong);
+  border-radius: var(--simm-radius-lg);
+}
+
+/* Release notes: reading material, not a dashboard panel. */
+.home__news {
+  max-width: 44rem;
+}
+
+.home__news-update {
+  margin: 0 0 var(--simm-space-2);
+  color: var(--simm-accent-text);
+  font-size: var(--simm-text-sm);
+}
+
+.home__news-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home__news-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.home__news-heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--simm-space-3);
+  font-size: var(--simm-text-sm);
+}
+
+.home__news-heading a,
+.home__news-heading strong {
+  color: var(--simm-text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.home__news-heading a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.home__news-summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+  line-height: 1.5;
+}
+
+@container (max-width: 44rem) {
+  .home-env,
+  .home-env--primary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .home-env__art {
+    display: none;
+  }
+
+  .home-env__status {
+    display: none;
+  }
+}

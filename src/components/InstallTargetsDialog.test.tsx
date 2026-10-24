@@ -51,7 +51,7 @@ describe('InstallTargetsDialog', () => {
       />,
     );
 
-    expect(screen.getByText('Mono • alternate-beta')).toBeTruthy();
+    expect(screen.getByText('Mono · alternate-beta')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'All Mono' })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: 'All IL2CPP' })).toBeDisabled();
   });

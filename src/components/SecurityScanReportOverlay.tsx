@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   Finding,
   SecurityScanReport,
@@ -9,7 +9,9 @@ import type {
 import { Dialog } from '@/components/ui/dialog';
 import { getSecurityDispositionBadgeConfig } from './securityScanHelpers';
 import { Icon } from './Icon';
-import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
+import { ModThumbnail } from './media/ModThumbnail';
+import { useModArtwork } from './media/useModArtwork';
+import { SimmButton, SimmDialogContent } from './primitives';
 
 interface SecurityScanReportOverlayProps {
   isOpen: boolean;
@@ -51,49 +53,28 @@ const severityOrder: Record<Severity, number> = {
 const filterOptions: Array<Severity | 'All'> = ['All', 'Critical', 'High', 'Medium', 'Low'];
 const emptyFindings: Finding[] = [];
 
-const summaryStyles = {
-  verified: {
-    label: 'MLVScan Verified',
-    tone: '#1d8459',
-    border: '#2cc78455',
-    glow: 'rgba(44, 199, 132, 0.16)',
-    icon: 'fa-shield-check',
-  },
-  review: {
-    label: 'Review Findings',
-    tone: '#c9872c',
-    border: '#f0a94b55',
-    glow: 'rgba(240, 169, 75, 0.16)',
-    icon: 'fa-shield-exclamation',
-  },
-  threat: {
-    label: 'Known Threat',
-    tone: '#d15a64',
-    border: '#ff7b8655',
-    glow: 'rgba(209, 90, 100, 0.16)',
-    icon: 'fa-ban',
-  },
-  blocked: {
-    label: 'Blocked by Policy',
-    tone: '#d15a64',
-    border: '#ff7b8655',
-    glow: 'rgba(209, 90, 100, 0.16)',
-    icon: 'fa-ban',
-  },
-  unavailable: {
-    label: 'Scanner Unavailable',
-    tone: '#7fa1c8',
-    border: '#7fa1c855',
-    glow: 'rgba(127, 161, 200, 0.14)',
-    icon: 'fa-circle-question',
-  },
-} as const;
+type SummaryTone = 'ok' | 'warn' | 'danger' | 'muted';
 
-const severityBadgeStyles: Record<Severity, { bg: string; color: string; border: string }> = {
-  Critical: { bg: '#5a1d26', color: '#ffb4be', border: '#ff7b8666' },
-  High: { bg: '#5b3420', color: '#ffca93', border: '#ff9d4d66' },
-  Medium: { bg: '#57431a', color: '#ffe29b', border: '#f1c75f66' },
-  Low: { bg: '#20365e', color: '#a9cbff', border: '#68a1ff66' },
+const summaryStyles: Record<'verified' | 'review' | 'threat' | 'blocked' | 'unavailable', { label: string; tone: SummaryTone }> = {
+  verified: { label: 'MLVScan verified', tone: 'ok' },
+  review: { label: 'Review findings', tone: 'warn' },
+  threat: { label: 'Known threat', tone: 'danger' },
+  blocked: { label: 'Blocked by policy', tone: 'danger' },
+  unavailable: { label: 'Scanner unavailable', tone: 'muted' },
+};
+
+const severityTagClass: Record<Severity, string> = {
+  Critical: 'ui-tag ui-tag--danger',
+  High: 'ui-tag ui-tag--danger',
+  Medium: 'ui-tag ui-tag--warn',
+  Low: 'ui-tag',
+};
+
+const calloutClass: Record<SummaryTone, string> = {
+  ok: 'ui-callout',
+  warn: 'ui-callout ui-callout--warn',
+  danger: 'ui-callout ui-callout--danger',
+  muted: 'ui-callout',
 };
 
 const formatTimestamp = (value?: number): string => {
@@ -101,7 +82,13 @@ const formatTimestamp = (value?: number): string => {
     return 'Unknown';
   }
 
-  return new Date(value * 1000).toLocaleString();
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value * 1000));
 };
 
 const formatBytes = (value?: number): string => {
@@ -162,6 +149,15 @@ const getThreatFamilyLabel = (families?: ThreatFamily[]): string | null => {
     : `Known malware family match: ${primary.displayName}`;
 };
 
+function getReportSubjectName(title: string): string | null {
+  const match = /^Security Findings\s*[-–—]\s*(.+)$/i.exec(title.trim());
+  if (!match) return null;
+  const name = match[1].replace(/\s*\((?:IL2CPP|Mono)\)$/i, '').trim();
+  // Generic flows ("Nexus Download") name no single mod.
+  if (!name || /^nexus (?:download|update|manual download)$/i.test(name)) return null;
+  return name;
+}
+
 export function SecurityScanReportView({
   title,
   report,
@@ -192,6 +188,7 @@ export function SecurityScanReportView({
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [activeSeverity, setActiveSeverity] = useState<Severity | 'All'>('All');
   const [selectedFindingKey, setSelectedFindingKey] = useState<string | null>(null);
+  const lookupArtwork = useModArtwork();
 
   useEffect(() => {
     if (open) {
@@ -257,480 +254,229 @@ export function SecurityScanReportView({
 
   const summaryStyle = getSummaryStyle(activeReport.summary, activeReport.policy.blocked);
   const threatFamilyLabel = getThreatFamilyLabel(families);
-  const topFindings = findings.slice(0, 3);
   const summaryDisposition = activeReport.summary.disposition;
   const activeDisposition = activeResult?.disposition || summaryDisposition;
-  const summaryDispositionBadge = getSecurityDispositionBadgeConfig(summaryDisposition);
   const activeDispositionBadge = getSecurityDispositionBadgeConfig(activeDisposition);
 
   const showCloseActions = presentation === 'overlay' && !!onClose;
   const showReturnActions = presentation === 'page' && !!onClose;
-  const shellStyle: CSSProperties = presentation === 'overlay'
-    ? {
-        maxWidth: '1240px',
-        width: 'min(1240px, calc(100vw - 2rem))',
-        maxHeight: 'calc(100vh - max(clamp(8rem, 16vw, 10rem), 140px))',
-        display: 'flex',
-        flexDirection: 'column',
-        padding: 0,
-        overflow: 'hidden',
-        border: '1px solid #324158',
-        borderRadius: '16px',
-        background: 'linear-gradient(180deg, rgba(18, 24, 36, 0.98) 0%, rgba(11, 16, 25, 0.98) 100%)',
-        boxShadow: '0 28px 80px rgba(0, 0, 0, 0.5)',
-      }
-    : {
-        height: '100%',
-        minHeight: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        padding: 0,
-        overflow: 'hidden',
-        border: '0',
-        borderRadius: 0,
-        background: 'transparent',
-        boxShadow: 'none',
-      };
+  const totalFindings = activeReport.summary.totalFindings;
+  const threatMatches = activeReport.summary.threatFamilyCount;
+  const verdictHeadline = summaryDisposition?.headline;
+  const verdictBody = summaryDisposition?.summary || activeReport.summary.statusMessage || 'MLVScan completed this scan.';
+  const selectedFindingIndex = selectedFinding ? filteredFindings.indexOf(selectedFinding) : -1;
+  const selectedKey = selectedFinding ? getFindingKey(selectedFinding, selectedFindingIndex) : null;
+
+  // Titles read "Security Findings - <mod>": the mod gets its library artwork in the header.
+  const subjectName = getReportSubjectName(title);
+  const subjectArtwork = subjectName
+    ? lookupArtwork(subjectName) ?? files.map((file) => lookupArtwork(file.fileName)).find(Boolean) ?? null
+    : null;
 
   const shellContent = (
     <>
-        <div className="modal-header security-report-view__header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
-          <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-            <span>{title}</span>
-            <SimmBadge
-              variant="outline"
-              style={{
-                fontSize: '0.74rem',
-                letterSpacing: '0.03em',
-                textTransform: 'uppercase',
-                color: summaryStyle.tone,
-                background: summaryStyle.glow,
-                border: `1px solid ${summaryStyle.border}`,
-                borderRadius: '999px',
-                padding: '0.18rem 0.62rem',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-              }}
-            >
-              <Icon name={`fas ${summaryStyle.icon}`} />
-              {summaryStyle.label}
-            </SimmBadge>
-          </h2>
-          {showReturnActions && (
-            <>
-              {onConfirm && (
-                <SimmButton className="btn btn-primary btn-small" onClick={onConfirm} disabled={busy}>
-                  {busy ? 'Working...' : confirmLabel}
-                </SimmButton>
-              )}
-              <SimmButton className="btn btn-secondary btn-small" onClick={onClose} disabled={busy}>
-                <Icon name="fas fa-arrow-left" />
-                Back
-              </SimmButton>
-            </>
+      <header className="security-report__header">
+        {showReturnActions && (
+          <div className="security-report__nav">
+            <SimmButton type="button" variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+              <Icon name="arrowLeft" />
+              Back
+            </SimmButton>
+          </div>
+        )}
+        <div className="security-report__title-row">
+          {subjectName && (
+            <ModThumbnail
+              name={subjectName}
+              iconUrl={subjectArtwork?.iconUrl}
+              iconCachePath={subjectArtwork?.iconCachePath}
+              size={48}
+            />
+          )}
+          <div className="security-report__titles">
+            <h2 className="security-report__title">{title}</h2>
+            <span className={`ui-status ui-status--${summaryStyle.tone}`}>{summaryStyle.label}</span>
+          </div>
+          {showReturnActions && onConfirm && (
+            <SimmButton type="button" onClick={onConfirm} disabled={busy}>
+              {busy ? 'Working…' : confirmLabel}
+            </SimmButton>
           )}
           {showCloseActions && (
-            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} disabled={busy}>×</SimmButton>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" aria-label="Close security report" onClick={onClose} disabled={busy}><Icon name="times" /></SimmButton>
           )}
         </div>
+      </header>
 
-        <div
-          style={{
-            flex: '1 1 auto',
-            minHeight: 0,
-            padding: '1rem 1.25rem 1.25rem',
-            overflowY: 'auto',
-            display: 'grid',
-            gap: '1rem',
-          }}
-        >
-          {files.length > 1 && (
-            <div style={{ display: 'grid', gap: '0.55rem' }}>
-              {files.map((file, index) => (
-                <SimmButton
-                  key={`${file.fileName}-${index}`}
-                  type="button"
-                  variant="ghost"
-                  className={`security-report-selector h-auto ${index === activeFileIndex ? 'security-report-selector--active' : ''}`}
-                  aria-pressed={index === activeFileIndex}
-                  onClick={() => setActiveFileIndex(index)}
-                  style={{
-                    width: '100%',
-                    textAlign: 'left',
-                    borderRadius: '10px',
-                    border: index === activeFileIndex ? '1px solid #3fa6ff66' : '1px solid #2f3d53',
-                    background: index === activeFileIndex ? 'rgba(35, 74, 114, 0.45)' : 'rgba(23, 31, 46, 0.8)',
-                    color: '#d7e4f6',
-                    padding: '0.75rem 0.95rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.7rem',
-                  }}
-                >
-                  <span style={{ width: '10px', height: '10px', borderRadius: '999px', background: summaryStyle.tone, flexShrink: 0 }}></span>
-                  <span style={{ minWidth: 0, display: 'grid', gap: '0.15rem' }}>
-                    <strong style={{ color: '#eef5ff', fontSize: '0.9rem' }}>{file.fileName}</strong>
-                    <span style={{ color: '#8ea7c6', fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.displayPath}</span>
-                  </span>
-                </SimmButton>
-              ))}
-            </div>
-          )}
-
+      <div className="security-report__body">
+        <div className="security-report__main">
           {normalizedReportOptions.length > 1 && (
-            <section
-              className="mod-card security-report-panel"
-              style={{
-                padding: '1rem',
-                display: 'grid',
-                gap: '0.75rem',
-              }}
-            >
-              <div>
-                <h3 style={{ margin: 0, color: '#edf5ff' }}>Stored reports</h3>
-                <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>
-                  Choose which downloaded archive report you want to inspect, then drill into its scanned files.
-                </p>
-              </div>
-              <div style={{ display: 'grid', gap: '0.55rem' }}>
+            <section className="security-report__section">
+              <h3 className="ui-section-title">Stored reports</h3>
+              <div className="security-report__choices" role="group" aria-label="Stored reports">
                 {normalizedReportOptions.map((option, index) => {
                   const optionStyle = getSummaryStyle(option.report.summary, option.report.policy.blocked);
                   const isActive = index === activeReportIndex;
                   return (
-                    <SimmButton
+                    <button
                       key={option.key}
                       type="button"
-                      variant="ghost"
-                      className={`security-report-selector h-auto ${isActive ? 'security-report-selector--active' : ''}`}
+                      className="security-report__choice"
                       aria-pressed={isActive}
                       onClick={() => setActiveReportIndex(index)}
-                      style={{
-                        width: '100%',
-                        textAlign: 'left',
-                        borderRadius: '12px',
-                        border: isActive ? `1px solid ${optionStyle.border}` : '1px solid #2f3d53',
-                        background: isActive ? optionStyle.glow : 'rgba(18, 24, 36, 0.82)',
-                        color: '#d7e4f6',
-                        padding: '0.85rem 1rem',
-                        display: 'grid',
-                        gap: '0.35rem',
-                      }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
-                        <strong style={{ color: '#eef5ff' }}>{option.label}</strong>
-                        <SimmBadge
-                          variant="outline"
-                          style={{
-                            fontSize: '0.72rem',
-                            letterSpacing: '0.03em',
-                            textTransform: 'uppercase',
-                            color: optionStyle.tone,
-                            background: optionStyle.glow,
-                            border: `1px solid ${optionStyle.border}`,
-                            borderRadius: '999px',
-                            padding: '0.16rem 0.55rem',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '0.35rem',
-                          }}
-                        >
-                          <Icon name={`fas ${optionStyle.icon}`} />
-                          {optionStyle.label}
-                        </SimmBadge>
-                      </div>
+                      <span className="security-report__choice-name">{option.label}</span>
+                      <span className={`ui-status ui-status--${optionStyle.tone}`}>{optionStyle.label}</span>
                       {option.description && (
-                        <span style={{ color: '#8fa7c5', fontSize: '0.82rem', lineHeight: 1.45 }}>
-                          {option.description}
-                        </span>
+                        <span className="security-report__choice-meta">{option.description}</span>
                       )}
-                    </SimmButton>
+                    </button>
                   );
                 })}
               </div>
             </section>
           )}
 
-          <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(320px, 0.95fr)' }}>
-            <section className="mod-card security-report-panel security-report-panel--verdict" style={{ padding: '1rem', border: `1px solid ${summaryStyle.border}`, background: `linear-gradient(180deg, ${summaryStyle.glow} 0%, rgba(17, 23, 34, 0.86) 100%)` }}>
-              <div style={{ display: 'grid', gap: '0.55rem' }}>
-                <h3 style={{ margin: 0, fontSize: '1.35rem', color: '#edf5ff' }}>{summaryStyle.label}</h3>
-                <p style={{ margin: 0, color: '#b9c9de', lineHeight: 1.55 }}>{activeReport.summary.statusMessage || 'MLVScan completed this scan.'}</p>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem' }}>
-                  <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
-                    {activeReport.summary.totalFindings} finding{activeReport.summary.totalFindings === 1 ? '' : 's'}
-                  </SimmBadge>
-                  <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
-                    {activeReport.summary.threatFamilyCount} threat match{activeReport.summary.threatFamilyCount === 1 ? '' : 'es'}
-                  </SimmBadge>
-                  {activeReport.summary.highestSeverity && (
-                    <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: `1px solid ${severityBadgeStyles[activeReport.summary.highestSeverity].border}`, background: severityBadgeStyles[activeReport.summary.highestSeverity].bg, color: severityBadgeStyles[activeReport.summary.highestSeverity].color, fontSize: '0.74rem' }}>
-                      Highest: {activeReport.summary.highestSeverity}
-                    </SimmBadge>
-                  )}
-                  {summaryDispositionBadge && (
-                    <SimmBadge
-                      variant="outline"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: '0.24rem 0.55rem',
-                        borderRadius: '999px',
-                        border: `1px solid ${summaryDispositionBadge.border}`,
-                        background: summaryDispositionBadge.background,
-                        color: summaryDispositionBadge.color,
-                        fontSize: '0.74rem',
-                        lineHeight: 1,
-                        whiteSpace: 'nowrap',
-                        verticalAlign: 'middle',
-                      }}
-                    >
-                      {summaryDispositionBadge.label}
-                    </SimmBadge>
-                  )}
-                </div>
-                {summaryDisposition && (summaryDisposition.headline || summaryDisposition.summary) && (
-                  <div style={{ padding: '0.8rem 0.9rem', borderRadius: '12px', border: '1px solid #324158', background: 'rgba(18, 24, 36, 0.68)', color: '#d7e4f6' }}>
-                    {summaryDisposition.headline && (
-                      <strong style={{ display: 'block', marginBottom: summaryDisposition.summary ? '0.2rem' : 0, color: '#eef5ff' }}>
-                        {summaryDisposition.headline}
-                      </strong>
-                    )}
-                    {summaryDisposition.summary && <span>{summaryDisposition.summary}</span>}
-                  </div>
-                )}
-                {threatFamilyLabel && (
-                  <div style={{ padding: '0.8rem 0.9rem', borderRadius: '12px', border: '1px solid #d67a2f55', background: 'rgba(95, 53, 19, 0.36)', color: '#ffd7ab' }}>
-                    <strong style={{ display: 'block', marginBottom: '0.2rem' }}>Threat intelligence</strong>
-                    <span>{threatFamilyLabel}</span>
-                  </div>
-                )}
+          {files.length > 1 && (
+            <section className="security-report__section">
+              <h3 className="ui-section-title">Scanned files</h3>
+              <div className="security-report__choices" role="group" aria-label="Scanned files">
+                {files.map((file, index) => (
+                  <button
+                    key={`${file.fileName}-${index}`}
+                    type="button"
+                    className="security-report__choice"
+                    aria-pressed={index === activeFileIndex}
+                    onClick={() => setActiveFileIndex(index)}
+                  >
+                    <span className="security-report__choice-name">{file.fileName}</span>
+                    <span className="security-report__choice-meta ui-mono ui-truncate">{file.displayPath}</span>
+                  </button>
+                ))}
               </div>
             </section>
+          )}
 
-            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.7rem' }}>
-              <div>
-                <h3 style={{ margin: 0, color: '#edf5ff' }}>File details</h3>
-                <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Verify the exact file and scan metadata before installing.</p>
-              </div>
-              <div style={{ display: 'grid', gap: '0.6rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
-                  <span style={{ color: '#8ea7c6' }}>File</span>
-                  <strong style={{ textAlign: 'right', color: '#edf5ff', wordBreak: 'break-word' }}>{activeFile?.fileName || 'Unknown'}</strong>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
-                  <span style={{ color: '#8ea7c6' }}>Size</span>
-                  <strong style={{ color: '#edf5ff' }}>{formatBytes(activeResult?.input?.sizeBytes)}</strong>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
-                  <span style={{ color: '#8ea7c6' }}>Scanned</span>
-                  <strong style={{ color: '#edf5ff', textAlign: 'right' }}>{formatTimestamp(activeReport.summary.scannedAt)}</strong>
-                </div>
-                {activeDispositionBadge && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
-                    <span style={{ color: '#8ea7c6' }}>Disposition</span>
-                    <SimmBadge
-                      variant="outline"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: '0.24rem 0.55rem',
-                        borderRadius: '999px',
-                        border: `1px solid ${activeDispositionBadge.border}`,
-                        background: activeDispositionBadge.background,
-                        color: activeDispositionBadge.color,
-                        fontSize: '0.74rem',
-                        lineHeight: 1,
-                      }}
-                    >
-                      {activeDispositionBadge.label}
-                    </SimmBadge>
-                  </div>
+          <div className={`${calloutClass[summaryStyle.tone]} security-report__verdict`}>
+            <div className="security-report__verdict-copy">
+              {verdictHeadline && <strong>{verdictHeadline}</strong>}
+              <span>{verdictBody}</span>
+              {threatFamilyLabel && <span className="security-report__threat">{threatFamilyLabel}</span>}
+              <span className="ui-meta security-report__counts">
+                <span>{totalFindings} finding{totalFindings === 1 ? '' : 's'}</span>
+                <span>{threatMatches} threat match{threatMatches === 1 ? '' : 'es'}</span>
+                {activeReport.summary.highestSeverity && (
+                  <span>Highest severity: {activeReport.summary.highestSeverity}</span>
                 )}
-                <div style={{ display: 'grid', gap: '0.35rem' }}>
-                  <span style={{ color: '#8ea7c6' }}>SHA256</span>
-                  <div style={{ borderRadius: '10px', border: '1px solid #324158', background: 'rgba(16, 22, 33, 0.88)', padding: '0.75rem', color: '#dce9fb', fontFamily: 'monospace', fontSize: '0.73rem', wordBreak: 'break-all' }}>
-                    {activeFile?.sha256Hash || activeResult?.input?.sha256Hash || 'Unavailable'}
-                  </div>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1.3fr)' }}>
-            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
-              <div>
-                <h3 style={{ margin: 0, color: '#edf5ff' }}>What it means</h3>
-                <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Key behaviors MLVScan detected in this download.</p>
-              </div>
-              <div style={{ display: 'grid', gap: '0.75rem' }}>
-                {topFindings.length === 0 ? (
-                  <div style={{ display: 'flex', gap: '0.7rem', alignItems: 'flex-start', color: '#bbd8c8' }}>
-                    <span style={{ width: '10px', height: '10px', marginTop: '0.45rem', borderRadius: '999px', background: '#2cc784', flexShrink: 0 }}></span>
-                    <div>
-                      <strong style={{ display: 'block', color: '#ebfff4' }}>No suspicious patterns detected.</strong>
-                      <span style={{ color: '#a7c7b5' }}>This file did not trigger any active MLVScan rules.</span>
-                    </div>
-                  </div>
-                ) : (
-                  topFindings.map((finding, index) => (
-                    <div key={getFindingKey(finding, index)} style={{ display: 'flex', gap: '0.7rem', alignItems: 'flex-start' }}>
-                      <span
-                        style={{
-                          width: '10px',
-                          height: '10px',
-                          marginTop: '0.45rem',
-                          borderRadius: '999px',
-                          background: severityBadgeStyles[finding.severity].color,
-                          flexShrink: 0,
-                        }}
-                      ></span>
-                      <div style={{ minWidth: 0 }}>
-                        <strong style={{ display: 'block', color: '#edf5ff', lineHeight: 1.4 }}>{finding.description}</strong>
-                        <span style={{ color: '#8fa7c5', fontSize: '0.82rem' }}>{finding.location || activeFile?.displayPath}</span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </section>
-
-            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                <h3 style={{ margin: 0, color: '#edf5ff' }}>Findings</h3>
-                <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
-                  {filterOptions.map((option) => (
-                    <SimmButton
-                      key={option}
-                      type="button"
-                      variant="ghost"
-                      className={`security-report-filter h-auto ${activeSeverity === option ? 'security-report-filter--active' : ''}`}
-                      aria-pressed={activeSeverity === option}
-                      onClick={() => setActiveSeverity(option)}
-                      style={{
-                        borderRadius: '8px',
-                        border: activeSeverity === option ? '1px solid #5f789d' : '1px solid #324158',
-                        background: activeSeverity === option ? 'rgba(53, 72, 99, 0.72)' : 'rgba(18, 24, 36, 0.82)',
-                        color: activeSeverity === option ? '#eef6ff' : '#9bb2ce',
-                        padding: '0.28rem 0.62rem',
-                        fontSize: '0.76rem',
-                      }}
-                    >
-                      {option}
-                    </SimmButton>
-                  ))}
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gap: '0.7rem', maxHeight: '380px', overflowY: 'auto', paddingRight: '0.2rem' }}>
-                {filteredFindings.length === 0 ? (
-                  <div style={{ borderRadius: '10px', border: '1px dashed #33445a', padding: '1rem', color: '#8fa7c5' }}>
-                    No findings match the current filter.
-                  </div>
-                ) : (
-                  filteredFindings.map((finding, index) => {
-                    const key = getFindingKey(finding, index);
-                    const isActive = selectedFinding ? getFindingKey(selectedFinding, filteredFindings.indexOf(selectedFinding)) === key : index === 0;
-                    const badge = severityBadgeStyles[finding.severity];
-                    return (
-                      <SimmButton
-                        key={key}
-                        type="button"
-                        variant="ghost"
-                        className={`security-report-finding h-auto ${isActive ? 'security-report-finding--active' : ''}`}
-                        aria-pressed={isActive}
-                        onClick={() => setSelectedFindingKey(key)}
-                        style={{
-                          textAlign: 'left',
-                          borderRadius: '12px',
-                          border: isActive ? '1px solid #3db4a255' : '1px solid #324158',
-                          background: isActive ? 'rgba(30, 73, 66, 0.5)' : 'rgba(18, 24, 36, 0.86)',
-                          padding: '0.9rem',
-                          display: 'grid',
-                          gap: '0.45rem',
-                        }}
-                      >
-                        <SimmBadge variant="outline" style={{ alignSelf: 'start', justifySelf: 'start', borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...badge }}>
-                          {finding.severity}
-                        </SimmBadge>
-                        <strong style={{ color: '#edf5ff', lineHeight: 1.45 }}>{finding.description}</strong>
-                        <span style={{ color: '#8fa7c5', fontSize: '0.82rem' }}>{finding.location || activeFile?.displayPath}</span>
-                      </SimmButton>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-          </div>
-
-          <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
-            <div>
-              <h3 style={{ margin: 0, color: '#edf5ff' }}>Evidence</h3>
-              <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Use this context to understand why MLVScan flagged the selected finding.</p>
+              </span>
             </div>
+          </div>
 
-            {selectedFinding ? (
-              <div style={{ display: 'grid', gap: '0.8rem', gridTemplateColumns: 'minmax(0, 1fr)' }}>
-                <div style={{ borderRadius: '12px', border: '1px solid #324158', background: 'rgba(21, 28, 42, 0.9)', padding: '0.95rem', display: 'grid', gap: '0.5rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap' }}>
-                    <SimmBadge variant="outline" style={{ borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...severityBadgeStyles[selectedFinding.severity] }}>
-                      {selectedFinding.severity}
-                    </SimmBadge>
-                    {selectedFinding.ruleId && (
-                      <span style={{ color: '#9fb6d2', fontSize: '0.8rem' }}>Rule {selectedFinding.ruleId}</span>
-                    )}
-                    {typeof selectedFinding.riskScore === 'number' && (
-                      <span style={{ color: '#9fb6d2', fontSize: '0.8rem' }}>Risk score {selectedFinding.riskScore}</span>
-                    )}
-                  </div>
-                  <strong style={{ color: '#edf5ff', lineHeight: 1.45 }}>{selectedFinding.description}</strong>
-                  {selectedFinding.location && (
-                    <div style={{ color: '#8fa7c5', fontSize: '0.82rem' }}>{selectedFinding.location}</div>
-                  )}
-                </div>
-
-                {selectedFinding.codeSnippet && (
-                  <div>
-                    <div style={{ color: '#8ea7c6', fontSize: '0.74rem', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Code snippet</div>
-                    <pre style={{ margin: 0, borderRadius: '12px', border: '1px solid #2f3d53', background: '#0f141f', color: '#dce9fb', padding: '0.95rem', overflowX: 'auto', fontSize: '0.8rem', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{selectedFinding.codeSnippet}</pre>
-                  </div>
-                )}
-
+          <section className="security-report__section">
+            <div className="security-report__section-header">
+              <h3 className="ui-section-title">Findings</h3>
+              <div className="security-report__filters" role="group" aria-label="Filter findings by severity">
+                {filterOptions.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className="security-report__filter"
+                    aria-pressed={activeSeverity === option}
+                    onClick={() => setActiveSeverity(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
               </div>
+            </div>
+            {findings.length === 0 ? (
+              <p className="security-report__empty">
+                No suspicious patterns detected. This file did not trigger any active MLVScan rules.
+              </p>
+            ) : filteredFindings.length === 0 ? (
+              <p className="security-report__empty">No findings match this severity.</p>
             ) : (
-              <div style={{ borderRadius: '12px', border: '1px dashed #33445a', padding: '1rem', color: '#8fa7c5' }}>
-                No finding selected.
+              <div className="security-report__findings" role="listbox" aria-label="Findings">
+                {filteredFindings.map((finding, index) => {
+                  const key = getFindingKey(finding, index);
+                  const isActive = selectedKey === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      className="security-report__finding"
+                      onClick={() => setSelectedFindingKey(key)}
+                    >
+                      <span className={severityTagClass[finding.severity]}>{finding.severity}</span>
+                      <span className="security-report__finding-copy">
+                        <span className="security-report__finding-title">{finding.description}</span>
+                        <span className="security-report__finding-location ui-mono">{finding.location || activeFile?.displayPath}</span>
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </section>
+
+          {selectedFinding && (
+            <section className="security-report__section" aria-label="Evidence">
+              <h3 className="ui-section-title">Evidence</h3>
+              <div className="ui-meta">
+                <span className={severityTagClass[selectedFinding.severity]}>{selectedFinding.severity}</span>
+                {selectedFinding.ruleId && <span>Rule <span className="ui-mono">{selectedFinding.ruleId}</span></span>}
+                {typeof selectedFinding.riskScore === 'number' && <span>Risk score {selectedFinding.riskScore}</span>}
+              </div>
+              <p className="security-report__evidence-title">{selectedFinding.description}</p>
+              {selectedFinding.location && (
+                <p className="security-report__evidence-location ui-mono">{selectedFinding.location}</p>
+              )}
+              {selectedFinding.codeSnippet && (
+                <pre className="security-report__snippet">{selectedFinding.codeSnippet}</pre>
+              )}
+            </section>
+          )}
         </div>
 
-        {(showCloseActions || (presentation === 'overlay' && onConfirm)) && (
-          <div
-            style={{
-              flexShrink: 0,
-              padding: '0.95rem 1.25rem 1.15rem',
-              borderTop: '1px solid #2c3a50',
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: '0.6rem',
-              flexWrap: 'wrap',
-            }}
-          >
-            {showCloseActions && (
-              <SimmButton className="btn btn-secondary" onClick={onClose} disabled={busy}>
-                Close
-              </SimmButton>
+        <aside className="security-report__aside" aria-label="File details">
+          <h3 className="ui-section-title">File</h3>
+          <dl className="ui-kv">
+            <dt>Name</dt>
+            <dd>{activeFile?.fileName || 'Unknown'}</dd>
+            <dt>Size</dt>
+            <dd>{formatBytes(activeResult?.input?.sizeBytes)}</dd>
+            <dt>Scanned</dt>
+            <dd>{formatTimestamp(activeReport.summary.scannedAt)}</dd>
+            {activeDispositionBadge && (
+              <>
+                <dt>Disposition</dt>
+                <dd><span className={`ui-status ui-status--${activeDispositionBadge.tone}`}>{activeDispositionBadge.label}</span></dd>
+              </>
             )}
-            {onConfirm && (
-              <SimmButton className="btn btn-primary" onClick={onConfirm} disabled={busy}>
-                {busy ? 'Working...' : confirmLabel}
-              </SimmButton>
-            )}
-          </div>
-        )}
+            <dt>SHA256</dt>
+            <dd className="ui-mono security-report__hash">
+              {activeFile?.sha256Hash || activeResult?.input?.sha256Hash || 'Unavailable'}
+            </dd>
+          </dl>
+        </aside>
+      </div>
+
+      {(showCloseActions || (presentation === 'overlay' && onConfirm)) && (
+        <div className="app-dialog__footer security-report__footer">
+          {showCloseActions && (
+            <SimmButton type="button" variant="outline" onClick={onClose} disabled={busy}>
+              Close
+            </SimmButton>
+          )}
+          {onConfirm && (
+            <SimmButton type="button" onClick={onConfirm} disabled={busy}>
+              {busy ? 'Working…' : confirmLabel}
+            </SimmButton>
+          )}
+        </div>
+      )}
     </>
   );
 
@@ -744,8 +490,7 @@ export function SecurityScanReportView({
         <SimmDialogContent
           nested
           showCloseButton={false}
-          className="security-report-view__dialog"
-          style={shellStyle}
+          className="app-dialog security-report security-report--overlay"
         >
           {shellContent}
         </SimmDialogContent>
@@ -754,10 +499,7 @@ export function SecurityScanReportView({
   }
 
   return (
-    <div
-      className="security-report-view security-report-view--page"
-      style={shellStyle}
-    >
+    <div className="security-report security-report--page">
       {shellContent}
     </div>
   );

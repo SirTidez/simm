@@ -4,36 +4,57 @@ import type {
   ThreatDispositionClassification,
 } from '../types';
 
+/**
+ * Presentation of one security scan result. `tone` maps to the foundation
+ * status vocabulary (`.ui-tag--*` / `.ui-status--*`); `exception` is false for
+ * the default "Safe" result, which surfaces should not decorate with a chip.
+ * `background` / `border` / `color` stay for callers that still style inline;
+ * they resolve to theme tokens.
+ */
 export interface SecurityBadgeConfig {
   label: string;
   icon: string;
+  tone: 'ok' | 'warn' | 'danger' | 'muted';
+  exception: boolean;
   background: string;
   border: string;
   color: string;
 }
 
+const toneColors: Record<SecurityBadgeConfig['tone'], Pick<SecurityBadgeConfig, 'background' | 'border' | 'color'>> = {
+  ok: {
+    background: 'transparent',
+    border: 'color-mix(in srgb, var(--simm-ok) 50%, transparent)',
+    color: 'var(--simm-ok-text)',
+  },
+  warn: {
+    background: 'var(--simm-warn-soft)',
+    border: 'color-mix(in srgb, var(--simm-warn) 55%, transparent)',
+    color: 'var(--simm-warn-text)',
+  },
+  danger: {
+    background: 'var(--simm-danger-soft)',
+    border: 'color-mix(in srgb, var(--simm-danger) 55%, transparent)',
+    color: 'var(--simm-danger-text)',
+  },
+  muted: {
+    background: 'transparent',
+    border: 'var(--simm-line-strong)',
+    color: 'var(--simm-text-2)',
+  },
+};
+
+const buildConfig = (
+  label: string,
+  icon: string,
+  tone: SecurityBadgeConfig['tone'],
+  exception: boolean,
+): SecurityBadgeConfig => ({ label, icon, tone, exception, ...toneColors[tone] });
+
 const dispositionBadgeConfigs: Record<ThreatDispositionClassification, SecurityBadgeConfig> = {
-  Clean: {
-    label: 'Safe',
-    icon: 'fa-shield-check',
-    background: 'rgba(31, 105, 72, 0.24)',
-    border: '#3cc79055',
-    color: '#bdf3d8',
-  },
-  Suspicious: {
-    label: 'Potentially Malicious',
-    icon: 'fa-shield-exclamation',
-    background: 'rgba(104, 72, 27, 0.28)',
-    border: '#f0b35e55',
-    color: '#ffd9aa',
-  },
-  KnownThreat: {
-    label: 'Known Threat',
-    icon: 'fa-ban',
-    background: 'rgba(103, 34, 43, 0.28)',
-    border: '#ff7b8655',
-    color: '#ffccd1',
-  },
+  Clean: buildConfig('Safe', 'fa-shield-check', 'ok', false),
+  Suspicious: buildConfig('Potentially malicious', 'fa-shield-exclamation', 'warn', true),
+  KnownThreat: buildConfig('Known threat', 'fa-ban', 'danger', true),
 };
 
 export const getSecurityDispositionBadgeConfig = (
@@ -59,46 +80,22 @@ export const getSecurityBadgeConfig = (
   }
 
   if (summary.state === 'verified') {
-    return {
-      label: 'Safe',
-      icon: 'fa-shield-check',
-      background: 'rgba(31, 105, 72, 0.24)',
-      border: '#3cc79055',
-      color: '#bdf3d8',
-    };
+    return buildConfig('Safe', 'fa-shield-check', 'ok', false);
   }
 
   if (summary.state === 'review') {
     const severityLabel = summary.highestSeverity
-      ? `${summary.highestSeverity} Risk`
-      : 'Needs Review';
-    return {
-      label: severityLabel,
-      icon: 'fa-shield-exclamation',
-      background: 'rgba(104, 72, 27, 0.28)',
-      border: '#f0b35e55',
-      color: '#ffd9aa',
-    };
+      ? `${summary.highestSeverity} risk`
+      : 'Needs review';
+    return buildConfig(severityLabel, 'fa-shield-exclamation', 'warn', true);
   }
 
   if (summary.state === 'unavailable') {
-    return {
-      label: 'Scan Unavailable',
-      icon: 'fa-circle-question',
-      background: 'rgba(48, 67, 96, 0.32)',
-      border: '#7fa1c855',
-      color: '#d2e3fa',
-    };
+    return buildConfig('Scan unavailable', 'fa-circle-question', 'muted', true);
   }
 
   if (summary.state === 'skipped') {
-    return {
-      label: 'Scan Not Applicable',
-      icon: 'fa-file-circle-question',
-      background: 'rgba(48, 67, 96, 0.24)',
-      border: '#7fa1c833',
-      color: '#c7d8ef',
-    };
+    return buildConfig('Scan not applicable', 'fa-file-circle-question', 'muted', false);
   }
 
   return null;

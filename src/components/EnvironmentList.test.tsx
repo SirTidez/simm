@@ -367,17 +367,30 @@ describe('EnvironmentList', () => {
     });
   });
 
-  it('gives the keyboard-focusable environment card an accessible action-menu identity', async () => {
+  it('opens the environment action menu from its More button and the keyboard menu key', async () => {
     render(<EnvironmentList />);
 
-    const card = await screen.findByRole('button', { name: `Open actions for ${completedEnv.name}` });
-    expect(card).toHaveAttribute('aria-haspopup', 'menu');
-    expect(card).toHaveAttribute('aria-expanded', 'false');
+    const overview = await screen.findByRole('region', { name: `${completedEnv.name} overview` });
+    const trigger = screen.getByRole('button', { name: `More actions for ${completedEnv.name}` });
+    expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
 
-    fireEvent.keyDown(card, { key: 'ContextMenu' });
-    await waitFor(() => expect(card).toHaveAttribute('aria-expanded', 'true'));
-    expect(card).toHaveAttribute('aria-controls', `environment-actions-${completedEnv.id}`);
+    fireEvent.keyDown(overview, { key: 'ContextMenu' });
+    await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'true'));
+    expect(trigger).toHaveAttribute('aria-controls', `environment-actions-${completedEnv.id}`);
     expect(document.getElementById(`environment-actions-${completedEnv.id}`)).not.toBeNull();
+  });
+
+  it('renders the Overview tab without a Play button, name heading, or duplicated tool buttons', async () => {
+    render(<EnvironmentList onlyEnvironmentId={completedEnv.id} />);
+
+    expect(await screen.findByRole('region', { name: `${completedEnv.name} overview` })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Play' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: completedEnv.name })).toBeNull();
+    for (const name of ['Logs', 'Config', 'Mods']) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(screen.getByRole('button', { name: 'Delete Environment' })).toBeTruthy();
   });
 
   it('does not render terminal download progress on a completed environment card', async () => {
@@ -407,8 +420,8 @@ describe('EnvironmentList', () => {
 
     const { container } = render(<EnvironmentList />);
 
-    expect(await screen.findByRole('button', { name: 'Launch' })).toBeTruthy();
-    expect(container.querySelector('.environment-card__progress')).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Play' })).toBeTruthy();
+    expect(container.querySelector('.env-overview__progress')).toBeNull();
     expect(screen.queryByText(/Disconnected from Steam/i)).toBeNull();
   });
 
@@ -468,16 +481,26 @@ describe('EnvironmentList', () => {
 
     expect(await screen.findByText('Calculating total…', { exact: false })).toBeTruthy();
     expect(screen.getByText(/Downloaded: 1\.00 MB/)).toBeTruthy();
-    expect(container.querySelector('.environment-card__progress .progress-bar--indeterminate')).not.toBeNull();
+    expect(container.querySelector('.env-overview__progress .env-progress--indeterminate')).not.toBeNull();
     expect(screen.queryByText('100%')).toBeNull();
   });
 
-  it('opens per-install mod integration settings from the environment actions', async () => {
+  it('keeps tools out of the environment actions menu', async () => {
     render(<EnvironmentList />);
 
-    const card = await screen.findByRole('button', { name: `Open actions for ${completedEnv.name}` });
-    fireEvent.keyDown(card, { key: 'ContextMenu' });
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Mod Integration' }));
+    const overview = await screen.findByRole('region', { name: `${completedEnv.name} overview` });
+    fireEvent.keyDown(overview, { key: 'ContextMenu' });
+    expect(await screen.findByRole('menuitem', { name: 'Rename' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Open Folder' })).toBeTruthy();
+    for (const tool of ['Share Profile', 'Verify Game Files', 'Mod Integration', 'Refresh Game Version']) {
+      expect(screen.queryByRole('menuitem', { name: tool })).toBeNull();
+    }
+  });
+
+  it('opens per-install mod integration settings from the Tools row', async () => {
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Mod Integration' }));
 
     expect(await screen.findByRole('heading', { name: 'Mod Integration' })).toBeTruthy();
     expect(apiMocks.getModIntegrationConfig).toHaveBeenCalledWith('env-1');
@@ -507,14 +530,14 @@ describe('EnvironmentList', () => {
 
     render(<EnvironmentList />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Install ML' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Install MelonLoader' }));
     expect(await screen.findByRole('heading', { name: 'Select MelonLoader Version' })).toBeTruthy();
     await waitFor(() => {
       expect(apiMocks.getMelonLoaderReleases).toHaveBeenNthCalledWith(1, 'env-1', false);
     });
     expect(screen.queryByText('0.8.0-ci.2580')).toBeNull();
 
-    fireEvent.click(screen.getByRole('switch', { name: 'Show MelonLoader nightly builds' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Show nightly builds' }));
     await waitFor(() => {
       expect(apiMocks.getMelonLoaderReleases).toHaveBeenNthCalledWith(2, 'env-1', true);
     });
@@ -542,8 +565,7 @@ describe('EnvironmentList', () => {
     render(<EnvironmentList />);
 
     expect(screen.queryByRole('button', { name: 'Verify' })).toBeNull();
-    fireEvent.click(await screen.findByRole('button', { name: 'More actions for Env One' }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Verify Game Files' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Verify Game Files' }));
     expect(await screen.findByText('Verify Game Files: Env One')).toBeTruthy();
     expect(screen.getByText(/reacquire missing or damaged official game files/i)).toBeTruthy();
 
@@ -575,7 +597,7 @@ describe('EnvironmentList', () => {
 
     render(<EnvironmentList />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Check for Updates' }));
 
     await waitFor(() => {
       expect(checkUpdate).toHaveBeenCalledWith('env-1', true);
@@ -981,12 +1003,24 @@ describe('EnvironmentList', () => {
   it('launches non-Steam environments through Steam by default', async () => {
     render(<EnvironmentList />);
 
-    expect(await screen.findByText('Steam launch')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Launch' }));
+    expect(await screen.findByRole('radio', { name: 'Steam' })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Play' }));
 
     await waitFor(() => {
       expect(apiMocks.launchGame).toHaveBeenCalledWith('env-1', 'steam');
     });
+  });
+
+  it('switches the launch method from the Overview setting', async () => {
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('radio', { name: /^Local/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Play' }));
+
+    await waitFor(() => {
+      expect(apiMocks.launchGame).toHaveBeenCalledWith('env-1', 'direct');
+    });
+    localStorage.removeItem('simm-preferred-launch-method');
   });
 
   it('coalesces rapid repeated launches for the same environment card', async () => {
@@ -996,23 +1030,23 @@ describe('EnvironmentList', () => {
     }));
 
     render(<EnvironmentList />);
-    const launchButton = await screen.findByRole('button', { name: 'Launch' });
+    const launchButton = await screen.findByRole('button', { name: 'Play' });
     fireEvent.click(launchButton);
     fireEvent.click(launchButton);
 
     expect(apiMocks.launchGame).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: /launching/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /starting/i })).toBeDisabled();
 
     await act(async () => {
       resolveLaunch?.({ success: true });
     });
 
-    expect(await screen.findByRole('button', { name: 'Launch' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Play' })).toBeEnabled();
   });
 
   it('uses the shared process snapshot after a card launch', async () => {
     render(<EnvironmentList />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Launch' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Play' }));
     await waitFor(() => { expect(apiMocks.inspectGameLaunch).toHaveBeenCalledWith('env-1', 12345); });
     expect(apiMocks.verifyMelonLoaderLaunch).not.toHaveBeenCalled();
   });
@@ -1020,7 +1054,7 @@ describe('EnvironmentList', () => {
   it('shows nonmodal slow startup and clears it on late confirmation without relaunch', async () => {
     apiMocks.inspectGameLaunch.mockImplementation(async (environmentId, launchStartedAt) => ({ environmentId, launchStartedAt, processState: 'running', loaderState: 'staleLog', logPath: 'C:/env-1/MelonLoader/Latest.log', modifiedAt: 1, diagnostic: null }));
     render(<EnvironmentList />);
-    const button = await screen.findByRole('button', { name: 'Launch' });
+    const button = await screen.findByRole('button', { name: 'Play' });
     vi.useFakeTimers();
     await act(async () => { fireEvent.click(button); });
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
@@ -1124,8 +1158,8 @@ describe('EnvironmentList', () => {
     render(<EnvironmentList />);
 
     expect(await screen.findByText('Public')).toBeTruthy();
-    expect(await screen.findByText('Steam launch')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Launch' }));
+    expect(await screen.findByRole('radio', { name: 'Steam' })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Play' }));
 
     await waitFor(() => {
       expect(apiMocks.launchGame).toHaveBeenCalledWith('steam-env-1', 'steam');
@@ -1139,7 +1173,7 @@ describe('EnvironmentList', () => {
 
     render(<EnvironmentList />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Launch' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Play' }));
 
     expect(await screen.findByTestId('confirm-overlay')).toHaveTextContent('Restart Steam: Env One');
     fireEvent.click(screen.getByRole('button', { name: 'Restart Steam' }));

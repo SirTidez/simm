@@ -27,7 +27,7 @@ describe('MessageOverlay', () => {
 
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(screen.getByText('Environment Updated')).toBeTruthy();
-    expect(screen.getByText('Completed')).toBeTruthy();
+    expect(screen.getByRole('dialog').className).toContain('app-dialog--success');
 
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -48,7 +48,6 @@ describe('MessageOverlay', () => {
     const dialog = screen.getByRole('dialog');
     expect(dialog.className).toContain('app-dialog--nested');
     expect(dialog.className).toContain('app-dialog--danger');
-    expect(screen.getByText('Attention Required')).toBeTruthy();
   });
 
   it('closes on escape', () => {

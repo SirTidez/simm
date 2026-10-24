@@ -662,7 +662,7 @@ describe('LogsOverlay', () => {
 
     expect(await screen.findByText('CoolMod loaded successfully')).toBeTruthy();
     const modActivitySection = [...container.querySelectorAll('.logs-panel__rail-card, .logs-panel__rail-section')]
-      .find((card) => card.textContent?.includes('Mod Activity'));
+      .find((card) => card.textContent?.includes('Mod activity'));
     expect(modActivitySection).toBeTruthy();
     fireEvent.click(within(modActivitySection as HTMLElement).getByRole('button', { name: /CoolMod/i }));
 
@@ -923,7 +923,9 @@ describe('LogsOverlay', () => {
     expect(await screen.findByText(/Merged IL2CPP exception/)).toBeTruthy();
     const spacers = Array.from(container.querySelectorAll('.logs-panel__virtual-spacer')) as HTMLDivElement[];
     const spacerHeights = spacers.map((spacer) => Number.parseFloat(spacer.style.height || '0'));
-    expect(Math.max(...spacerHeights)).toBeGreaterThan(4800);
+    // 100 single-line rows alone would leave a spacer of roughly 3,200px; the
+    // merged 81-line entry must push the estimate well past that.
+    expect(Math.max(...spacerHeights)).toBeGreaterThan(3600);
   });
 
   it('loads an older log chunk when scrolling near the top of a tailed file', async () => {
@@ -989,7 +991,7 @@ describe('LogsOverlay', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getAllByText('4100').length).toBeGreaterThan(0);
+      expect(screen.getByText('4,100 lines')).toBeTruthy();
     });
   });
 
@@ -1080,14 +1082,7 @@ describe('LogsOverlay', () => {
     expect(modChip?.textContent).toBe('ExtremelyVerbosePackRatDebugInstrumentationSuite');
   });
 
-  it('collapses the inspector at tighter widths, shows a mini summary, and auto-expands on selection', async () => {
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      writable: true,
-      value: 1100,
-    });
-    window.dispatchEvent(new Event('resize'));
-
+  it('shows the inspector only while a line is selected and closes it again', async () => {
     apiMocks.getLogFiles.mockResolvedValue([
       makeLogFile({
         name: 'Session-latest.log',
@@ -1121,20 +1116,31 @@ describe('LogsOverlay', () => {
 
     await screen.findByText('CoolMod loaded successfully');
 
-    expect(screen.getByRole('button', { name: 'Expand Inspector' })).toBeTruthy();
-    const collapsedInspector = container.querySelector('.logs-panel__inspector--collapsed');
-    expect(collapsedInspector).toBeTruthy();
-    expect(within(collapsedInspector as HTMLElement).getByText('No selection')).toBeTruthy();
-    expect(within(collapsedInspector as HTMLElement).getByText('Errors')).toBeTruthy();
-    expect(within(collapsedInspector as HTMLElement).getByText('Warnings')).toBeTruthy();
+    expect(container.querySelector('.logs-panel__inspector')).toBeNull();
+    expect(screen.getByText('2 lines')).toBeTruthy();
+    expect(screen.getByText('0 errors')).toBeTruthy();
 
     const logRows = container.querySelectorAll('.logs-panel__line');
     fireEvent.click(logRows[0] as HTMLElement);
 
     await waitFor(() => {
-      expect(container.querySelector('.logs-panel__inspector--collapsed')).toBeNull();
+      expect(container.querySelector('.logs-panel__inspector')).toBeTruthy();
       expect(screen.getByRole('heading', { name: 'Line 21' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Collapse Inspector' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Filter to Mod' })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Inspector' }));
+
+    await waitFor(() => {
+      expect(container.querySelector('.logs-panel__inspector')).toBeNull();
+    });
+
+    fireEvent.click(container.querySelectorAll('.logs-panel__line')[1] as HTMLElement);
+    expect(await screen.findByRole('heading', { name: 'Line 22' })).toBeTruthy();
+    fireEvent.keyDown(container.querySelector('.logs-panel__stream') as HTMLElement, { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(container.querySelector('.logs-panel__inspector')).toBeNull();
     });
   });
 });

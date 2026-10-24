@@ -6,7 +6,7 @@ import type {
   ModIntegrationRequestRecord,
 } from '../types';
 import { ApiService } from '../services/api';
-import { Dialog, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { SimmButton, SimmDialogContent } from './primitives';
 import { Icon } from './Icon';
@@ -26,17 +26,17 @@ const policyOptions: Array<{
   {
     value: 'disabled',
     title: 'Disabled',
-    description: 'Mods cannot ask SIMM to check for updates or request management.',
+    description: 'Mods cannot ask SIMM for updates or management.',
   },
   {
     value: 'ask',
     title: 'Ask first',
-    description: 'Show each update request here and wait for your approval.',
+    description: 'Each update request waits here for your approval.',
   },
   {
     value: 'automatic',
     title: 'Queue automatically',
-    description: 'Queue verified updates automatically; management still requires your source choice.',
+    description: 'Verified updates are queued without asking. Management still needs your source choice.',
   },
 ];
 
@@ -44,11 +44,11 @@ function requestStatusLabel(status: ModIntegrationRequestRecord['status']): stri
   return status.split('-').map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`).join(' ');
 }
 
-function requestStatusTone(status: ModIntegrationRequestRecord['status']): string {
-  if (status === 'up-to-date' || status === 'managed' || status === 'already-managed') return 'success';
-  if (status === 'queued' || status === 'awaiting-user-approval' || status === 'awaiting-user-source') return 'warning';
+function requestStatusTone(status: ModIntegrationRequestRecord['status']): 'ok' | 'warn' | 'danger' | 'muted' {
+  if (status === 'up-to-date' || status === 'managed' || status === 'already-managed') return 'ok';
+  if (status === 'queued' || status === 'awaiting-user-approval' || status === 'awaiting-user-source') return 'warn';
   if (status === 'failed' || status === 'denied' || status === 'invalid') return 'danger';
-  return 'neutral';
+  return 'muted';
 }
 
 export function ModIntegrationDialog({
@@ -133,13 +133,26 @@ export function ModIntegrationDialog({
     }
   };
 
+  const connectionStatus = !config
+    ? null
+    : config.listening
+      ? { tone: 'ok', label: 'Connected' }
+      : config.policy !== 'disabled'
+        ? { tone: 'warn', label: 'Not listening' }
+        : { tone: 'muted', label: 'Off' };
+
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <SimmDialogContent className="mod-integration-dialog" showCloseButton={false}>
-        <DialogHeader className="modal-header">
-          <div>
-            <span className="workspace-section-eyebrow">Local mod requests</span>
+      <SimmDialogContent className="app-dialog mod-integration-dialog" showCloseButton={false}>
+        <DialogHeader className="modal-header app-dialog__header">
+          <div className="app-dialog__heading">
             <DialogTitle>Mod Integration</DialogTitle>
+            <div className="ui-meta">
+              <span>{environment.name}</span>
+              {connectionStatus && (
+                <span className={`ui-status ui-status--${connectionStatus.tone}`}>{connectionStatus.label}</span>
+              )}
+            </div>
           </div>
           <SimmButton
             variant="ghost"
@@ -148,49 +161,87 @@ export function ModIntegrationDialog({
             onClick={onClose}
             aria-label="Close mod integration settings"
           >
-            ×
+            <Icon name="times" />
           </SimmButton>
         </DialogHeader>
 
-        <div className="mod-integration-dialog__body">
-          <section className="mod-integration-dialog__intro">
-            <div>
-              <h3>{environment.name}</h3>
-              <p>
-                Choose whether mods in this installation may ask SIMM to check for updates or
-                request management. SIMM keeps provider sign-in details private, verifies the
-                calling file, and never adopts a local source without your choice.
-              </p>
-            </div>
-            <span className={`integration-state integration-state--${config?.listening ? 'ready' : config && config.policy !== 'disabled' ? 'warning' : 'off'}`}>
-              <Icon name={config?.listening ? 'fas fa-plug' : config && config.policy !== 'disabled' ? 'fas fa-exclamation-triangle' : 'fas fa-toggle-off'} />
-              {config?.listening ? 'API ready' : config && config.policy !== 'disabled' ? 'Needs attention' : 'Off'}
-            </span>
-          </section>
-
+        <div className="app-dialog__body mod-integration-dialog__body">
           {error && (
-            <div className="mod-integration-dialog__error" role="alert">
-              <Icon name="fas fa-exclamation-triangle" />
+            <div className="ui-callout ui-callout--danger" role="alert">
               <span>{error}</span>
             </div>
           )}
 
           {loading ? (
-            <div className="mod-integration-dialog__loading" role="status">
-              <Icon name="fas fa-spinner fa-spin" />
-              Loading integration settings…
+            <div className="mod-integration-dialog__loading" role="status" aria-label="Loading integration settings">
+              <span className="loading-skeleton env-skeleton env-skeleton--row" aria-hidden="true" />
+              <span className="loading-skeleton env-skeleton env-skeleton--row" aria-hidden="true" />
+              <span className="loading-skeleton env-skeleton env-skeleton--row" aria-hidden="true" />
             </div>
           ) : (
             <>
-              <section className="mod-integration-dialog__section">
-                <div className="mod-integration-dialog__section-heading">
-                  <div>
-                    <h4>Request policy</h4>
-                    <p>This setting applies only to this game installation.</p>
-                  </div>
-                </div>
+              {pendingRequests.length > 0 && (
+                <section className="mod-integration-dialog__section" aria-labelledby="mod-integration-pending">
+                  <h3 id="mod-integration-pending" className="ui-section-title">
+                    Needs your decision ({pendingRequests.length})
+                  </h3>
+                  <ul className="mod-integration-list">
+                    {pendingRequests.map((request) => (
+                      <li key={request.id} className="mod-integration-list__row">
+                        <div className="mod-integration-list__main">
+                          <strong className="ui-truncate">{request.modName}</strong>
+                          <span className="ui-meta">
+                            <span className="ui-mono">
+                              {request.currentVersion || 'Unknown version'}
+                              {request.targetVersion ? ` → ${request.targetVersion}` : ''}
+                            </span>
+                            {request.operation === 'requestManagement'
+                              ? <span className="ui-mono ui-truncate">{request.modFileName}</span>
+                              : request.source ? <span>{request.source}</span> : null}
+                          </span>
+                        </div>
+                        <div className="mod-integration-list__actions">
+                          <SimmButton
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => void resolveRequest(request.id, false)}
+                            disabled={resolvingId === request.id}
+                          >
+                            Deny
+                          </SimmButton>
+                          {request.operation === 'requestManagement' ? (
+                            <SimmButton
+                              size="sm"
+                              onClick={() => onManageRequest?.(request)}
+                              disabled={resolvingId === request.id || !onManageRequest}
+                            >
+                              Choose source
+                            </SimmButton>
+                          ) : (
+                            <SimmButton
+                              size="sm"
+                              onClick={() => void resolveRequest(request.id, true)}
+                              disabled={resolvingId === request.id}
+                            >
+                              Approve
+                            </SimmButton>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mod-integration-dialog__hint">
+                    Local mods are only linked to a source you choose.
+                  </p>
+                </section>
+              )}
+
+              <section className="mod-integration-dialog__section" aria-labelledby="mod-integration-policy">
+                <h3 id="mod-integration-policy" className="ui-section-title">
+                  What may mods in this environment ask SIMM to do?
+                </h3>
                 <RadioGroup
-                  className="mod-integration-policy-grid"
+                  className="mod-integration-policy-list"
                   value={selectedPolicy}
                   onValueChange={(value) => {
                     policyDirty.current = true;
@@ -199,10 +250,7 @@ export function ModIntegrationDialog({
                   aria-label="Mod integration request policy"
                 >
                   {policyOptions.map((option) => (
-                    <label
-                      key={option.value}
-                      className={`mod-integration-policy${selectedPolicy === option.value ? ' mod-integration-policy--selected' : ''}`}
-                    >
+                    <label key={option.value} className="mod-integration-policy">
                       <RadioGroupItem value={option.value} />
                       <span>
                         <strong>{option.title}</strong>
@@ -211,142 +259,74 @@ export function ModIntegrationDialog({
                     </label>
                   ))}
                 </RadioGroup>
-                <div className="mod-integration-dialog__policy-actions">
-                  <span>
-                    Enabling or changing the policy rotates this installation’s private connection token.
-                  </span>
-                  <SimmButton
-                    className="btn btn-primary"
-                    onClick={() => void savePolicy()}
-                    disabled={saving || selectedPolicy === config?.policy}
-                  >
-                    {saving ? <Icon name="fas fa-spinner fa-spin" /> : <Icon name="fas fa-shield-alt" />}
-                    {saving ? 'Saving…' : 'Save policy'}
-                  </SimmButton>
-                </div>
+                <p className="mod-integration-dialog__hint">
+                  Saving a new policy rotates this environment’s private connection token. Sign-in details are never shared with mods.
+                </p>
               </section>
 
               {config && config.policy !== 'disabled' && (
-                <section className="mod-integration-dialog__section mod-integration-dialog__connection">
-                  <div className="mod-integration-dialog__section-heading">
-                    <div>
-                      <h4>Local connection</h4>
-                      <p>Protocol v{config.protocolVersion}; connections from outside this computer are refused.</p>
-                    </div>
-                    <span className="mod-integration-dialog__managed-port">
-                      <Icon name="fas fa-sync-alt" />
-                      Port {config.port} · managed automatically
-                    </span>
-                  </div>
+                <section className="mod-integration-dialog__section" aria-labelledby="mod-integration-connection">
+                  <h3 id="mod-integration-connection" className="ui-section-title">Local connection</h3>
                   {config.connectionError && (
-                    <div className="mod-integration-dialog__connection-error" role="alert">
-                      <Icon name="fas fa-exclamation-triangle" />
+                    <div className="ui-callout ui-callout--danger" role="alert">
                       <span>{config.connectionError}</span>
                     </div>
                   )}
-                  {config.bridgeConfigPath && (
-                    <>
-                      <div className="mod-integration-dialog__path" title={config.bridgeConfigPath}>
-                        <Icon name="fas fa-file-alt" />
-                        <span>{config.bridgeConfigPath}</span>
-                      </div>
-                      <p className="mod-integration-dialog__port-hint">
-                        SIMM selects an available local port and keeps this bridge file synchronized automatically.
-                      </p>
-                    </>
-                  )}
+                  <dl className="ui-kv">
+                    <dt>Port</dt>
+                    <dd>Port {config.port} · managed automatically</dd>
+                    <dt>Protocol</dt>
+                    <dd>v{config.protocolVersion} · this computer only</dd>
+                    {config.bridgeConfigPath && (
+                      <>
+                        <dt>Bridge file</dt>
+                        <dd className="ui-mono ui-truncate" title={config.bridgeConfigPath}>{config.bridgeConfigPath}</dd>
+                      </>
+                    )}
+                  </dl>
                 </section>
               )}
 
-              {pendingRequests.length > 0 && (
-                <section className="mod-integration-dialog__section">
-                  <div className="mod-integration-dialog__section-heading">
-                    <div>
-                      <h4>Needs your decision</h4>
-                      <p>Update requests can be approved here. Local mods must be linked to a source you choose.</p>
-                    </div>
-                    <span className="badge badge-warning">{pendingRequests.length}</span>
-                  </div>
-                  <div className="mod-integration-request-list">
-                    {pendingRequests.map((request) => (
-                      <article key={request.id} className="mod-integration-request mod-integration-request--pending">
-                        <div>
-                          <strong>{request.modName}</strong>
-                          <span>
-                            {request.currentVersion || 'Unknown version'}
-                            {request.targetVersion ? ` → ${request.targetVersion}` : ''}
-                            {request.operation === 'requestManagement'
-                              ? ` · ${request.modFileName}`
-                              : request.source ? ` · ${request.source}` : ''}
-                          </span>
-                        </div>
-                        <div className="mod-integration-request__actions">
-                          <SimmButton
-                            variant="secondary"
-                            className="btn btn-secondary btn-small"
-                            onClick={() => void resolveRequest(request.id, false)}
-                            disabled={resolvingId === request.id}
-                          >
-                            Deny
-                          </SimmButton>
-                          {request.operation === 'requestManagement' ? (
-                            <SimmButton
-                              className="btn btn-primary btn-small"
-                              onClick={() => onManageRequest?.(request)}
-                              disabled={resolvingId === request.id || !onManageRequest}
-                            >
-                              Choose source
-                            </SimmButton>
-                          ) : (
-                            <SimmButton
-                              className="btn btn-primary btn-small"
-                              onClick={() => void resolveRequest(request.id, true)}
-                              disabled={resolvingId === request.id}
-                            >
-                              Approve
-                            </SimmButton>
-                          )}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              <section className="mod-integration-dialog__section mod-integration-dialog__history">
-                <div className="mod-integration-dialog__section-heading">
-                  <div>
-                    <h4>Recent requests</h4>
-                    <p>Read-only update checks are not retained.</p>
-                  </div>
-                  {config && config.pendingRequestCount > 0 && (
-                    <span className="badge badge-warning">{config.pendingRequestCount} pending</span>
-                  )}
-                </div>
+              <section className="mod-integration-dialog__section" aria-labelledby="mod-integration-history">
+                <h3 id="mod-integration-history" className="ui-section-title">Recent requests</h3>
                 {requests.length === 0 ? (
-                  <div className="mod-integration-dialog__empty">
-                    <Icon name="fas fa-box-open" />
-                    <span>No mod requests yet.</span>
-                  </div>
+                  <p className="mod-integration-dialog__hint">
+                    No requests yet. Mods that support SIMM integration appear here when they ask for an update.
+                  </p>
                 ) : (
-                  <div className="mod-integration-history-list">
+                  <ul className="mod-integration-list">
                     {requests.slice(0, 12).map((request) => (
-                      <div key={request.id} className="mod-integration-history-row">
-                        <div>
-                          <strong>{request.modName}</strong>
-                          <span>{request.message || request.modFileName}</span>
+                      <li key={request.id} className="mod-integration-list__row">
+                        <div className="mod-integration-list__main">
+                          <strong className="ui-truncate">{request.modName}</strong>
+                          <span className="ui-subtle ui-truncate">{request.message || request.modFileName}</span>
                         </div>
-                        <span className={`integration-request-status integration-request-status--${requestStatusTone(request.status)}`}>
+                        <span className={`ui-status ui-status--${requestStatusTone(request.status)}`}>
                           {requestStatusLabel(request.status)}
                         </span>
-                      </div>
+                      </li>
                     ))}
-                  </div>
+                  </ul>
                 )}
               </section>
             </>
           )}
         </div>
+
+        <DialogFooter className="app-dialog__footer">
+          <div className="app-dialog__actions">
+            <SimmButton variant="secondary" onClick={onClose}>
+              Close
+            </SimmButton>
+            <SimmButton
+              onClick={() => void savePolicy()}
+              disabled={loading || saving || selectedPolicy === config?.policy}
+            >
+              {saving && <Icon name="spinner" spin />}
+              {saving ? 'Saving…' : 'Save Policy'}
+            </SimmButton>
+          </div>
+        </DialogFooter>
       </SimmDialogContent>
     </Dialog>
   );

@@ -71,33 +71,24 @@ export function ConfirmOverlay({
         aria-describedby={messageId}
       >
         <AlertDialogHeader className="modal-header app-dialog__header">
-          <div className="app-dialog__heading">
-            <span className="app-dialog__eyebrow">{resolvedTone === 'danger' ? 'Confirm Action' : 'Confirmation'}</span>
-            <AlertDialogTitle id={titleId}>{title}</AlertDialogTitle>
-          </div>
-          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close confirmation dialog">×</SimmButton>
+          <AlertDialogTitle id={titleId}>{title}</AlertDialogTitle>
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close confirmation dialog">
+            <Icon name="times" />
+          </SimmButton>
         </AlertDialogHeader>
 
         <div className="app-dialog__body">
-          <div className={`app-dialog__callout app-dialog__callout--${resolvedTone}`}>
-            <div className="app-dialog__icon" aria-hidden="true">
-              <Icon name={resolvedTone === 'danger' ? 'triangleExclamation' : 'circleQuestion'} />
-            </div>
-            <div className="app-dialog__meta">
-              <strong>{resolvedTone === 'danger' ? 'Review before continuing' : 'Confirm to continue'}</strong>
-              <AlertDialogDescription id={messageId}>{message}</AlertDialogDescription>
-            </div>
-          </div>
+          <AlertDialogDescription id={messageId} className="app-dialog__message">{message}</AlertDialogDescription>
           {bodyContent ? <div className="app-dialog__supplement">{bodyContent}</div> : null}
         </div>
 
         <AlertDialogFooter className="app-dialog__footer">
           <div className="app-dialog__actions">
-            <SimmButton className="btn btn-secondary" onClick={onClose} autoFocus={resolvedTone === 'danger'}>
+            <SimmButton variant="secondary" onClick={onClose} autoFocus={resolvedTone === 'danger'}>
               {cancelText}
             </SimmButton>
             <SimmButton
-              className={resolvedTone === 'danger' ? 'btn btn-danger' : 'btn btn-primary'}
+              className={resolvedTone === 'danger' ? 'ui-btn-danger-solid' : undefined}
               onClick={handleConfirm}
               autoFocus={resolvedTone !== 'danger'}
             >

@@ -5,51 +5,26 @@ import { ApiService } from '../services/api';
 import type { AppConfig, BranchConfig } from '../types';
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from '../utils/uxSettings';
 import { Icon } from './Icon';
+import { GameArt } from './media/GameArt';
 import {
   Dialog,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface Props {
   onClose: () => void;
 }
 
-type WizardMode = 'landing' | 'download-select' | 'download-configure' | 'import-configure';
+type WizardMode = 'landing' | 'steam-configure' | 'download-select' | 'download-configure' | 'import-configure';
+type WizardSource = 'steam' | 'import' | 'download';
 type DirectoryPurpose = 'download' | 'import';
 type SteamInstallation = { path: string; executablePath: string; appId: string };
-
-type WizardEmptyCardProps = {
-  icon: string;
-  title: string;
-  description: string;
-  tone?: 'default' | 'info';
-};
-
-function WizardEmptyCard({ icon, title, description, tone = 'default' }: WizardEmptyCardProps) {
-  return (
-    <Empty className={`wizard-empty-card ${tone === 'info' ? 'wizard-empty-card--info' : ''}`}>
-      <EmptyMedia>
-        <Icon name={icon} />
-      </EmptyMedia>
-      <EmptyHeader>
-        <EmptyTitle>{title}</EmptyTitle>
-        <EmptyDescription>{description}</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
-  );
-}
 
 function deriveBranchName(branch: BranchConfig): string {
   return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
@@ -100,6 +75,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const { settings, refreshDepotDownloader } = useSettingsStore();
 
   const [wizardMode, setWizardMode] = useState<WizardMode>('landing');
+  const [source, setSource] = useState<WizardSource | null>(null);
+  const [pendingBranchName, setPendingBranchName] = useState<string | null>(null);
+  const [selectedSteamPath, setSelectedSteamPath] = useState('');
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<BranchConfig | null>(null);
   const [outputDir, setOutputDir] = useState('');
@@ -123,7 +101,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
   const [steamInstallations, setSteamInstallations] = useState<SteamInstallation[]>([]);
   const [detectingSteam, setDetectingSteam] = useState(false);
-  const [showSteamInstallations, setShowSteamInstallations] = useState(false);
   const [steamDetectionError, setSteamDetectionError] = useState<string | null>(null);
 
   const [importPath, setImportPath] = useState('');
@@ -270,14 +247,12 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       const installations = await ApiService.detectSteamInstallations();
       setSteamInstallations(installations);
       setSteamDetectionError(null);
-      setShowSteamInstallations(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to detect Steam installations');
       setSteamInstallations([]);
       setSteamDetectionError(
         err instanceof Error ? err.message : 'Unable to detect Steam installations right now.'
       );
-      setShowSteamInstallations(true);
     } finally {
       setDetectingSteam(false);
     }
@@ -476,585 +451,462 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     onClose();
   };
 
-  const wizardStats = [
-    {
-      label: 'Steam',
-      value: hasSteamEnvironment
-        ? 'Managed'
-        : steamDetectionError
-          ? 'Check failed'
-          : steamDetected
-            ? 'Detected'
-            : 'Not linked'
-    },
-    ...(canDownloadBranches ? [{
-      label: 'DepotDownloader',
-      value: depotDownloaderDetectionError
-        ? 'Check failed'
-        : depotDownloaderInstalled === null
-          ? 'Not checked'
-          : depotDownloaderInstalled
-            ? 'Ready'
-            : 'Missing'
-    }] : []),
-    { label: 'Default path', value: settings?.defaultDownloadDir ? 'Configured' : 'Unset' },
-  ];
+  const steamAvailable = steamDetected && !hasSteamEnvironment;
+  const effectiveSource: WizardSource = source ?? (steamAvailable ? 'steam' : 'import');
+  const activeSource: WizardSource = wizardMode === 'download-select' || wizardMode === 'download-configure'
+    ? 'download'
+    : wizardMode === 'import-configure'
+      ? 'import'
+      : wizardMode === 'steam-configure'
+        ? 'steam'
+        : effectiveSource;
+  const steps = activeSource === 'download'
+    ? ['Source', 'Branch', 'Details']
+    : activeSource === 'import'
+      ? ['Source', 'Folder']
+      : ['Source', 'Details'];
+  const currentStepIndex = wizardMode === 'landing'
+    ? 0
+    : wizardMode === 'download-configure'
+      ? 2
+      : 1;
+  const selectedSteamInstallPath = steamInstallations.some((installation) => installation.path === selectedSteamPath)
+    ? selectedSteamPath
+    : steamInstallations[0]?.path ?? '';
+  const pendingBranch = appConfig?.branches.find((branch) => branch.name === pendingBranchName) ?? null;
+  const branchBlockReason = (branch: BranchConfig): string | null => {
+    if (gameOperationInProgress) return `${activeGameDownloadName} is already downloading or updating. Wait for it to finish first.`;
+    if (depotDownloaderInstalled !== true || depotDownloaderDetectionError) {
+      return depotDownloaderDetectionError ? 'Fix DepotDownloader detection first.' : 'Needs DepotDownloader.';
+    }
+    if (branch.requiresAuth && !isSteamAuthenticated) return 'Sign in to Steam in Accounts to download this branch.';
+    return null;
+  };
+
+  const goToLanding = () => {
+    setError(null);
+    setWizardMode('landing');
+  };
+
+  const continueFromLanding = () => {
+    setError(null);
+    if (effectiveSource === 'steam') {
+      setWizardMode('steam-configure');
+    } else if (effectiveSource === 'download') {
+      setWizardMode('download-select');
+    } else {
+      setWizardMode('import-configure');
+    }
+  };
+
+  const retryDepotDownloaderDetection = () => {
+    setDepotDownloaderInstalled(null);
+    void ApiService.detectDepotDownloader()
+      .then((info) => {
+        setDepotDownloaderInstalled(!!info.installed);
+        setDepotDownloaderCanAutoInstall(info.canAutoInstall ?? null);
+        setDepotDownloaderInstallHint(info.installHint ?? null);
+        setDepotDownloaderInstallHelpUrl(info.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
+        setDepotDownloaderDetectionError(null);
+      })
+      .catch((err) => {
+        setDepotDownloaderInstalled(null);
+        setDepotDownloaderDetectionError(
+          err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
+        );
+      });
+  };
+
+  const steamOptionDescription = hasSteamEnvironment
+    ? 'Your Steam install is already added to SIMM.'
+    : steamDetectionError
+      ? 'SIMM could not check for Steam installs right now.'
+      : steamDetected
+        ? 'Steam keeps the game updated. No Steam sign-in is needed in SIMM.'
+        : 'No Steam install of Schedule I was found on this computer.';
+
+  const renderFooter = (
+    back: { label: string; onClick: () => void },
+    primary: { label: string; onClick: () => void; disabled?: boolean; busy?: boolean; title?: string },
+  ) => (
+    <footer className="wizard__footer">
+      <SimmButton type="button" variant="secondary" onClick={back.onClick}>
+        {back.label}
+      </SimmButton>
+      <SimmButton type="button" onClick={primary.onClick} disabled={primary.disabled} title={primary.title}>
+        {primary.busy && <Icon name="spinner" spin />}
+        {primary.label}
+      </SimmButton>
+    </footer>
+  );
+
+  const detailFields = (idPrefix: string, namePlaceholder: string) => (
+    <>
+      <div className="wizard-field">
+        <label htmlFor={`${idPrefix}-name`}>Name</label>
+        <Input
+          id={`${idPrefix}-name`}
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={namePlaceholder}
+        />
+      </div>
+      <div className="wizard-field">
+        <label htmlFor={`${idPrefix}-description`}>
+          Description <span className="ui-subtle">(optional)</span>
+        </label>
+        <Textarea
+          id={`${idPrefix}-description`}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="What is this environment for?"
+          rows={2}
+        />
+      </div>
+    </>
+  );
 
   return (
-    <section
-      className="modal-content workspace-panel wizard-panel"
-      style={{
-        width: '100%',
-        height: '100%',
-        maxWidth: 'none',
-        margin: 0,
-        borderRadius: '0.75rem',
-        display: 'flex',
-        flexDirection: 'column'
-      }}
-      aria-label="Create environment panel"
-    >
-      <WorkspacePageHeader
-        eyebrow="Workspace"
-        title="Add Game"
-        description="Create or import a Schedule I environment and choose runtime, branch, and install settings."
-      />
-
-      {error && <div className="settings-error-banner">{error}</div>}
-
-      <div className="wizard-panel__body">
-        <div className="wizard-overview">
-          <div className="wizard-overview__copy">
-            <span className="settings-eyebrow">Environment Setup</span>
-            <h3>Add or import a game install.</h3>
-            <p>
-              SIMM looks for your Steam install automatically. Import a folder only if detection misses it.
-              Power User mode can also add separate Steam branches when needed.
-            </p>
-          </div>
-          <div className="wizard-overview__stats">
-            {wizardStats.map((stat) => (
-              <div key={stat.label} className="settings-stat-card">
-                <span>{stat.label}</span>
-                <strong>{stat.value}</strong>
-              </div>
-            ))}
-          </div>
+    <section className="wizard" aria-label="Add Environment">
+      <header className="ui-page-header wizard__header">
+        <div className="ui-page-header__titles">
+          <h1 className="ui-page-title">Add Environment</h1>
+          <p className="ui-page-subtitle">Add a Schedule I install so SIMM can manage its mods.</p>
         </div>
+        <ol className="wizard-steps" aria-label="Steps">
+          {steps.map((label, index) => (
+            <li
+              key={label}
+              className={`wizard-steps__item${index === currentStepIndex ? ' wizard-steps__item--current' : ''}${index < currentStepIndex ? ' wizard-steps__item--done' : ''}`}
+              aria-current={index === currentStepIndex ? 'step' : undefined}
+            >
+              <span className="wizard-steps__marker" aria-hidden="true">
+                {index < currentStepIndex ? <Icon name="check" /> : index + 1}
+              </span>
+              {label}
+            </li>
+          ))}
+        </ol>
+      </header>
 
-        <section className="wizard-steam-card">
-          <div className="wizard-steam-card__header">
-            <div className="wizard-steam-card__identity">
-              <div className="wizard-steam-card__icon">
-                <Icon name="fab fa-steam-symbol" />
-              </div>
-              <div>
-                <span className="settings-eyebrow">Steam Detection</span>
-                <h3>
-                  {hasSteamEnvironment
-                    ? 'Steam install already managed'
-                    : steamDetectionError
-                      ? 'Steam detection is unavailable right now'
-                      : steamDetected
-                        ? 'Steam install detected'
-                        : 'No Steam install detected yet'}
-                </h3>
-                <p>
-                  {hasSteamEnvironment
-                    ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates and does not need a Steam login inside SIMM.'
-                    : steamDetectionError
-                      ? 'SIMM could not verify Steam installations on this machine. Retry detection if you expect an existing install to appear.'
-                      : steamDetected
-                      ? 'A Schedule I Steam install was found on this machine. Add it to SIMM so Steam keeps handling game updates while SIMM manages mods and tools. No Steam login is needed for this path.'
-                      : 'Refresh detection to find your existing Steam install. Use Import only if SIMM still cannot find the folder.'}
-                </p>
-              </div>
-            </div>
-          <div className="wizard-steam-card__actions">
-              <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDetectSteam()} disabled={detectingSteam}>
-                <Icon name={detectingSteam ? 'fas fa-spinner fa-spin' : 'fab fa-steam'} />
-                {detectingSteam ? 'Detecting…' : steamDetected ? 'Refresh Detection' : 'Detect Steam Install'}
-              </SimmButton>
-              {!hasSteamEnvironment && steamDetected && (
-                <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => setShowSteamInstallations((value) => !value)}>
-                  <Icon name="fas fa-list" />
-                  {showSteamInstallations ? 'Hide Detected Installs' : 'Review Detected Installs'}
-                </SimmButton>
-              )}
-            </div>
-          </div>
-
-          {showSteamInstallations && !hasSteamEnvironment && (
-            <div className="wizard-steam-card__detected">
-              <div className="wizard-step-card__header">
-                <div>
-                  <span className="settings-eyebrow">Detected Installs</span>
-                  <h3>{steamInstallations.length === 0 ? 'No Schedule I Steam install found' : 'Choose a detected Steam install'}</h3>
-                </div>
-              </div>
-
-              {steamInstallations.length === 0 ? (
-                <WizardEmptyCard
-                  icon="fab fa-steam"
-                  title="No Steam installation found"
-                  description="Make sure Schedule I is installed through Steam, then refresh detection to try again."
-                />
-              ) : (
-                <>
-                  <div className="settings-field-grid">
-                    <div className="settings-field-card">
-                      <label htmlFor="wizard-steam-name">Display name</label>
-                      <Input
-                        id="wizard-steam-name"
-                        type="text"
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
-                        placeholder="Steam Installation"
-                      />
-                    </div>
-
-                    <div className="settings-field-card settings-field-card--full">
-                      <label htmlFor="wizard-steam-description">Description</label>
-                      <Textarea
-                        id="wizard-steam-description"
-                        className="wizard-textarea"
-                        value={description}
-                        onChange={(e) => setDescription(e.target.value)}
-                        placeholder="Optional notes for this managed Steam install"
-                        rows={3}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="wizard-steam-card__list" role="list">
-                    {steamInstallations.map((installation) => (
-                      <div key={installation.path} role="listitem">
-                        <SimmButton
-                          type="button"
-                          variant="ghost"
-                          className="wizard-steam-install-row h-auto"
-                          onClick={() => void handleCreateSteamEnvironment(installation.path)}
-                          disabled={loading}
-                        >
-                          <div className="wizard-steam-install-row__icon">
-                            <Icon name="fab fa-steam-symbol" />
-                          </div>
-                          <div className="wizard-steam-install-row__content">
-                            <strong>Schedule I Steam install</strong>
-                            <span>{installation.path}</span>
-                          </div>
-                          <span className="wizard-inline-action">
-                            {loading ? 'Linking…' : 'Add to SIMM'}
-                          </span>
-                        </SimmButton>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
+      <div className="wizard__body">
+        <div className="wizard__content">
+          {error && (
+            <div className="ui-callout ui-callout--danger" role="alert">
+              <span>{error}</span>
             </div>
           )}
-        </section>
 
-        {wizardMode === 'landing' && (
-          <section className="wizard-entry-grid" aria-label="Environment creation methods">
-            <SimmButton
-              type="button"
-              variant="ghost"
-              className="wizard-entry-card h-auto"
-              onClick={() => {
-                setError(null);
-                setWizardMode('import-configure');
-              }}
-            >
-              <div className="wizard-entry-card__icon wizard-entry-card__icon--success">
-                <Icon name="fas fa-folder-open" />
+          {wizardMode === 'landing' && (
+            <>
+              <div className="wizard__intro">
+                <h2>How do you want to add the game?</h2>
               </div>
-              <div className="wizard-entry-card__content">
-                <span className="settings-eyebrow">Import</span>
-                <h3>Import Existing Folder</h3>
-                <p>Use this when automatic Steam detection misses your game, or when you keep a separate local copy on disk.</p>
-              </div>
-              <span className="wizard-inline-action">Select Folder</span>
-            </SimmButton>
-
-            {canDownloadBranches && (
-              <SimmButton
-                type="button"
-                variant="ghost"
-                className="wizard-entry-card h-auto"
-                onClick={() => {
-                  setError(null);
-                  setWizardMode('download-select');
-                }}
+              <RadioGroup
+                className="wizard-options"
+                value={effectiveSource}
+                onValueChange={(value) => setSource(value as WizardSource)}
+                aria-label="Environment source"
               >
-                <div className="wizard-entry-card__icon">
-                  <Icon name="fas fa-download" />
-                </div>
-                <div className="wizard-entry-card__content">
-                  <span className="settings-eyebrow">Advanced</span>
-                  <h3>Download Separate Branch</h3>
-                  <p>Create a separate SIMM-managed Steam branch install for beta, alternate, or runtime-specific testing. SIMM handles updates for these installs.</p>
-                </div>
-                <span className="wizard-inline-action">Browse Branches</span>
-              </SimmButton>
-            )}
-          </section>
-        )}
+                <label className={`wizard-option${!steamAvailable ? ' wizard-option--disabled' : ''}`}>
+                  <RadioGroupItem value="steam" disabled={!steamAvailable} />
+                  <span className="ui-thumb wizard-option__icon" aria-hidden="true"><Icon name="steam" /></span>
+                  <span className="wizard-option__text">
+                    <strong>Use My Steam Install</strong>
+                    <span>{steamOptionDescription}</span>
+                    {steamAvailable && (
+                      <span className="ui-mono ui-truncate wizard-option__path" title={steamInstallations[0].path}>
+                        {steamInstallations[0].path}
+                        {steamInstallations.length > 1 ? ` (+${steamInstallations.length - 1} more)` : ''}
+                      </span>
+                    )}
+                  </span>
+                  {steamAvailable && <GameArt appId={steamInstallations[0].appId} className="wizard-option__art" />}
+                </label>
+                <label className="wizard-option">
+                  <RadioGroupItem value="import" />
+                  <span className="ui-thumb wizard-option__icon" aria-hidden="true"><Icon name="folderOpen" /></span>
+                  <span className="wizard-option__text">
+                    <strong>Import Existing Folder</strong>
+                    <span>Use a Schedule I folder that is already on disk. SIMM detects branch, runtime, and version.</span>
+                  </span>
+                </label>
+                {canDownloadBranches && (
+                  <label className="wizard-option">
+                    <RadioGroupItem value="download" />
+                    <span className="ui-thumb wizard-option__icon" aria-hidden="true"><Icon name="cloudDownloadAlt" /></span>
+                    <span className="wizard-option__text">
+                      <strong>Download Separate Branch</strong>
+                      <span>Download a beta or alternate branch into its own folder. SIMM keeps it updated.</span>
+                    </span>
+                    <span className="ui-tag">Advanced</span>
+                  </label>
+                )}
+              </RadioGroup>
+              {!hasSteamEnvironment && (
+                <p className="wizard__hint">
+                  Installed Schedule I through Steam recently?{' '}
+                  <SimmButton type="button" variant="link" onClick={() => void handleDetectSteam()} disabled={detectingSteam}>
+                    {detectingSteam ? 'Detecting…' : 'Detect Steam Install'}
+                  </SimmButton>
+                </p>
+              )}
+            </>
+          )}
 
-        {wizardMode === 'download-select' && (
-          <section className="wizard-step-card">
-            <div className="wizard-step-card__header">
-              <div>
-                <span className="settings-eyebrow">Step 1</span>
-                <h3>Select a branch to download</h3>
-                <p>Choose the Steam branch and runtime you need. SIMM will configure the install folder in the next step.</p>
+          {wizardMode === 'steam-configure' && (
+            <>
+              <div className="wizard__intro">
+                <h2>Name this environment</h2>
+                <p>Steam keeps the game updated. SIMM manages mods, plugins, and configs.</p>
               </div>
-              <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => setWizardMode('landing')}>
-                <Icon name="fas fa-arrow-left" />
-                Back
-              </SimmButton>
-            </div>
+              {steamInstallations.length > 1 ? (
+                <RadioGroup
+                  className="wizard-options"
+                  value={selectedSteamInstallPath}
+                  onValueChange={(value) => setSelectedSteamPath(String(value))}
+                  aria-label="Steam install"
+                >
+                  {steamInstallations.map((installation) => (
+                    <label key={installation.path} className="wizard-option">
+                      <RadioGroupItem value={installation.path} />
+                      <span className="wizard-option__text">
+                        <span className="ui-mono ui-truncate" title={installation.path}>{installation.path}</span>
+                      </span>
+                    </label>
+                  ))}
+                </RadioGroup>
+              ) : (
+                <dl className="ui-kv wizard__facts">
+                  <dt>Steam install</dt>
+                  <dd className="ui-mono">{selectedSteamInstallPath}</dd>
+                </dl>
+              )}
+              {detailFields('wizard-steam', 'Steam Installation')}
+            </>
+          )}
 
-            {(depotDownloaderInstalled !== true || depotDownloaderDetectionError) && (
-              <div className="wizard-prerequisite-card">
-                <div className="wizard-prerequisite-card__copy">
-                  <span className="settings-eyebrow">Requirement</span>
-                  <h4>{depotDownloaderDetectionError ? 'Unable to verify DepotDownloader status' : 'DepotDownloader is required for separate branch installs'}</h4>
-                  <p>
-                    {depotDownloaderDetectionError
-                      ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before adding a branch.'
-                      : canAutoInstallDepotDownloader
-                        ? 'SIMM uses DepotDownloader to add and update separate Steam branch installs. You can install it automatically or open the official manual instructions.'
-                        : depotDownloaderInstallHint || 'SIMM uses DepotDownloader to add and update separate Steam branch installs. Install it manually, then retry detection.'}
-                  </p>
-                  {depotDownloaderDetectionError && <div className="settings-error-banner">{depotDownloaderDetectionError}</div>}
-                  {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
-                </div>
-                <div className="wizard-inline-actions">
-                  <SimmButton
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => {
-                      if (depotDownloaderDetectionError) {
-                        setDepotDownloaderInstalled(null);
-                        void ApiService.detectDepotDownloader()
-                          .then((info) => {
-                            setDepotDownloaderInstalled(!!info.installed);
-                            setDepotDownloaderCanAutoInstall(info.canAutoInstall ?? null);
-                            setDepotDownloaderInstallHint(info.installHint ?? null);
-                            setDepotDownloaderInstallHelpUrl(info.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
-                            setDepotDownloaderDetectionError(null);
-                          })
-                          .catch((err) => {
-                            setDepotDownloaderInstalled(null);
-                            setDepotDownloaderDetectionError(
-                              err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
-                            );
-                          });
-                        return;
-                      }
-                      if (!canAutoInstallDepotDownloader) {
-                        void refreshDepotDownloaderStatus();
-                        return;
-                      }
-                      void handleAutoInstallDepotDownloader();
-                    }}
-                    disabled={installingDepotDownloader || (!depotDownloaderDetectionError && depotDownloaderInstalled === null)}
-                  >
-                    <Icon name={installingDepotDownloader ? 'fas fa-spinner fa-spin' : canAutoInstallDepotDownloader ? 'fas fa-download' : 'fas fa-rotate'} />
-                    {depotDownloaderDetectionError
-                      ? 'Retry Detection'
-                      : depotDownloaderInstalled === null
-                      ? 'Checking…'
-                      : installingDepotDownloader
-                        ? 'Installing…'
+          {wizardMode === 'download-select' && (
+            <>
+              <div className="wizard__intro">
+                <h2>Choose a branch</h2>
+                <p>SIMM downloads the branch with DepotDownloader into a folder you pick in the next step.</p>
+              </div>
+
+              {(depotDownloaderInstalled !== true || depotDownloaderDetectionError) && (
+                <div className={`ui-callout ${depotDownloaderDetectionError || depotDownloaderPromptError ? 'ui-callout--danger' : 'ui-callout--warn'} wizard__callout`}>
+                  <div className="wizard__callout-copy">
+                    <strong>
+                      {depotDownloaderDetectionError
+                        ? 'SIMM could not check for DepotDownloader'
+                        : depotDownloaderInstalled === null
+                          ? 'Checking for DepotDownloader…'
+                          : installingDepotDownloader
+                            ? 'Installing DepotDownloader…'
+                            : 'DepotDownloader is needed to download branches'}
+                    </strong>
+                    <span>
+                      {depotDownloaderDetectionError
+                        ? depotDownloaderDetectionError
                         : canAutoInstallDepotDownloader
-                          ? 'Install Automatically'
-                          : 'Refresh Detection'}
-                  </SimmButton>
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenDepotDownloaderInstructions}>
-                    <Icon name="fas fa-external-link-alt" />
-                    Manual Instructions
-                  </SimmButton>
-                </div>
-              </div>
-            )}
-
-            {appConfig ? (
-              <div className="wizard-branch-grid" role="list">
-                {appConfig.branches.map((branch) => {
-                  const authRequired = branch.requiresAuth && !isSteamAuthenticated;
-                  const depotRequired = depotDownloaderInstalled !== true || !!depotDownloaderDetectionError;
-                  const disabled = authRequired || depotRequired || gameOperationInProgress;
-
-                  return (
-                    <div key={branch.name} role="listitem">
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className={`wizard-branch-card h-auto ${disabled ? 'wizard-branch-card--disabled' : ''}`}
-                        onClick={() => {
-                          if (!disabled) handleBranchSelect(branch);
-                        }}
-                        disabled={disabled}
-                        title={
-                          authRequired
-                            ? 'Authenticate with Steam to authorize SIMM for this Schedule I install'
-                            : depotRequired
-                              ? depotDownloaderDetectionError
-                                ? 'SIMM could not verify DepotDownloader for this branch'
-                                : 'DepotDownloader is required to add this branch'
-                              : undefined
+                          ? 'SIMM can install it for you, or you can follow the manual instructions.'
+                          : depotDownloaderInstallHint || 'Install it manually, then check again.'}
+                    </span>
+                    {depotDownloaderPromptError && <span>{depotDownloaderPromptError}</span>}
+                  </div>
+                  <div className="wizard__callout-actions">
+                    <SimmButton type="button" variant="ghost" size="sm" onClick={handleOpenDepotDownloaderInstructions}>
+                      Manual Instructions
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        if (depotDownloaderDetectionError) {
+                          retryDepotDownloaderDetection();
+                          return;
                         }
-                      >
-                        <div className="wizard-branch-card__header">
-                          <div>
-                            <h4>{branch.displayName}</h4>
-                            <p>{branch.name}</p>
-                          </div>
-                          <div className="wizard-branch-card__badges">
-                            <span className="settings-chip">{branch.runtime}</span>
-                            {branch.requiresAuth && (
-                              <span className={`auth-badge ${isSteamAuthenticated ? 'auth-badge-ready' : 'auth-badge-required'}`}>
-                                {isSteamAuthenticated ? 'Auth Ready' : 'Auth Required'}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="wizard-branch-card__footer">
-                          <span>{gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating. Wait for it to finish first.` : authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
-                        </div>
-                      </SimmButton>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <WizardEmptyCard
-                icon="fas fa-spinner fa-spin"
-                title="Loading branches"
-                description="SIMM is fetching the currently supported game branches."
-              />
-            )}
-          </section>
-        )}
-
-        {wizardMode === 'download-configure' && selectedBranch && (
-          <section className="wizard-step-card wizard-configuration-shell">
-            <div className="wizard-step-card__header">
-              <div>
-                <span className="settings-eyebrow">Step 2</span>
-                <h3>Configure Environment</h3>
-                <p>Set the display details and confirm where the selected branch should be downloaded.</p>
-              </div>
-              <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => setWizardMode('download-select')}>
-                <Icon name="fas fa-arrow-left" />
-                Back
-              </SimmButton>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section__heading">
-                <div>
-                  <span className="settings-eyebrow">Identity</span>
-                  <h4>Environment details</h4>
-                </div>
-              </div>
-              <div className="settings-field-grid">
-                <div className="settings-field-card">
-                  <label htmlFor="wizard-download-name">Name</label>
-                  <Input
-                    id="wizard-download-name"
-                    type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Environment name"
-                  />
-                </div>
-
-                <div className="settings-field-card settings-field-card--full">
-                  <label htmlFor="wizard-download-description">Description</label>
-                  <Textarea
-                    id="wizard-download-description"
-                    className="wizard-textarea"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Optional notes to explain what this install is for"
-                    rows={3}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section__heading">
-                <div>
-                  <span className="settings-eyebrow">Storage</span>
-                  <h4>Download location</h4>
-                </div>
-              </div>
-              <div className="settings-field-grid">
-                <div className="settings-field-card settings-field-card--full">
-                  <label htmlFor="wizard-download-base-dir">Install folder</label>
-                  <div className="settings-inline-field">
-                    <Input
-                      id="wizard-download-base-dir"
-                      type="text"
-                      value={outputDir}
-                      onChange={(e) => {
-                        setOutputDirIsAutoDerived(false);
-                        setOutputDir(e.target.value);
+                        if (!canAutoInstallDepotDownloader) {
+                          void refreshDepotDownloaderStatus();
+                          return;
+                        }
+                        void handleAutoInstallDepotDownloader();
                       }}
-                      placeholder="C:\\Games\\Schedule I Beta"
-                    />
-                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void openDirectoryPicker('download')}>
-                      <Icon name="fas fa-folder-open" />
-                      Browse
+                      disabled={installingDepotDownloader || (!depotDownloaderDetectionError && depotDownloaderInstalled === null)}
+                    >
+                      {(installingDepotDownloader || (!depotDownloaderDetectionError && depotDownloaderInstalled === null)) && <Icon name="spinner" spin />}
+                      {depotDownloaderDetectionError
+                        ? 'Check Again'
+                        : depotDownloaderInstalled === null
+                          ? 'Checking…'
+                          : installingDepotDownloader
+                            ? 'Installing…'
+                            : canAutoInstallDepotDownloader
+                              ? 'Install Automatically'
+                              : 'Check Again'}
                     </SimmButton>
                   </div>
                 </div>
-              </div>
+              )}
 
-              <div className="wizard-path-preview">
-                <span className="settings-eyebrow">Install Target</span>
-                <strong>{outputDir || 'Choose an install folder to continue'}</strong>
-                <p>SIMM downloads this branch into the exact folder shown here. The branch name does not rename the folder automatically.</p>
-              </div>
-            </div>
-
-            <div className="wizard-panel__actions">
-              <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => setWizardMode('download-select')}>
-                Back
-              </SimmButton>
-              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir || gameOperationInProgress} title={gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating.` : undefined}>
-                <Icon name={loading ? 'fas fa-spinner fa-spin' : gameOperationInProgress ? 'lock' : 'fas fa-plus'} />
-                {loading ? 'Creating…' : gameOperationInProgress ? 'Game operation active' : 'Create Environment'}
-              </SimmButton>
-            </div>
-          </section>
-        )}
-
-        {wizardMode === 'import-configure' && (
-          <section className="wizard-step-card wizard-configuration-shell">
-            <div className="wizard-step-card__header">
-              <div>
-                <span className="settings-eyebrow">Import</span>
-                <h3>Import Existing Folder</h3>
-                <p>Select a local Schedule I folder and let SIMM detect the branch, runtime, and version details automatically.</p>
-              </div>
-              <SimmButton
-                type="button"
-                variant="secondary"
-                className="btn btn-secondary btn-small"
-                onClick={() => {
-                  setWizardMode('landing');
-                  setImportPath('');
-                }}
-              >
-                <Icon name="fas fa-arrow-left" />
-                Back
-              </SimmButton>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section__heading">
-                <div>
-                  <span className="settings-eyebrow">Source</span>
-                  <h4>Game folder</h4>
+              {appConfig ? (
+                <RadioGroup
+                  className="wizard-options"
+                  value={pendingBranchName ?? ''}
+                  onValueChange={(value) => setPendingBranchName(String(value))}
+                  aria-label="Branch"
+                >
+                  {appConfig.branches.map((branch) => {
+                    const blockReason = branchBlockReason(branch);
+                    return (
+                      <label
+                        key={branch.name}
+                        className={`wizard-option${blockReason ? ' wizard-option--disabled' : ''}`}
+                        title={blockReason ?? undefined}
+                      >
+                        <RadioGroupItem value={branch.name} disabled={Boolean(blockReason)} />
+                        <span className="wizard-option__text">
+                          <strong>{branch.displayName}</strong>
+                          <span className="ui-meta">
+                            <span className="ui-mono">{branch.name}</span>
+                            {blockReason && <span>{blockReason}</span>}
+                          </span>
+                        </span>
+                        <span className={branch.runtime === 'IL2CPP' ? 'ui-tag ui-tag--il2cpp' : 'ui-tag ui-tag--mono'}>
+                          {branch.runtime}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </RadioGroup>
+              ) : (
+                <div className="wizard-options" role="status" aria-label="Loading branches">
+                  {[0, 1, 2].map((index) => (
+                    <span key={index} className="loading-skeleton wizard__skeleton-row" aria-hidden="true" />
+                  ))}
                 </div>
-              </div>
-              <div className="settings-field-grid">
-                <div className="settings-field-card settings-field-card--full">
-                  <label htmlFor="wizard-import-path">Folder path</label>
-                  <div className="settings-inline-field">
-                    <Input
-                      id="wizard-import-path"
-                      type="text"
-                      value={importPath}
-                      onChange={(e) => setImportPath(e.target.value)}
-                      placeholder="C:\\Games\\Schedule I"
-                    />
-                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void openDirectoryPicker('import')}>
-                      <Icon name="fas fa-folder-open" />
-                      Browse
-                    </SimmButton>
-                  </div>
-                </div>
-              </div>
+              )}
+            </>
+          )}
 
-              <div className="wizard-path-preview">
-                <span className="settings-eyebrow">Detection Notes</span>
-                <strong>{importPath || 'Pick a folder to import'}</strong>
-                <p>SIMM will inspect the game files and infer branch, runtime, version, and existing support tool state.</p>
+          {wizardMode === 'download-configure' && selectedBranch && (
+            <>
+              <div className="wizard__intro">
+                <h2>Name and location</h2>
+                <p>
+                  {selectedBranch.displayName} · <span className="ui-mono">{selectedBranch.name}</span> · {selectedBranch.runtime}
+                </p>
               </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section__heading">
-                <div>
-                  <span className="settings-eyebrow">Identity</span>
-                  <h4>Optional labels</h4>
-                </div>
-              </div>
-              <div className="settings-field-grid">
-                <div className="settings-field-card">
-                  <label htmlFor="wizard-import-name">Name</label>
+              {detailFields('wizard-download', 'Environment name')}
+              <div className="wizard-field">
+                <label htmlFor="wizard-download-base-dir">Install folder</label>
+                <div className="wizard-field__row">
                   <Input
-                    id="wizard-import-name"
+                    id="wizard-download-base-dir"
                     type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="My Game Install"
+                    className="ui-mono"
+                    value={outputDir}
+                    onChange={(e) => {
+                      setOutputDirIsAutoDerived(false);
+                      setOutputDir(e.target.value);
+                    }}
+                    placeholder="C:\\Games\\Schedule I Beta"
                   />
+                  <SimmButton type="button" variant="secondary" onClick={() => void openDirectoryPicker('download')}>
+                    Browse
+                  </SimmButton>
                 </div>
+                <p className="wizard-field__hint">The branch is downloaded into exactly this folder.</p>
+              </div>
+            </>
+          )}
 
-                <div className="settings-field-card settings-field-card--full">
-                  <label htmlFor="wizard-import-description">Description</label>
-                  <Textarea
-                    id="wizard-import-description"
-                    className="wizard-textarea"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Optional notes for this imported installation"
-                    rows={3}
+          {wizardMode === 'import-configure' && (
+            <>
+              <div className="wizard__intro">
+                <h2>Choose the game folder</h2>
+                <p>Pick the folder that contains Schedule I.exe. SIMM detects branch, runtime, and version from the files.</p>
+              </div>
+              <div className="wizard-field">
+                <label htmlFor="wizard-import-path">Game folder</label>
+                <div className="wizard-field__row">
+                  <Input
+                    id="wizard-import-path"
+                    type="text"
+                    className="ui-mono"
+                    value={importPath}
+                    onChange={(e) => setImportPath(e.target.value)}
+                    placeholder="C:\\Games\\Schedule I"
                   />
+                  <SimmButton type="button" variant="secondary" onClick={() => void openDirectoryPicker('import')}>
+                    Browse
+                  </SimmButton>
                 </div>
               </div>
-            </div>
-
-            <WizardEmptyCard
-              icon="fas fa-circle-info"
-              title="Runtime and branch are detected automatically"
-              description="Import is only asking for the folder and optional labels. SIMM will identify runtime, branch, version, and installed tooling from disk."
-              tone="info"
-            />
-
-            <div className="wizard-panel__actions">
-              <SimmButton
-                type="button"
-                variant="secondary"
-                className="btn btn-secondary"
-                onClick={() => {
-                  setWizardMode('landing');
-                  setImportPath('');
-                }}
-              >
-                Back
-              </SimmButton>
-              <SimmButton
-                type="button"
-                className="btn btn-primary"
-                onClick={() => void handleImportLocalEnvironment()}
-                disabled={importingLocal || !importPath}
-              >
-                <Icon name={importingLocal ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} />
-                {importingLocal ? 'Importing…' : 'Import Installation'}
-              </SimmButton>
-            </div>
-          </section>
-        )}
+              {detailFields('wizard-import', 'My Game Install')}
+            </>
+          )}
+        </div>
       </div>
+
+      {wizardMode === 'landing' && renderFooter(
+        { label: 'Cancel', onClick: onClose },
+        {
+          label: 'Continue',
+          onClick: continueFromLanding,
+          disabled: effectiveSource === 'steam' && !steamAvailable,
+        },
+      )}
+
+      {wizardMode === 'steam-configure' && renderFooter(
+        { label: 'Back', onClick: goToLanding },
+        {
+          label: loading ? 'Adding…' : 'Add Environment',
+          onClick: () => void handleCreateSteamEnvironment(selectedSteamInstallPath),
+          disabled: loading || !selectedSteamInstallPath,
+          busy: loading,
+        },
+      )}
+
+      {wizardMode === 'download-select' && renderFooter(
+        { label: 'Back', onClick: goToLanding },
+        {
+          label: 'Continue',
+          onClick: () => {
+            if (pendingBranch && !branchBlockReason(pendingBranch)) handleBranchSelect(pendingBranch);
+          },
+          disabled: !pendingBranch || Boolean(branchBlockReason(pendingBranch)),
+        },
+      )}
+
+      {wizardMode === 'download-configure' && selectedBranch && renderFooter(
+        { label: 'Back', onClick: () => setWizardMode('download-select') },
+        {
+          label: loading ? 'Creating…' : 'Create Environment',
+          onClick: () => void handleCreate(),
+          disabled: loading || !outputDir || gameOperationInProgress,
+          busy: loading,
+          title: gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating.` : undefined,
+        },
+      )}
+
+      {wizardMode === 'import-configure' && renderFooter(
+        {
+          label: 'Back',
+          onClick: () => {
+            goToLanding();
+            setImportPath('');
+          },
+        },
+        {
+          label: importingLocal ? 'Importing…' : 'Import Installation',
+          onClick: () => void handleImportLocalEnvironment(),
+          disabled: importingLocal || !importPath,
+          busy: importingLocal,
+        },
+      )}
 
       {showDirectoryPicker && (
         <Dialog open={showDirectoryPicker} onOpenChange={(open) => {
@@ -1064,27 +916,24 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         }}>
           <SimmDialogContent
             nested
-            className="wizard-directory-dialog"
+            className="app-dialog wizard-directory-dialog"
             showCloseButton={false}
           >
-            <DialogHeader className="modal-header">
+            <DialogHeader className="modal-header app-dialog__header">
               <DialogTitle>{directoryPurpose === 'import' ? 'Select Game Folder' : 'Select Install Folder'}</DialogTitle>
-              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">×</SimmButton>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">
+                <Icon name="times" />
+              </SimmButton>
             </DialogHeader>
 
-            <div className="wizard-directory-dialog__body">
-              <div className="wizard-directory-dialog__overview">
-                <span className="settings-eyebrow">Directory Browser</span>
-                <h3>{directoryPurpose === 'import' ? 'Choose the local game folder to import' : 'Choose the install folder for this branch install'}</h3>
-                <p>Browse folders, create a new subdirectory if needed, and confirm the current location when you are ready.</p>
-              </div>
-
-              <div className="settings-field-card settings-field-card--full">
+            <div className="app-dialog__body wizard-directory-dialog__body">
+              <div className="wizard-field">
                 <label htmlFor="wizard-directory-path">Current path</label>
-                <div className="settings-inline-field">
+                <div className="wizard-field__row">
                   <Input
                     id="wizard-directory-path"
                     type="text"
+                    className="ui-mono"
                     value={directoryPath}
                     onChange={(e) => setDirectoryPath(e.target.value)}
                     onKeyDown={(e) => {
@@ -1094,16 +943,57 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     }}
                     placeholder="C:\\Users\\YourName"
                   />
-                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void loadDirectory(directoryPath)} disabled={browsing}>
-                    <Icon name={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'} />
-                    {browsing ? 'Loading…' : 'Go to Path'}
+                  <SimmButton type="button" variant="secondary" onClick={() => void loadDirectory(directoryPath)} disabled={browsing}>
+                    Go
                   </SimmButton>
                 </div>
               </div>
 
-              <div className="settings-field-card settings-field-card--full">
-                <label htmlFor="wizard-new-folder">Create a folder in the current location</label>
-                <div className="settings-inline-field">
+              <div className="wizard-directory-dialog__list" role="list" aria-busy={browsing}>
+                {browsing ? (
+                  [0, 1, 2, 3].map((index) => (
+                    <span key={index} className="loading-skeleton wizard__skeleton-row" aria-hidden="true" />
+                  ))
+                ) : (
+                  <>
+                    {getParentPath(directoryPath) && (
+                      <div role="listitem">
+                        <SimmButton
+                          type="button"
+                          variant="ghost"
+                          className="wizard-directory-row wizard-directory-row--parent h-auto"
+                          onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
+                        >
+                          <Icon name="arrowUp" />
+                          <span>Parent folder</span>
+                        </SimmButton>
+                      </div>
+                    )}
+
+                    {directoryList.length === 0 ? (
+                      <p className="wizard-directory-dialog__empty">This folder has no subfolders.</p>
+                    ) : (
+                      directoryList.map((dir) => (
+                        <div key={dir.path} role="listitem">
+                          <SimmButton
+                            type="button"
+                            variant="ghost"
+                            className="wizard-directory-row h-auto"
+                            onClick={() => void loadDirectory(dir.path)}
+                          >
+                            <Icon name="folder" />
+                            <span>{dir.name}</span>
+                          </SimmButton>
+                        </div>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div className="wizard-field">
+                <label htmlFor="wizard-new-folder">New folder here</label>
+                <div className="wizard-field__row">
                   <Input
                     id="wizard-new-folder"
                     type="text"
@@ -1119,79 +1009,30 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   />
                   <SimmButton
                     type="button"
-                    className="btn btn-secondary"
+                    variant="secondary"
                     onClick={() => void handleCreateFolder()}
                     disabled={creatingFolder || !newFolderName.trim() || !directoryPath}
                   >
-                    <Icon name={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} />
                     {creatingFolder ? 'Creating…' : 'Create Folder'}
                   </SimmButton>
                 </div>
               </div>
+            </div>
 
-              <div className="wizard-directory-dialog__list" role="list">
-                {browsing ? (
-                  <WizardEmptyCard
-                    icon="fas fa-spinner fa-spin"
-                    title="Loading directories"
-                    description="SIMM is reading the current folder contents."
-                  />
-                ) : (
-                  <>
-                    {getParentPath(directoryPath) && (
-                      <div role="listitem">
-                        <SimmButton
-                          type="button"
-                          variant="ghost"
-                          className="wizard-directory-row wizard-directory-row--parent h-auto"
-                          onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
-                        >
-                          <Icon name="fas fa-arrow-up" />
-                          <span>Parent Directory</span>
-                        </SimmButton>
-                      </div>
-                    )}
-
-                    {directoryList.length === 0 ? (
-                      <WizardEmptyCard
-                        icon="fas fa-folder-open"
-                        title="No subdirectories found"
-                        description="This location does not contain any folders that SIMM can browse into right now."
-                      />
-                    ) : (
-                      directoryList.map((dir) => (
-                        <div key={dir.path} role="listitem">
-                          <SimmButton
-                            type="button"
-                            variant="ghost"
-                            className="wizard-directory-row h-auto"
-                            onClick={() => void loadDirectory(dir.path)}
-                          >
-                            <Icon name="fas fa-folder" />
-                            <span>{dir.name}</span>
-                          </SimmButton>
-                        </div>
-                      ))
-                    )}
-                  </>
-                )}
-              </div>
-
-              <div className="wizard-panel__actions wizard-panel__actions--dialog">
-                <SimmButton type="button" className="btn btn-secondary" onClick={() => setShowDirectoryPicker(false)}>
+            <DialogFooter className="app-dialog__footer">
+              <div className="app-dialog__actions">
+                <SimmButton type="button" variant="secondary" onClick={() => setShowDirectoryPicker(false)}>
                   Cancel
                 </SimmButton>
                 <SimmButton
                   type="button"
-                  className="btn btn-primary"
                   onClick={() => handleDirectorySelection(directoryPath)}
                   disabled={browsing || !directoryPath}
                 >
-                  <Icon name="fas fa-check" />
                   Select Folder
                 </SimmButton>
               </div>
-            </div>
+            </DialogFooter>
           </SimmDialogContent>
         </Dialog>
       )}

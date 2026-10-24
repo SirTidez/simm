@@ -1,0 +1,89 @@
+/*
+ * Setup Guide. Uses the wizard page anatomy from wizard.css (.wizard,
+ * .wizard-steps, .wizard-options, .wizard__footer); only its own rows live here.
+ */
+
+.welcome__game {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-4);
+  min-width: 0;
+}
+
+.welcome__game-art {
+  flex: none;
+  width: 120px;
+  border-radius: var(--simm-radius);
+}
+
+.welcome__section {
+  display: grid;
+  gap: var(--simm-space-2);
+}
+
+.welcome__section .ui-section-title {
+  margin: 0;
+}
+
+.welcome__folder {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  min-width: 0;
+  padding: var(--simm-space-2) var(--simm-space-2) var(--simm-space-2) var(--simm-space-3);
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+}
+
+.welcome__path {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--simm-text);
+  overflow-wrap: anywhere;
+}
+
+.welcome__checklist {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--simm-line);
+}
+
+.welcome__check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-3) 0;
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.welcome__check > .ui-status {
+  padding-top: 0.4rem;
+}
+
+.welcome__check-copy {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.welcome__check-copy strong {
+  color: var(--simm-text);
+  font-size: var(--simm-text-base);
+  font-weight: 500;
+}
+
+.welcome__check-error {
+  color: var(--simm-danger-text);
+}
+
+.welcome__footer-start {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+}

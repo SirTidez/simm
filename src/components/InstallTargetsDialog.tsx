@@ -7,6 +7,8 @@ import {
 import { Checkbox } from '@/components/ui/checkbox';
 import type { Environment, ModLibraryEntry } from '../types';
 import { SimmButton, SimmDialogContent } from './primitives';
+import { Icon } from './Icon';
+import { ModThumbnail, ThumbnailStack } from './media/ModThumbnail';
 
 interface Props {
   isOpen: boolean;
@@ -55,7 +57,6 @@ export function InstallTargetsDialog({
     return null;
   }
 
-  const entry = entries[0];
   const compatibleCount = compatibleEnvironments.length;
   const selectedCount = selectedEnvironmentIds.size;
   const lockedIds = new Set(lockedEnvironmentIds);
@@ -67,6 +68,8 @@ export function InstallTargetsDialog({
     Mono: selectableEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'Mono'),
   };
 
+  const selectionDisabled = mode === 'installed' || installing;
+
   return (
     <Dialog open={isOpen} onOpenChange={(open) => {
       if (!open && !installing) {
@@ -75,99 +78,119 @@ export function InstallTargetsDialog({
     }}>
       <SimmDialogContent
         nested
-        className="workspace-install-dialog"
+        className="app-dialog lib-install-dialog"
         showCloseButton={false}
       >
         <DialogHeader className="modal-header">
-          <DialogTitle>{title}</DialogTitle>
-          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} disabled={installing} aria-label="Close install target dialog">×</SimmButton>
-        </DialogHeader>
-        <div className="workspace-install-dialog__body">
-          <div className="workspace-install-dialog__summary">
-            <strong>
-              {entries.length === 1 ? entry.displayName : `${entries.length} downloaded mods`}
-            </strong>
-            <span>{compatibleCount} compatible environment{compatibleCount === 1 ? '' : 's'}</span>
+          <div className="lib-install-dialog__heading">
+            {entries.length === 1 ? (
+              <ModThumbnail
+                name={entries[0].displayName}
+                iconUrl={entries[0].iconUrl}
+                iconCachePath={entries[0].iconCachePath}
+                size={32}
+              />
+            ) : (
+              <ThumbnailStack
+                size={24}
+                items={entries.map((entry) => ({
+                  key: entry.storageId,
+                  name: entry.displayName,
+                  iconUrl: entry.iconUrl,
+                  iconCachePath: entry.iconCachePath,
+                }))}
+              />
+            )}
+            <DialogTitle>{title}</DialogTitle>
           </div>
-
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} disabled={installing} aria-label="Close install target dialog"><Icon name="times" /></SimmButton>
+        </DialogHeader>
+        <div className="app-dialog__body lib-install-dialog__body">
           {entries.length > 1 && (
-            <div className="workspace-install-dialog__note">
+            <p className="lib-install-dialog__mods">
+              <strong>{entries.length} downloaded mods:</strong>{' '}
               {entries
                 .map((candidate) => candidate.displayName)
                 .filter((name, index, all) => all.indexOf(name) === index)
                 .join(', ')}
-            </div>
+            </p>
           )}
 
-          {note && <div className="workspace-install-dialog__note">{note}</div>}
+          {note && <p className="lib-install-dialog__note">{note}</p>}
 
           {mode === 'installed' && (
-            <div className="workspace-install-dialog__note">
+            <p className="ui-callout ui-callout--info lib-install-dialog__callout">
               This version is already installed in every compatible environment.
-            </div>
+            </p>
           )}
 
-          <div className="workspace-install-dialog__quick-actions">
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible} disabled={mode === 'installed' || installing}>
-              All compatible
-            </SimmButton>
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={mode === 'installed' || installing || byRuntime.IL2CPP.length === 0}>
-              All IL2CPP
-            </SimmButton>
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={mode === 'installed' || installing || byRuntime.Mono.length === 0}>
-              All Mono
-            </SimmButton>
-            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onClear} disabled={mode === 'installed' || installing}>
-              Clear
-            </SimmButton>
+          <div className="lib-install-dialog__toolbar">
+            <span className="lib-install-dialog__count">
+              {compatibleCount} compatible environment{compatibleCount === 1 ? '' : 's'}
+            </span>
+            <div className="lib-install-dialog__quick" role="group" aria-label="Quick select">
+              <SimmButton type="button" variant="ghost" size="sm" onClick={onSelectAllCompatible} disabled={selectionDisabled}>
+                All compatible
+              </SimmButton>
+              <SimmButton type="button" variant="ghost" size="sm" onClick={() => onSelectRuntime('IL2CPP')} disabled={selectionDisabled || byRuntime.IL2CPP.length === 0}>
+                All IL2CPP
+              </SimmButton>
+              <SimmButton type="button" variant="ghost" size="sm" onClick={() => onSelectRuntime('Mono')} disabled={selectionDisabled || byRuntime.Mono.length === 0}>
+                All Mono
+              </SimmButton>
+              <SimmButton type="button" variant="ghost" size="sm" onClick={onClear} disabled={selectionDisabled}>
+                Clear
+              </SimmButton>
+            </div>
           </div>
 
-          <div className="workspace-install-dialog__list">
-            {compatibleEnvironments.map((environment) => {
+          <div className="lib-install-dialog__list">
+            {compatibleEnvironments.length === 0 ? (
+              <p className="lib-install-dialog__empty">
+                No environment can run this version. Add an environment with a matching runtime first.
+              </p>
+            ) : compatibleEnvironments.map((environment) => {
               const isLocked = lockedIds.has(environment.id);
               const runtime = getNormalizedRuntime(environment);
               return (
-              <label
-                key={environment.id}
-                className="workspace-install-dialog__row"
-                style={isLocked ? { opacity: 0.72, cursor: 'default' } : undefined}
-              >
-                <Checkbox
-                  checked={selectedEnvironmentIds.has(environment.id)}
-                  disabled={isLocked || installing}
-                  onCheckedChange={() => onToggleEnvironment(environment.id)}
-                />
-                <span className="workspace-install-dialog__row-main">
-                  <strong>{environment.name}</strong>
-                  <span>
-                    {runtime} • {environment.branch}
-                    {isLocked ? ' • already installed' : ''}
+                <label
+                  key={environment.id}
+                  className={`lib-install-dialog__row${isLocked ? ' lib-install-dialog__row--locked' : ''}`}
+                >
+                  <Checkbox
+                    checked={selectedEnvironmentIds.has(environment.id)}
+                    disabled={isLocked || installing}
+                    onCheckedChange={() => onToggleEnvironment(environment.id)}
+                  />
+                  <span className="lib-install-dialog__name">{environment.name}</span>
+                  <span className="lib-install-dialog__meta">
+                    {runtime} · {environment.branch}
                   </span>
-                </span>
-              </label>
-            )})}
+                  {isLocked && <span className="lib-install-dialog__state">Already installed</span>}
+                </label>
+              );
+            })}
           </div>
 
           {excludedEnvironments.length > 0 && (
-            <div className="workspace-install-dialog__note">
+            <p className="lib-install-dialog__note">
               {excludedEnvironments.length} environment{excludedEnvironments.length === 1 ? '' : 's'} hidden because the selected mod version does not support their runtime.
-            </div>
+            </p>
           )}
         </div>
-        <DialogFooter className="modal-actions">
-          <SimmButton type="button" className="btn btn-secondary" onClick={onClose} disabled={installing}>
+        <DialogFooter className="app-dialog__footer">
+          <SimmButton type="button" variant="outline" onClick={onClose} disabled={installing}>
             {installing ? 'Installation in progress' : 'Cancel'}
           </SimmButton>
           <SimmButton
             type="button"
-            className="btn btn-primary"
             onClick={onConfirm}
             disabled={mode === 'installed' || selectedCount === 0 || installing}
           >
             {mode === 'installed'
               ? 'Already installed'
               : installing
-                ? 'Installing...'
+                ? 'Installing…'
                 : `Install to selected (${selectedCount})`}
           </SimmButton>
         </DialogFooter>

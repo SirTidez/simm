@@ -94,7 +94,7 @@ describe('ModIntegrationDialog', () => {
     await screen.findAllByText('Example Mod');
 
     fireEvent.click(screen.getByText('Queue automatically'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Policy' }));
     await waitFor(() => {
       expect(apiMocks.setModIntegrationPolicy).toHaveBeenCalledWith('env-1', 'automatic');
     });

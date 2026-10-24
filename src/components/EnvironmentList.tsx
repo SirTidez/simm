@@ -22,6 +22,7 @@ import { getErrorMessage } from '../utils/errors';
 import { Icon } from './Icon';
 import {
   Dialog,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
@@ -32,6 +33,7 @@ import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
 import { ModIntegrationDialog } from './ModIntegrationDialog';
+import { GameArt } from './media/GameArt';
 import {
   createAsyncListenerScope,
   onAuthWaiting,
@@ -128,6 +130,29 @@ function formatProgressBytes(bytes: number): string {
   return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
+const dateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+const dateFormatter = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+
+function formatDateTime(date: Date): string {
+  return dateTimeFormatter.format(date);
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : dateFormatter.format(date);
+}
+
 function isLinuxMelonLoaderSetupMessage(message: string): boolean {
   const normalized = message.toLowerCase();
   return normalized.includes('protontricks')
@@ -157,14 +182,6 @@ const UserLibsOverlay = lazyNamed(
   () => import('./UserLibsOverlay'),
   (module) => module.UserLibsOverlay,
 );
-const LogsOverlay = lazyNamed(
-  () => import('./LogsOverlay'),
-  (module) => module.LogsOverlay,
-);
-const ConfigurationOverlay = lazyNamed(
-  () => import('./ConfigurationOverlay'),
-  (module) => module.ConfigurationOverlay,
-);
 
 function OverlayFallback() {
   return (
@@ -177,45 +194,14 @@ function OverlayFallback() {
   );
 }
 
-function SteamBadge() {
-  return (
-    <span
-      className="badge badge-blue environment-card__steam-badge"
-      title="Steam-managed installation"
-    >
-      <Icon name="fab fa-steam" />
-    </span>
-  );
-}
-
 function EnvironmentListSkeleton() {
   return (
-    <div className="environment-loading-skeleton" role="status" aria-live="polite" aria-label="Loading game installs">
-      <section className="environment-loading-skeleton__header">
-        <span className="loading-skeleton loading-skeleton--eyebrow" aria-hidden="true" />
-        <strong className="loading-skeleton loading-skeleton--heading" aria-hidden="true" />
-        <span className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
-      </section>
-      <div className="environments-grid environments-grid--loading">
-        {[0, 1, 2, 3].map((index) => (
-          <article key={index} className="environment-card environment-card--skeleton">
-            <div className="environment-card-skeleton__top">
-              <span className="loading-skeleton loading-skeleton--icon" aria-hidden="true" />
-              <div>
-                <strong className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
-                <span className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
-              </div>
-            </div>
-            <div className="environment-card-skeleton__meta">
-              <span className="loading-skeleton loading-skeleton--pill" aria-hidden="true" />
-              <span className="loading-skeleton loading-skeleton--pill" aria-hidden="true" />
-              <span className="loading-skeleton loading-skeleton--pill" aria-hidden="true" />
-            </div>
-            <span className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
-            <span className="loading-skeleton loading-skeleton--line loading-skeleton--short" aria-hidden="true" />
-          </article>
-        ))}
-      </div>
+    <div className="env-overview env-overview--page env-overview--skeleton" role="status" aria-live="polite" aria-label="Loading environments">
+      <span className="loading-skeleton env-skeleton env-skeleton--line" aria-hidden="true" />
+      <span className="loading-skeleton env-skeleton env-skeleton--title" aria-hidden="true" />
+      {[0, 1, 2, 3, 4].map((index) => (
+        <span key={index} className="loading-skeleton env-skeleton env-skeleton--row" aria-hidden="true" />
+      ))}
     </div>
   );
 }
@@ -302,6 +288,8 @@ interface EnvironmentListProps {
   focusedEnvironmentRequestId?: number;
   onOpenWorkspace?: (workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => void;
   onSelectEnvironment?: (environmentId: string) => void;
+  /** Render only this environment (the environment workspace's Overview tab). */
+  onlyEnvironmentId?: string | null;
 }
 
 export type WorkspaceRoute =
@@ -330,7 +318,8 @@ export function EnvironmentList({
   focusedEnvironmentId,
   focusedEnvironmentRequestId = 0,
   onOpenWorkspace,
-  onSelectEnvironment
+  onSelectEnvironment,
+  onlyEnvironmentId = null,
 }: EnvironmentListProps) {
   const { environments, loading, error, progress, activeGameDownloadId, startDownload, verifyEnvironmentFiles, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion, ensureEnvironments } = useEnvironmentStore();
   const { attempts: launchAttempts, requestLaunch } = useGameLaunchStore();
@@ -344,12 +333,10 @@ export function EnvironmentList({
   const [nameValue, setNameValue] = useState<string>('');
   const [checkingEnvironments, setCheckingEnvironments] = useState<Set<string>>(new Set());
   const checkInProgressRef = useRef(false);
-  const environmentCardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const environmentCardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const [modsOverlay, setModsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [pluginsOverlay, setPluginsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [userLibsOverlay, setUserLibsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
-  const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
-  const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [profileExport, setProfileExport] = useState<ProfileExportState>(emptyProfileExportState);
   const profileExportOperationRef = useRef(0);
   const [unmanagedLocalModsCounts, setUnmanagedLocalModsCountsState] = useState<Map<string, number>>(
@@ -482,6 +469,7 @@ export function EnvironmentList({
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
   const [environmentMenu, setEnvironmentMenu] = useState<{ envId: string; x: number; y: number } | null>(null);
   const [modIntegrationEnvironmentId, setModIntegrationEnvironmentId] = useState<string | null>(null);
+  const [copiedPathEnvId, setCopiedPathEnvId] = useState<string | null>(null);
   const [preferredLaunchMethod, setPreferredLaunchMethod] = useState<Map<string, 'steam' | 'direct'>>(() => {
     // Load from localStorage on init
     try {
@@ -530,9 +518,11 @@ export function EnvironmentList({
     }
 
     lastHandledFocusRequestIdRef.current = focusedEnvironmentRequestId;
-    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (!onlyEnvironmentId) {
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
     card.focus({ preventScroll: true });
-  }, [compactMode, error, focusedEnvironmentId, focusedEnvironmentRequestId, loading]);
+  }, [compactMode, error, focusedEnvironmentId, focusedEnvironmentRequestId, loading, onlyEnvironmentId]);
 
   const notifyInitialDetectionComplete = useCallback(() => {
     if (initialDetectionNotifiedRef.current) {
@@ -1523,28 +1513,6 @@ export function EnvironmentList({
     setUserLibsOverlay({ isOpen: true, envId });
   };
 
-  const handleOpenLogsOverlay = (envId: string) => {
-    rememberEnvironment(envId);
-    if (onOpenWorkspace) {
-      onOpenWorkspace({ view: 'logs', environmentId: envId });
-      return;
-    }
-    setLogsOverlay({ isOpen: true, envId });
-  };
-
-  const handleCloseLogsOverlay = () => {
-    setLogsOverlay({ isOpen: false, envId: null });
-  };
-
-  const handleOpenConfigOverlay = (envId: string) => {
-    rememberEnvironment(envId);
-    if (onOpenWorkspace) {
-      onOpenWorkspace({ view: 'config', environmentId: envId });
-      return;
-    }
-    setConfigOverlay({ isOpen: true, envId });
-  };
-
   const handleShareProfile = async (env: Environment) => {
     const operationId = ++profileExportOperationRef.current;
     setProfileExport({
@@ -1614,10 +1582,6 @@ export function EnvironmentList({
     } finally {
       setProfileExport((previous) => previous.isOpen ? { ...previous, saving: false } : previous);
     }
-  };
-
-  const handleCloseConfigOverlay = () => {
-    setConfigOverlay({ isOpen: false, envId: null });
   };
 
   const handleUserLibsChanged = () => {
@@ -1842,17 +1806,10 @@ export function EnvironmentList({
   };
 
   const formatLastChecked = (value: Environment['lastUpdateCheck']) => {
-    if (!value) return 'Never checked';
+    if (!value) return 'Never';
     const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
     if (Number.isNaN(date.getTime())) return 'Unknown';
-    return date.toLocaleString('en-US', {
-      month: '2-digit',
-      day: '2-digit',
-      year: '2-digit',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    });
+    return formatDateTime(date);
   };
 
   const melonLoaderSelectorEnvironment = showMelonLoaderVersionSelector
@@ -1870,55 +1827,58 @@ export function EnvironmentList({
       ? (melonLoaderStatus.get(showMelonLoaderVersionSelector)?.version || 'Installed')
       : 'Not installed';
 
-  const getDominantStatus = (env: Environment) => {
+  const getDominantStatus = (env: Environment): { label: string; tone: 'ok' | 'warn' | 'danger' | 'info' | 'muted' } => {
     const prog = progress.get(env.id);
     const status = prog?.status || env.status;
-    const isCheckingUpdate = checkingEnvironments.has(env.id);
 
-    if (isCheckingUpdate) {
-      return { label: 'Checking', tone: 'checking', icon: 'fas fa-spinner fa-spin' };
-    }
-
-    if (status === 'downloading') {
-      return { label: 'Downloading', tone: 'downloading', icon: 'fas fa-arrow-down' };
-    }
-
-    if (status === 'validating') {
-      return { label: 'Validating', tone: 'checking', icon: 'fas fa-shield-alt' };
-    }
-
-    if (status === 'completed' && env.updateAvailable) {
-      return { label: 'Update Available', tone: 'warning', icon: 'fas fa-arrow-up' };
-    }
-
-    if (status === 'completed') {
-      return { label: 'Healthy', tone: 'healthy', icon: 'fas fa-check-circle' };
-    }
-
-    if (status === 'unavailable') {
-      return { label: 'Unavailable', tone: 'warning', icon: 'fas fa-ban' };
-    }
-
-    if (status === 'error') {
-      return { label: 'Needs Attention', tone: 'danger', icon: 'fas fa-exclamation-triangle' };
-    }
-
-    if (status === 'cancelled') {
-      return { label: 'Cancelled', tone: 'neutral', icon: 'fas fa-pause-circle' };
-    }
-
-    return { label: 'Not Downloaded', tone: 'neutral', icon: 'fas fa-download' };
+    if (checkingEnvironments.has(env.id)) return { label: 'Checking', tone: 'info' };
+    if (status === 'downloading') return { label: 'Downloading', tone: 'info' };
+    if (status === 'validating') return { label: 'Validating', tone: 'info' };
+    if (status === 'completed' && env.updateAvailable) return { label: 'Game update', tone: 'warn' };
+    if (status === 'completed') return { label: 'Ready', tone: 'ok' };
+    if (status === 'unavailable') return { label: 'Folder missing', tone: 'danger' };
+    if (status === 'error') return { label: 'Needs attention', tone: 'danger' };
+    if (status === 'cancelled') return { label: 'Cancelled', tone: 'muted' };
+    return { label: 'Not installed', tone: 'muted' };
   };
 
   const openEnvironmentMenu = (envId: string, x: number, y: number) => {
     setEnvironmentMenu({ envId, x, y });
   };
 
+  const setLaunchMethod = (envId: string, method: 'steam' | 'direct') => {
+    setPreferredLaunchMethod((previous) => {
+      const next = new Map(previous);
+      next.set(envId, method);
+      return next;
+    });
+  };
+
+  const handleCopyPath = async (env: Environment) => {
+    try {
+      await navigator.clipboard.writeText(env.outputDir);
+      setCopiedPathEnvId(env.id);
+      window.setTimeout(() => {
+        setCopiedPathEnvId((current) => (current === env.id ? null : current));
+      }, 1500);
+    } catch (err) {
+      showMessage('Copy Failed', getErrorMessage(err, 'Could not copy the install folder path.'), 'error');
+    }
+  };
+
+  const handleRefreshGameVersion = async (env: Environment) => {
+    try {
+      await refreshGameVersion(env.id);
+    } catch (err) {
+      console.error('Failed to refresh game version:', err);
+    }
+  };
+
+  // Share Profile, Verify Game Files, Mod Integration and Refresh Game Version
+  // live in the visible Tools row of the Overview; the menu keeps only the
+  // object-level actions so the two never duplicate each other.
   const buildEnvironmentMenuItems = (env: Environment): AnchoredContextMenuItem[] => {
     const isSteam = isSteamEnvironment(env);
-    const currentMethod: LaunchMethod = directLaunchSupported
-      ? preferredLaunchMethod.get(env.id) || 'steam'
-      : 'steam';
 
     return [
       {
@@ -1934,61 +1894,19 @@ export function EnvironmentList({
         onSelect: () => handleStartEditDescription(env),
       },
       {
-        key: 'launch-steam',
-        label: currentMethod === 'steam' ? 'Prefer Steam Launch' : 'Use Steam Launch',
-        icon: 'fab fa-steam',
-        disabled: currentMethod === 'steam',
+        key: 'open-folder',
+        label: 'Open Folder',
+        icon: 'fas fa-folder-open',
+        separatorBefore: true,
         onSelect: () => {
-          setPreferredLaunchMethod(prev => {
-            const next = new Map(prev);
-            next.set(env.id, 'steam');
-            return next;
-          });
+          void handleOpenFolder(env);
         },
-      },
-      ...(directLaunchSupported
-        ? [{
-            key: 'launch-direct',
-            label: currentMethod === 'direct' ? 'Prefer Local Launch' : 'Use Local Launch',
-            icon: 'fas fa-terminal',
-            disabled: currentMethod === 'direct',
-            onSelect: () => {
-              setPreferredLaunchMethod(prev => {
-                const next = new Map(prev);
-                next.set(env.id, 'direct');
-                return next;
-              });
-            },
-          }]
-        : []),
-      {
-        key: 'share-profile',
-        label: 'Share Profile',
-        icon: 'fas fa-upload',
-        disabled: env.status !== 'completed',
-        onSelect: () => {
-          void handleShareProfile(env);
-        },
-      },
-      {
-        key: 'mod-integration',
-        label: 'Mod Integration',
-        icon: 'fas fa-plug',
-        disabled: env.status !== 'completed',
-        onSelect: () => setModIntegrationEnvironmentId(env.id),
-      },
-      {
-        key: 'verify-files',
-        label: 'Verify Game Files',
-        icon: 'fas fa-shield-alt',
-        disabled: !['completed', 'error'].includes(env.status) || Boolean(activeGameDownloadId),
-        onSelect: () => handleVerifyRequest(env),
       },
       {
         key: 'delete',
         label: isSteam ? 'Clear Environment Records' : 'Delete Environment',
         icon: 'fas fa-trash',
-        disabled: false,
+        separatorBefore: true,
         danger: true,
         onSelect: () => handleDelete(env),
       },
@@ -1996,6 +1914,7 @@ export function EnvironmentList({
   };
 
   const renderEnvironmentCard = (env: Environment) => {
+    const isPage = Boolean(onlyEnvironmentId);
     const prog = progress.get(env.id);
     const isDownloading = env.status === 'downloading' || prog?.status === 'queued' || prog?.status === 'downloading' || prog?.status === 'validating';
     const showDownloadPercent = prog?.operation === 'verify' || (typeof prog?.totalBytes === 'number' && prog.totalBytes > 0);
@@ -2010,9 +1929,6 @@ export function EnvironmentList({
     const launchMethod: LaunchMethod = directLaunchSupported
       ? preferredLaunchMethod.get(env.id) || 'steam'
       : 'steam';
-    const launchTitle = launchMethod === 'steam'
-      ? 'Launch through Steam'
-      : 'Launch this local install directly';
     const isLaunching = isLaunchPending(launchAttempts.get(env.id));
     const modCount = modsCounts.get(env.id) ?? 0;
     const featuredDownloadCount = featuredDownloadCounts.get(env.id) ?? 0;
@@ -2069,32 +1985,23 @@ export function EnvironmentList({
       : undefined;
     const currentGameVersion = env.currentGameVersion || 'Unknown';
     const hasGameUpdate = isCompleted && Boolean(env.updateAvailable && env.updateGameVersion);
-    const metrics = [
-      {
-        label: 'Version',
-        value: isCompleted
-          ? (hasGameUpdate ? `${currentGameVersion} -> ${env.updateGameVersion}` : currentGameVersion)
-          : 'Not installed',
-        tone: hasGameUpdate ? 'warning' : undefined,
-        title: hasGameUpdate ? `Game update available: ${currentGameVersion} -> ${env.updateGameVersion}` : undefined,
-      },
-      {
-        label: 'Mods',
-        value: isCompleted
-          ? `${totalModCount}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
-          : 'Unavailable',
-        tone: modUpdateCount > 0 ? 'warning' : undefined,
-        onClick: isCompleted && modUpdateCount > 0 ? () => handleOpenModUpdatesOverlay(env.id) : undefined,
-        title: isCompleted ? `${totalModCount} total mods` : undefined,
-      },
-      { label: 'Plugins', value: isCompleted ? `${pluginCount}` : 'Unavailable' },
-      { label: 'UserLibs', value: isCompleted ? `${userLibsCount}` : 'Unavailable' },
-      { label: 'MelonLoader', value: isCompleted ? (mlStatus?.installed ? `Installed${mlStatus.version ? ` (${mlStatus.version})` : ''}` : 'Not installed') : 'Unavailable' },
-      { label: 'Last checked', value: isCheckingUpdate ? 'Checking…' : formatLastChecked(env.lastUpdateCheck) },
-    ];
+    const branchKey = env.branch.toLowerCase();
+    const branchLabel = isSteam && ['main', 'public'].includes(branchKey)
+      ? 'Public'
+      : isSteam && !['beta', 'alternate', 'alternate-beta'].includes(branchKey)
+        ? `Closed beta (${env.branch})`
+        : env.branch;
+    const menuOpen = environmentMenu?.envId === env.id;
+    const installingMl = installingMelonLoader.has(env.id);
+    const progressPercent = prog ? Math.min(prog.status === 'completed' ? 100 : 99, Math.round(prog.progress)) : 0;
+
+    const openMenuFromElement = (element: HTMLElement) => {
+      const rect = element.getBoundingClientRect();
+      openEnvironmentMenu(env.id, rect.right - 8, rect.bottom + 6);
+    };
 
     return (
-      <div
+      <section
         key={env.id}
         ref={(node) => {
           if (node) {
@@ -2103,38 +2010,50 @@ export function EnvironmentList({
             environmentCardRefs.current.delete(env.id);
           }
         }}
-        className={`environment-card environment-card--workspace${focusedEnvironmentId === env.id ? ' environment-card--focused' : ''}`}
-        role="button"
-        aria-label={`Open actions for ${env.name}`}
-        aria-haspopup="menu"
-        aria-controls={environmentMenu?.envId === env.id ? `environment-actions-${env.id}` : undefined}
-        aria-expanded={environmentMenu?.envId === env.id}
-        tabIndex={0}
+        className={`env-overview ${isPage ? 'env-overview--page' : 'env-overview--card ui-panel'}${focusedEnvironmentId === env.id && !isPage ? ' env-overview--focused' : ''}`}
+        aria-label={`${env.name} overview`}
+        tabIndex={-1}
         onKeyDown={(event) => {
-          if (event.key !== 'ContextMenu' && event.key !== 'Enter' && event.key !== ' ') {
-            return;
-          }
+          const isMenuKey = event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey);
+          if (!isMenuKey) return;
           const target = event.target as HTMLElement;
-          if (target.closest('input, textarea, button, a, [contenteditable="true"]')) {
-            return;
-          }
+          if (target.closest('input, textarea, [contenteditable="true"]')) return;
           event.preventDefault();
-          const rect = event.currentTarget.getBoundingClientRect();
-          openEnvironmentMenu(env.id, rect.right - 8, rect.bottom + 6);
+          const trigger = event.currentTarget.querySelector<HTMLElement>('[data-env-menu-trigger]');
+          openMenuFromElement(trigger ?? event.currentTarget);
         }}
         onContextMenu={(event) => {
           const target = event.target as HTMLElement;
-          if (target.closest('input, textarea, button, a, [contenteditable="true"]')) {
-            return;
-          }
+          if (target.closest('input, textarea, button, a, [contenteditable="true"]')) return;
           event.preventDefault();
           openEnvironmentMenu(env.id, event.clientX, event.clientY);
         }}
       >
-        <div className="environment-card__header">
-          {editingName === env.id ? (
-            <div className="name-editor environment-card__name-editor">
+        {!isPage && (
+          <header className="env-overview__card-header">
+            <GameArt appId={env.appId} className="env-overview__card-art" />
+            <h3 className="env-overview__card-title ui-truncate" title={env.name}>{env.name}</h3>
+            <span className={`ui-status ui-status--${status.tone}`}>{status.label}</span>
+            <span className="ui-toolbar__spacer" />
+            {isCompleted && !isDownloading && (
+              <SimmButton
+                onClick={() => handleLaunchGame(env, launchMethod)}
+                disabled={isLaunching}
+                aria-busy={isLaunching}
+              >
+                <Icon name={isLaunching ? 'spinner' : 'play'} spin={isLaunching} />
+                {isLaunching ? 'Starting…' : 'Play'}
+              </SimmButton>
+            )}
+          </header>
+        )}
+
+        {editingName === env.id && (
+          <div className="env-overview__editor">
+            <label htmlFor={`env-name-${env.id}`} className="ui-section-title">Environment name</label>
+            <div className="env-overview__editor-row">
               <Input
+                id={`env-name-${env.id}`}
                 type="text"
                 value={nameValue}
                 onChange={(e) => setNameValue(e.target.value)}
@@ -2145,258 +2064,335 @@ export function EnvironmentList({
                     handleCancelEditName();
                   }
                 }}
-                className="name-input"
                 autoFocus
               />
-              <div className="name-actions">
-                <SimmButton onClick={() => handleSaveName(env.id)} className="btn btn-primary btn-small" title="Save name">
-                  <Icon name="fas fa-check" />
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={handleCancelEditName} className="btn btn-secondary btn-small" title="Cancel">
-                  <Icon name="fas fa-times" />
-                </SimmButton>
-              </div>
+              <SimmButton variant="secondary" onClick={handleCancelEditName}>Cancel</SimmButton>
+              <SimmButton onClick={() => handleSaveName(env.id)}>Save</SimmButton>
             </div>
-          ) : (
-            <>
-              <div className="environment-card__title-row">
-                <div className="name-display environment-card__title-group">
-                  <h3>{env.name}</h3>
-                  <SimmButton variant="ghost" size="icon-sm" onClick={() => handleStartEditName(env)} className="btn-edit-name" title="Rename environment">
-                    <Icon name="fas fa-edit" />
-                  </SimmButton>
-                </div>
-                <div className="environment-card__header-actions">
-                  <span className={`environment-state-pill environment-state-pill--${status.tone}`}>
-                    <Icon name={status.icon} />
-                    {status.label}
-                  </span>
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary btn-small environment-card__overflow-button"
-                    onClick={(event) => {
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      openEnvironmentMenu(env.id, rect.right - 8, rect.bottom + 6);
-                    }}
-                    aria-label={`More actions for ${env.name}`}
-                  >
-                    <Icon name="fas fa-ellipsis-h" />
-                  </SimmButton>
-                </div>
-              </div>
-              <div className="environment-card__identity-badges">
-                <span className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}>
-                  {isSteam && ['main', 'public'].includes(env.branch.toLowerCase())
-                    ? 'Public'
-                    : isSteam && !['beta', 'alternate', 'alternate-beta'].includes(env.branch.toLowerCase())
-                      ? `Closed beta (${env.branch})`
-                      : env.branch}
-                </span>
-                <span className="badge badge-gray">{env.runtime}</span>
-                {isSteam && <SteamBadge />}
-              </div>
-            </>
-          )}
-        </div>
+          </div>
+        )}
 
-        <div className="environment-description environment-card__description">
+        <div className="env-overview__top">
+        <div className="env-overview__top-main">
+        <div className="env-overview__intro">
           {editingDescription === env.id ? (
-            <div className="description-editor">
+            <div className="env-overview__editor">
+              <label htmlFor={`env-description-${env.id}`} className="ui-section-title">Description</label>
               <Textarea
+                id={`env-description-${env.id}`}
                 value={descriptionValue}
                 onChange={(e) => setDescriptionValue(e.target.value)}
-                placeholder="Describe what this version means..."
-                className="description-input"
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') handleCancelEditDescription();
+                }}
+                placeholder="What is this environment for?"
                 rows={2}
                 autoFocus
               />
-              <div className="description-actions">
-                <SimmButton onClick={() => handleSaveDescription(env.id)} className="btn btn-primary btn-small" title="Save description">
-                  <Icon name="fas fa-check" />
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={handleCancelEditDescription} className="btn btn-secondary btn-small" title="Cancel">
-                  <Icon name="fas fa-times" />
-                </SimmButton>
+              <div className="env-overview__editor-actions">
+                <SimmButton variant="secondary" onClick={handleCancelEditDescription}>Cancel</SimmButton>
+                <SimmButton onClick={() => handleSaveDescription(env.id)}>Save</SimmButton>
               </div>
             </div>
           ) : (
-            <div className="description-display environment-card__description-display">
-              <span className="description-text">
-                {env.description || <span className="description-placeholder">No description</span>}
-              </span>
-              <SimmButton variant="ghost" size="icon-sm" onClick={() => handleStartEditDescription(env)} className="btn-edit-description" title="Edit description">
-                <Icon name="fas fa-edit" />
-              </SimmButton>
-            </div>
-          )}
-        </div>
-
-        <div className="environment-card__snapshot">
-          {metrics.map((metric) => (
-            <div
-              key={metric.label}
-              className={`environment-metric ${metric.tone ? `environment-metric--${metric.tone}` : ''}`}
-              role={metric.onClick ? 'button' : undefined}
-              tabIndex={metric.onClick ? 0 : undefined}
-              aria-label={`${metric.label}: ${metric.value}`}
-              onClick={metric.onClick}
-              onKeyDown={metric.onClick ? (event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  metric.onClick?.();
-                }
-              } : undefined}
-            >
-              <span>{metric.label}</span>
-              <strong title={metric.title || metric.value}>{metric.value}</strong>
-            </div>
-          ))}
-        </div>
-
-        <div className="environment-card__action-group">
-          {!isDownloading && !isCompleted && (
-            <div className="environment-card__action-row environment-card__action-row--single">
-              <SimmButton onClick={() => handleStartDownload(env)} className="btn btn-primary" disabled={gameOperationInProgress} title={gameOperationInProgress ? gameOperationTitle : 'Download this environment'}>
-                <Icon name="fas fa-download" />
-                <span>Download</span>
-              </SimmButton>
-            </div>
-          )}
-
-          {isDownloading && (
-            <div className="environment-card__action-row environment-card__action-row--single">
-              <SimmButton variant="secondary" onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
-                <Icon name="fas fa-ban" />
-                <span>{prog?.operation === 'verify' ? 'Cancel Verification' : 'Cancel Download'}</span>
-              </SimmButton>
-            </div>
-          )}
-
-          {isCompleted && !isDownloading && (
-            <>
-              <div className="environment-card__action-row environment-card__action-row--primary">
-                <SimmButton
-                  onClick={() => handleLaunchGame(env, launchMethod)}
-                  className="btn btn-primary environment-card__hero-action"
-                  title={launchTitle}
-                  disabled={isLaunching}
-                  aria-busy={isLaunching}
-                >
-                  <Icon name={isLaunching ? 'fas fa-spinner fa-spin' : 'fas fa-play'} />
-                  <span>{isLaunching ? 'Launching…' : 'Launch'}</span>
-                </SimmButton>
-                <SimmButton
-                  variant="secondary"
-                  onClick={() => handleOpenModsOverlay(env.id)}
-                  className="btn btn-secondary environment-card__hero-action environment-card__hero-action--mods"
-                  title="Open installed mods"
-                >
-                  <Icon name="fas fa-puzzle-piece" />
-                  <span>Mods</span>
-                </SimmButton>
-              </div>
-
-              <div className="environment-card__action-row environment-card__action-row--secondary">
-                <SimmButton variant="secondary" onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="Edit mod configuration">
-                  <Icon name="fas fa-cog" />
-                  <span>Config</span>
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View MelonLoader logs">
-                  <Icon name="fas fa-file-alt" />
-                  <span>Logs</span>
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View installed plugins">
-                  <Icon name="fas fa-plug" />
-                  <span>Plugins</span>
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View UserLibs">
-                  <Icon name="fas fa-book" />
-                  <span>UserLibs</span>
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={() => void handleShareProfile(env)} className="btn btn-secondary environment-card__command-btn" title="Export a shareable environment profile">
-                  <Icon name="upload" />
-                  <span>Share</span>
-                </SimmButton>
-                <SimmButton variant="secondary" onClick={() => handleOpenFolder(env)} className="btn btn-secondary environment-card__command-btn" title="Open folder in file explorer">
-                  <Icon name="fas fa-folder-open" />
-                  <span>Folder</span>
-                </SimmButton>
-                <SimmButton
-                  variant="secondary"
-                  onClick={() => handleUpdateAction(env)}
-                  className={`btn btn-secondary environment-card__command-btn ${env.updateAvailable && !isSteam ? 'environment-card__command-btn--warning' : ''}`}
-                  disabled={isCheckingUpdate || gameOperationInProgress}
-                  title={gameOperationInProgress ? gameOperationTitle : isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
-                >
-                  <Icon name={isCheckingUpdate ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-rotate'} />
-                  <span>{isCheckingUpdate ? 'Checking…' : 'Update'}</span>
-                </SimmButton>
-              </div>
-            </>
-          )}
-
-          {isDownloading && prog && (
-            <div className="progress-info environment-card__progress">
-              <div className={`progress-bar${!showDownloadPercent ? ' progress-bar--indeterminate' : ''}`}>
-                <div className="progress-fill" style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }} />
-              </div>
-              <p><strong>{showDownloadPercent ? `${Math.min(prog.status === 'completed' ? 100 : 99, Math.round(prog.progress))}%` : 'Calculating total…'}</strong>{prog.message ? ` • ${prog.message}` : ''}</p>
-              {typeof prog.downloadedBytes === 'number' && prog.downloadedBytes > 0 && (
-                <p>
-                  Downloaded: {formatProgressBytes(prog.downloadedBytes)}
-                  {typeof prog.totalBytes === 'number' && prog.totalBytes > 0 ? ` / ${formatProgressBytes(prog.totalBytes)}` : ''}
-                  {prog.speed ? ` • ${prog.speed}` : ''}
-                  {prog.eta ? ` • ${prog.eta} remaining` : ''}
-                </p>
+            <div className="env-overview__description">
+              {env.description ? (
+                <p>{env.description}</p>
+              ) : (
+                <p className="ui-subtle">No description</p>
               )}
-              {prog.speed && <p>Speed: {prog.speed}</p>}
+              <SimmButton
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => handleStartEditDescription(env)}
+                aria-label={env.description ? 'Edit description' : 'Add description'}
+                title={env.description ? 'Edit description' : 'Add description'}
+              >
+                <Icon name="penToSquare" />
+              </SimmButton>
             </div>
           )}
-
-          <div className="environment-card__footer">
-            <div className="environment-card__path" title={env.outputDir}>
-              <Icon name="fas fa-folder-open" />
-              <span>{env.outputDir}</span>
-            </div>
-            {isCompleted && !isDownloading && (
-              <div className="environment-card__footer-meta">
-                <span className="environment-footer-chip">
-                  <Icon name={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'} />
-                  {launchMethod === 'direct' ? 'Local launch' : 'Steam launch'}
-                </span>
-                {linuxCanRepairSetup ? (
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary btn-small environment-footer-chip environment-footer-chip--warning"
-                    onClick={() => void handleRepairMelonLoaderLaunchOptions(env.id)}
-                    title={linuxMelonLoaderTitle}
-                  >
-                    <Icon name="fas fa-exclamation-triangle" />
-                    {linuxMelonLoaderHint}
-                  </SimmButton>
-                ) : linuxMelonLoaderHint ? (
-                  <span className="environment-footer-chip environment-footer-chip--warning" title={linuxMelonLoaderTitle}>
-                    <Icon name="fas fa-exclamation-triangle" />
-                    {linuxMelonLoaderHint}
-                  </span>
-                ) : null}
-                <SimmButton
-                  type="button"
-                  className="btn btn-secondary btn-small"
-                  onClick={() => handleInstallMelonLoader(env)}
-                  disabled={installingMelonLoader.has(env.id)}
-                  title={mlStatus?.installed ? 'Change MelonLoader version' : 'Install MelonLoader'}
-                >
-                  <Icon name={installingMelonLoader.has(env.id) ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
-                  <span>{mlStatus?.installed ? 'MelonLoader' : 'Install ML'}</span>
-                </SimmButton>
-              </div>
-            )}
-          </div>
+          <SimmButton
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            data-env-menu-trigger=""
+            onClick={(event) => openMenuFromElement(event.currentTarget)}
+            aria-label={`More actions for ${env.name}`}
+            title="More actions"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-controls={menuOpen ? `environment-actions-${env.id}` : undefined}
+          >
+            <Icon name="ellipsisH" />
+          </SimmButton>
         </div>
-      </div>
+
+        {isDownloading && prog && (
+          <section className="env-overview__section env-overview__progress" aria-label={prog.operation === 'verify' ? 'Verification progress' : 'Download progress'}>
+            <div className="env-overview__progress-head">
+              <strong>{prog.operation === 'verify' ? 'Verifying game files' : 'Downloading game files'}</strong>
+              <span className="ui-num">{showDownloadPercent ? `${progressPercent}%` : 'Calculating total…'}</span>
+              <span className="ui-toolbar__spacer" />
+              <SimmButton variant="outline" size="sm" onClick={() => handleCancelDownload(env)}>
+                {prog.operation === 'verify' ? 'Cancel Verification' : 'Cancel Download'}
+              </SimmButton>
+            </div>
+            <div
+              className={`env-progress${!showDownloadPercent ? ' env-progress--indeterminate' : ''}`}
+              role="progressbar"
+              aria-label={prog.operation === 'verify' ? 'Verification progress' : 'Download progress'}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={showDownloadPercent ? progressPercent : undefined}
+            >
+              <div className="env-progress__fill" style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }} />
+            </div>
+            {typeof prog.downloadedBytes === 'number' && prog.downloadedBytes > 0 && (
+              <p className="env-overview__progress-meta ui-num">
+                Downloaded: {formatProgressBytes(prog.downloadedBytes)}
+                {typeof prog.totalBytes === 'number' && prog.totalBytes > 0 ? ` / ${formatProgressBytes(prog.totalBytes)}` : ''}
+                {prog.speed ? ` · ${prog.speed}` : ''}
+                {prog.eta ? ` · ${prog.eta} remaining` : ''}
+              </p>
+            )}
+            {prog.message && <p className="env-overview__progress-message ui-truncate" title={prog.message}>{prog.message}</p>}
+          </section>
+        )}
+
+        {!isDownloading && !isCompleted && (
+          <div className={`ui-callout ${env.status === 'error' || env.status === 'unavailable' ? 'ui-callout--danger' : 'ui-callout--info'} env-overview__callout`}>
+            <div className="env-overview__callout-copy">
+              <strong>
+                {env.status === 'error'
+                  ? 'The last download did not finish'
+                  : env.status === 'unavailable'
+                    ? 'The install folder is missing'
+                    : 'This environment is not downloaded yet'}
+              </strong>
+              <span>
+                {env.status === 'unavailable'
+                  ? 'Reconnect the drive or download the branch again into the folder below.'
+                  : 'Download the game files to start installing mods and playing.'}
+              </span>
+            </div>
+            <SimmButton
+              onClick={() => handleStartDownload(env)}
+              disabled={gameOperationInProgress}
+              title={gameOperationInProgress ? gameOperationTitle : undefined}
+            >
+              <Icon name="download" />
+              Download
+            </SimmButton>
+          </div>
+        )}
+
+        <section className="env-overview__section" aria-labelledby={`env-details-${env.id}`}>
+          <h3 id={`env-details-${env.id}`} className="ui-section-title">Details</h3>
+          <dl className="ui-kv env-overview__facts">
+            <dt>Install folder</dt>
+            <dd className="env-overview__fact-row">
+              <span className="ui-mono ui-truncate env-overview__path" title={env.outputDir}>{env.outputDir}</span>
+              <SimmButton
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => void handleCopyPath(env)}
+                aria-label="Copy install folder path"
+                title={copiedPathEnvId === env.id ? 'Copied' : 'Copy path'}
+              >
+                <Icon name={copiedPathEnvId === env.id ? 'check' : 'copy'} />
+              </SimmButton>
+              <SimmButton
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => handleOpenFolder(env)}
+                aria-label="Open install folder"
+                title="Open folder"
+              >
+                <Icon name="folderOpen" />
+              </SimmButton>
+            </dd>
+
+            <dt>Branch</dt>
+            <dd>{branchLabel}</dd>
+
+            <dt>Runtime</dt>
+            <dd>{env.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono'}</dd>
+
+            <dt>Game version</dt>
+            <dd className="env-overview__fact-row">
+              {isCompleted ? (
+                <>
+                  <span className="ui-mono">{currentGameVersion}</span>
+                  {hasGameUpdate && (
+                    <span className="ui-tag ui-tag--warn" title={`Game update available: ${currentGameVersion} -> ${env.updateGameVersion}`}>
+                      {env.updateGameVersion} available
+                    </span>
+                  )}
+                  {isSteam ? (
+                    <span className="ui-subtle">Updated by Steam</span>
+                  ) : (
+                    <SimmButton
+                      variant={hasGameUpdate ? 'secondary' : 'ghost'}
+                      size="sm"
+                      onClick={() => handleUpdateAction(env)}
+                      disabled={isCheckingUpdate || gameOperationInProgress}
+                      title={gameOperationInProgress ? gameOperationTitle : undefined}
+                    >
+                      {isCheckingUpdate && <Icon name="spinner" spin />}
+                      {isCheckingUpdate ? 'Checking…' : hasGameUpdate ? 'Update Game' : 'Check for Updates'}
+                    </SimmButton>
+                  )}
+                </>
+              ) : (
+                <span className="ui-subtle">Not installed</span>
+              )}
+            </dd>
+
+            <dt>MelonLoader</dt>
+            <dd className="env-overview__fact-row">
+              {isCompleted ? (
+                <>
+                  {mlStatus?.installed
+                    ? <span className="ui-mono">{mlStatus.version || 'Installed'}</span>
+                    : <span className="ui-subtle">Not installed</span>}
+                  <SimmButton
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleInstallMelonLoader(env)}
+                    disabled={installingMl}
+                    title={mlStatus?.installed ? 'Change MelonLoader version' : 'Install MelonLoader'}
+                  >
+                    {installingMl && <Icon name="spinner" spin />}
+                    {mlStatus?.installed ? 'Change Version' : 'Install MelonLoader'}
+                  </SimmButton>
+                  {linuxCanRepairSetup ? (
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="env-overview__warn-action"
+                      onClick={() => void handleRepairMelonLoaderLaunchOptions(env.id)}
+                      title={linuxMelonLoaderTitle}
+                    >
+                      <Icon name="triangleExclamation" />
+                      {linuxMelonLoaderHint}
+                    </SimmButton>
+                  ) : linuxMelonLoaderHint ? (
+                    <span className="ui-tag ui-tag--warn" title={linuxMelonLoaderTitle}>{linuxMelonLoaderHint}</span>
+                  ) : null}
+                </>
+              ) : (
+                <span className="ui-subtle">Available after download</span>
+              )}
+            </dd>
+
+            <dt id={`env-launch-${env.id}`}>Launch method</dt>
+            <dd>
+              {directLaunchSupported ? (
+                <RadioGroup
+                  className="env-overview__launch-method"
+                  value={launchMethod}
+                  onValueChange={(value) => setLaunchMethod(env.id, value === 'direct' ? 'direct' : 'steam')}
+                  aria-labelledby={`env-launch-${env.id}`}
+                >
+                  <label className="env-overview__radio">
+                    <RadioGroupItem value="steam" />
+                    Steam
+                  </label>
+                  <label className="env-overview__radio">
+                    <RadioGroupItem value="direct" />
+                    Local (start the game executable directly)
+                  </label>
+                </RadioGroup>
+              ) : (
+                <span>Steam <span className="ui-subtle">· Local launch is not available on Linux</span></span>
+              )}
+            </dd>
+
+            <dt>Last checked</dt>
+            <dd className="ui-num">{isCheckingUpdate ? 'Checking…' : formatLastChecked(env.lastUpdateCheck)}</dd>
+          </dl>
+        </section>
+        </div>
+        {isPage && <GameArt appId={env.appId} className="env-overview__art" />}
+        </div>
+
+        {isCompleted && (
+          <section className="env-overview__section" aria-labelledby={`env-content-${env.id}`}>
+            <h3 id={`env-content-${env.id}`} className="ui-section-title">Installed content</h3>
+            <div className="ui-meta env-overview__summary">
+              <SimmButton variant="link" onClick={() => handleOpenModsOverlay(env.id)} title={`${totalModCount} total mods`}>
+                <strong>{totalModCount}</strong> {totalModCount === 1 ? 'mod' : 'mods'}
+              </SimmButton>
+              {modUpdateCount > 0 && (
+                <SimmButton variant="link" className="env-overview__summary-warn" onClick={() => handleOpenModUpdatesOverlay(env.id)}>
+                  {modUpdateCount} {modUpdateCount === 1 ? 'update' : 'updates'} available
+                </SimmButton>
+              )}
+              <SimmButton variant="link" onClick={() => handleOpenPluginsOverlay(env.id)}>
+                {pluginCount} {pluginCount === 1 ? 'plugin' : 'plugins'}
+              </SimmButton>
+              <SimmButton variant="link" onClick={() => handleOpenUserLibsOverlay(env.id)}>
+                {userLibsCount} UserLibs
+              </SimmButton>
+            </div>
+          </section>
+        )}
+
+        {(isCompleted || env.status === 'error') && (
+          <section className="env-overview__section" aria-labelledby={`env-tools-${env.id}`}>
+            <h3 id={`env-tools-${env.id}`} className="ui-section-title">Tools</h3>
+            <div className="ui-toolbar">
+              {isCompleted && (
+                <SimmButton variant="outline" size="sm" onClick={() => void handleShareProfile(env)}>
+                  <Icon name="upload" />
+                  Share Profile
+                </SimmButton>
+              )}
+              <SimmButton
+                variant="outline"
+                size="sm"
+                onClick={() => handleVerifyRequest(env)}
+                disabled={Boolean(activeGameDownloadId)}
+                title={activeGameDownloadId ? gameOperationTitle : undefined}
+              >
+                <Icon name="shieldAlt" />
+                Verify Game Files
+              </SimmButton>
+              {isCompleted && (
+                <SimmButton variant="outline" size="sm" onClick={() => setModIntegrationEnvironmentId(env.id)}>
+                  <Icon name="plug" />
+                  Mod Integration
+                </SimmButton>
+              )}
+              {isCompleted && (
+                <SimmButton variant="outline" size="sm" onClick={() => void handleRefreshGameVersion(env)}>
+                  <Icon name="syncAlt" />
+                  Refresh Game Version
+                </SimmButton>
+              )}
+            </div>
+          </section>
+        )}
+
+        <section className="ui-danger-zone env-overview__danger" aria-labelledby={`env-danger-${env.id}`}>
+          <div className="env-overview__danger-copy">
+            <h3 id={`env-danger-${env.id}`} className="ui-section-title">
+              {isSteam ? 'Clear environment records' : 'Delete environment'}
+            </h3>
+            <p className="ui-subtle">
+              {isSteam
+                ? 'Forget the mods, plugins, and UserLibs SIMM tracks here. Steam keeps the game installed.'
+                : 'Remove this environment from SIMM. You choose whether the game files are deleted too.'}
+            </p>
+          </div>
+          <SimmButton variant="destructive" size="sm" onClick={() => handleDelete(env)}>
+            <Icon name="trash" />
+            {isSteam ? 'Clear Environment Records' : 'Delete Environment'}
+          </SimmButton>
+        </section>
+      </section>
     );
   };
 
@@ -2405,17 +2401,25 @@ export function EnvironmentList({
   }
 
   if (error) {
-    return <div className="error">Error: {error}</div>;
+    return (
+      <div className="ui-callout ui-callout--danger env-overview__load-error" role="alert">
+        <div>
+          <strong>Environments could not be loaded</strong>
+          <p>{error}</p>
+        </div>
+      </div>
+    );
   }
 
   if (environments.length === 0) {
     return (
-      <div className="empty-state">
-        <p>No game installs yet. Create one to get started!</p>
+      <div className="ui-empty">
+        <span className="ui-empty__emblem" aria-hidden="true"><Icon name="gamepad" /></span>
+        <p className="ui-empty__title">No environments yet</p>
+        <p className="ui-empty__copy">Add your Steam install, import a game folder, or download a separate branch to get started.</p>
         {onOpenWorkspace && (
           <SimmButton
             type="button"
-            className="btn btn-primary"
             onClick={() => onOpenWorkspace({ view: 'wizard' })}
           >
             <Icon name="plus" />
@@ -2465,7 +2469,7 @@ export function EnvironmentList({
   }
 
   return (
-    <div className="environment-list">
+    <div className="env-overview-root">
       <AuthenticationModal
         isOpen={authModal.isOpen}
         onClose={() => {
@@ -2516,29 +2520,7 @@ export function EnvironmentList({
           />
         )}
 
-        {logsOverlay.envId && (() => {
-          const env = environments.find(e => e.id === logsOverlay.envId);
-          return env ? (
-            <LogsOverlay
-              isOpen={logsOverlay.isOpen}
-              onClose={handleCloseLogsOverlay}
-              environmentId={logsOverlay.envId}
-              environment={env}
-            />
-          ) : null;
-        })()}
 
-        {configOverlay.envId && (() => {
-          const env = environments.find(e => e.id === configOverlay.envId);
-          return env ? (
-            <ConfigurationOverlay
-              isOpen={configOverlay.isOpen}
-              onClose={handleCloseConfigOverlay}
-              environmentId={configOverlay.envId}
-              environment={env}
-            />
-          ) : null;
-        })()}
       </Suspense>
 
       <ConfirmOverlay
@@ -2555,25 +2537,21 @@ export function EnvironmentList({
         isOpen={deleteConfirm.isOpen && !!deleteConfirm.env}
         onClose={resetDeleteConfirm}
         onConfirm={handleConfirmDelete}
-        title={deleteConfirm.env && isSteamEnvironment(deleteConfirm.env) ? 'Clear Environment Records' : 'Remove Environment'}
+        title={deleteConfirm.env && isSteamEnvironment(deleteConfirm.env) ? 'Clear Environment Records' : 'Delete Environment'}
         message={
           deleteConfirm.env && isSteamEnvironment(deleteConfirm.env)
-            ? `Clear tracked mod, plugin, and UserLib records for "${deleteConfirm.env.name}"?`
-            : `Remove "${deleteConfirm.env?.name}" from SIMM?`
+            ? `Clear the mod, plugin, and UserLib records SIMM keeps for "${deleteConfirm.env.name}"? Steam keeps the game installed.`
+            : `Remove "${deleteConfirm.env?.name}" from SIMM? The game files stay on disk unless you choose otherwise.`
         }
         confirmText={
           deleteConfirm.env && isSteamEnvironment(deleteConfirm.env)
             ? 'Clear Records'
             : deleteConfirm.deleteFiles
               ? 'Delete Files and Remove'
-              : 'Remove from App'
+              : 'Remove from SIMM'
         }
         tone="danger"
-        bodyContent={deleteConfirm.env && isSteamEnvironment(deleteConfirm.env) ? (
-          <div className="app-dialog__option-copy">
-            <span>Steam manages the installation itself. This only clears SIMM tracking for mods, plugins, and runtime files.</span>
-          </div>
-        ) : (
+        bodyContent={deleteConfirm.env && !isSteamEnvironment(deleteConfirm.env) ? (
           <label className="app-dialog__option">
             <Checkbox
               checked={deleteConfirm.deleteFiles}
@@ -2581,10 +2559,10 @@ export function EnvironmentList({
             />
             <span className="app-dialog__option-copy">
               <strong>Also delete game files from disk</strong>
-              <span>Leave this off to remove the environment from SIMM while keeping the files in place.</span>
+              <span className="ui-mono ui-truncate" title={deleteConfirm.env.outputDir}>{deleteConfirm.env.outputDir}</span>
             </span>
           </label>
-        )}
+        ) : undefined}
       />
 
       <MessageOverlay
@@ -2595,7 +2573,6 @@ export function EnvironmentList({
         type={messageOverlay.type}
       />
 
-      {/* MelonLoader Version Selector Modal */}
       {showMelonLoaderVersionSelector && (
         <Dialog open={!!showMelonLoaderVersionSelector} onOpenChange={(open) => {
           if (!open) {
@@ -2603,167 +2580,124 @@ export function EnvironmentList({
           }
         }}>
           <SimmDialogContent
-            className="melonloader-dialog"
+            className="app-dialog melonloader-dialog"
             showCloseButton={false}
           >
-            <DialogHeader className="modal-header">
-              <DialogTitle>Select MelonLoader Version</DialogTitle>
-              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={closeMelonLoaderVersionSelector} aria-label="Close MelonLoader version selector">×</SimmButton>
+            <DialogHeader className="modal-header app-dialog__header">
+              <div className="app-dialog__heading">
+                <DialogTitle>Select MelonLoader Version</DialogTitle>
+                <div className="ui-meta">
+                  <span>{melonLoaderSelectorEnvironment?.name || 'Environment'}</span>
+                  <span>Installed: <span className="ui-mono">{currentMelonLoaderVersion}</span></span>
+                </div>
+              </div>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={closeMelonLoaderVersionSelector} aria-label="Close MelonLoader version selector">
+                <Icon name="times" />
+              </SimmButton>
             </DialogHeader>
 
-            <div className="melonloader-dialog__body">
-                <div className="melonloader-dialog__overview">
-                  <div className="melonloader-dialog__copy">
-                    <span className="workspace-section-eyebrow">MelonLoader</span>
-                    <h3>{melonLoaderSelectorEnvironment?.name || 'Environment version selection'}</h3>
-                    <p>
-                      Choose the MelonLoader release to install or switch to for this environment. Stable is based on the latest
-                      stable GitHub release tag.
-                    </p>
-                  </div>
-                  <div className="melonloader-dialog__stats">
-                    <div className="melonloader-dialog__stat-card">
-                      <span className="melonloader-dialog__stat-label">Installed</span>
-                      <strong className="melonloader-dialog__stat-value">{currentMelonLoaderVersion}</strong>
-                    </div>
-                    <div className="melonloader-dialog__stat-card">
-                      <span className="melonloader-dialog__stat-label">Selected</span>
-                      <strong className="melonloader-dialog__stat-value">{selectedMelonLoaderTag || 'Choose a release'}</strong>
-                    </div>
-                    <div className="melonloader-dialog__stat-card">
-                      <span className="melonloader-dialog__stat-label">Source</span>
-                      <div className="melonloader-dialog__source-row">
-                        <strong className="melonloader-dialog__stat-value">GitHub</strong>
-                        <div
-                          className="melonloader-dialog__nightly-control"
-                          title="Nightly builds are experimental and unreleased."
-                        >
-                          <span>Nightlies</span>
-                          <Switch
-                            size="sm"
-                            checked={showNightlyMelonLoaderBuilds}
-                            onCheckedChange={(checked) => {
-                              void handleNightlyMelonLoaderToggle(showMelonLoaderVersionSelector, Boolean(checked));
-                            }}
-                            aria-label="Show MelonLoader nightly builds"
-                            disabled={loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector)}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+            <div className="app-dialog__body melonloader-dialog__body">
+              <div className="melonloader-dialog__toolbar">
+                <span className="ui-subtle">Releases from GitHub. Latest stable is recommended.</span>
+                <label className="melonloader-dialog__nightly" title="Nightly builds are experimental and unreleased.">
+                  <Switch
+                    size="sm"
+                    checked={showNightlyMelonLoaderBuilds}
+                    onCheckedChange={(checked) => {
+                      void handleNightlyMelonLoaderToggle(showMelonLoaderVersionSelector, Boolean(checked));
+                    }}
+                    disabled={loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector)}
+                  />
+                  Show nightly builds
+                </label>
+              </div>
 
               {loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector) ? (
-                <div className="melonloader-dialog__empty">
-                  <Icon name="fas fa-spinner fa-spin melonloader-dialog__empty-icon" />
-                  <p>Loading releases...</p>
+                <div className="melonloader-dialog__list" role="status" aria-label="Loading releases">
+                  {[0, 1, 2].map((index) => (
+                    <span key={index} className="loading-skeleton env-skeleton env-skeleton--row" aria-hidden="true" />
+                  ))}
                 </div>
               ) : melonLoaderSelectorReleases.length === 0 ? (
-                <div className="melonloader-dialog__empty">
-                  <p>No releases found</p>
+                <div className="ui-empty">
+                  <span className="ui-empty__emblem" aria-hidden="true"><Icon name="cube" /></span>
+                  <p className="ui-empty__title">No releases found</p>
+                  <p className="ui-empty__copy">SIMM could not load MelonLoader releases. Check your connection and open this dialog again.</p>
                 </div>
               ) : (
-                <>
-                  <div className="melonloader-dialog__list">
-                    <RadioGroup
-                      className="melonloader-dialog__release-grid"
-                      value={selectedMelonLoaderTag}
-                      onValueChange={(value) => setSelectedMelonLoaderVersion(prev => {
-                        const next = new Map(prev);
-                        next.set(showMelonLoaderVersionSelector, value);
-                        return next;
-                      })}
+                <RadioGroup
+                  className="melonloader-dialog__list"
+                  value={selectedMelonLoaderTag}
+                  aria-label="MelonLoader releases"
+                  onValueChange={(value) => setSelectedMelonLoaderVersion(prev => {
+                    const next = new Map(prev);
+                    next.set(showMelonLoaderVersionSelector, value);
+                    return next;
+                  })}
+                >
+                  {melonLoaderSelectorReleases.map((release) => (
+                    <label
+                      key={release.tag_name}
+                      className={`melonloader-dialog__release${selectedMelonLoaderTag === release.tag_name ? ' melonloader-dialog__release--selected' : ''}`}
                     >
-                      {melonLoaderSelectorReleases.map((release) => (
-                        <label
-                          key={release.tag_name}
-                          className={`melonloader-dialog__release-row ${
-                            selectedMelonLoaderTag === release.tag_name ? 'melonloader-dialog__release-row--selected' : ''
-                          }`}
-                        >
-                          <RadioGroupItem
-                            value={release.tag_name}
-                            className="melonloader-dialog__radio"
-                          />
-                          <div className="melonloader-dialog__release-content">
-                            <div className="melonloader-dialog__release-header">
-                              <strong>{release.tag_name}</strong>
-                              {/* Show "Stable" tag for the latest stable tag returned by the Lockwire API. */}
-                              {release.tag_name === latestStableMelonLoaderTag && (
-                                <span className="melonloader-dialog__tag melonloader-dialog__tag--stable">
-                                  Stable
-                                </span>
-                              )}
-                              {release.isNightly ? (
-                                <span className="melonloader-dialog__tag melonloader-dialog__tag--nightly">
-                                  Nightly
-                                </span>
-                              ) : release.prerelease && release.tag_name !== latestStableMelonLoaderTag && (
-                                <span className="melonloader-dialog__tag melonloader-dialog__tag--beta">
-                                  Beta
-                                </span>
-                              )}
-                            </div>
-                            {release.name && (
-                              <div className="melonloader-dialog__release-name">
-                                {release.name}
-                              </div>
-                            )}
-                            <div className="melonloader-dialog__release-meta">
-                              <div>
-                                Published: {new Date(release.published_at).toLocaleDateString()}
-                              </div>
-                              <a
-                                href={safeExternalUrl(
-                                  release.isNightly
-                                    ? 'https://github.com/LavaGang/MelonLoader/actions'
-                                    : `https://github.com/LavaGang/MelonLoader/releases/tag/${encodeURIComponent(release.tag_name)}`
-                                )}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="melonloader-dialog__release-link"
-                                title={release.isNightly ? "View GitHub Actions" : "View release page and changelog"}
-                              >
-                                <Icon name="fas fa-external-link-alt" />
-                                {release.isNightly ? 'View Actions' : 'View Release & Changelog'}
-                              </a>
-                            </div>
-                          </div>
-                        </label>
-                      ))}
-                    </RadioGroup>
-                  </div>
-
-                  <div className="melonloader-dialog__footer">
-                    <SimmButton
-                      className="btn btn-secondary"
-                      onClick={closeMelonLoaderVersionSelector}
-                    >
-                      Cancel
-                    </SimmButton>
-                    <SimmButton
-                      className="btn btn-primary"
-                      onClick={() => handleMelonLoaderVersionSelected(showMelonLoaderVersionSelector)}
-                      disabled={!selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) || installingMelonLoader.has(showMelonLoaderVersionSelector)}
-                    >
-                      {installingMelonLoader.has(showMelonLoaderVersionSelector) ? (
-                        <>
-                          <Icon name="fas fa-spinner fa-spin" />
-                          Installing...
-                        </>
-                      ) : (
-                        <>
-                          <Icon name="fas fa-download" />
-                          {currentMelonLoaderVersion === 'Not installed' ? 'Install' : 'Change Version'}
-                        </>
-                      )}
-                    </SimmButton>
-                  </div>
-                </>
+                      <RadioGroupItem value={release.tag_name} />
+                      <span className="melonloader-dialog__release-main">
+                        <span className="melonloader-dialog__release-title">
+                          <strong className="ui-mono">{release.tag_name}</strong>
+                          {release.tag_name === latestStableMelonLoaderTag ? (
+                            <span className="ui-tag ui-tag--ok">Latest stable</span>
+                          ) : release.isNightly ? (
+                            <span className="ui-tag ui-tag--warn">Nightly</span>
+                          ) : release.prerelease ? (
+                            <span className="ui-tag ui-tag--warn">Beta</span>
+                          ) : null}
+                        </span>
+                        <span className="ui-meta">
+                          {release.name && release.name !== release.tag_name && <span className="ui-truncate">{release.name}</span>}
+                          <span className="ui-num">{formatDate(release.published_at)}</span>
+                        </span>
+                      </span>
+                      <a
+                        href={safeExternalUrl(
+                          release.isNightly
+                            ? 'https://github.com/LavaGang/MelonLoader/actions'
+                            : `https://github.com/LavaGang/MelonLoader/releases/tag/${encodeURIComponent(release.tag_name)}`
+                        )}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="melonloader-dialog__release-link"
+                        title={release.isNightly ? 'View GitHub Actions' : 'View release page and changelog'}
+                      >
+                        {release.isNightly ? 'Actions' : 'Release notes'}
+                        <Icon name="externalLinkAlt" />
+                      </a>
+                    </label>
+                  ))}
+                </RadioGroup>
               )}
             </div>
+
+            <DialogFooter className="app-dialog__footer">
+              <div className="app-dialog__actions">
+                <SimmButton variant="secondary" onClick={closeMelonLoaderVersionSelector}>
+                  Cancel
+                </SimmButton>
+                <SimmButton
+                  onClick={() => handleMelonLoaderVersionSelected(showMelonLoaderVersionSelector)}
+                  disabled={
+                    melonLoaderSelectorReleases.length === 0
+                    || !selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector)
+                    || installingMelonLoader.has(showMelonLoaderVersionSelector)
+                  }
+                >
+                  {installingMelonLoader.has(showMelonLoaderVersionSelector) && <Icon name="spinner" spin />}
+                  {installingMelonLoader.has(showMelonLoaderVersionSelector)
+                    ? 'Installing…'
+                    : currentMelonLoaderVersion === 'Not installed' ? 'Install' : 'Change Version'}
+                </SimmButton>
+              </div>
+            </DialogFooter>
           </SimmDialogContent>
         </Dialog>
       )}
@@ -2797,36 +2731,22 @@ export function EnvironmentList({
         ) : null;
       })()}
 
-      <div className="environments-grid">
-        {sortEnvironmentsForDisplay(environments).map(renderEnvironmentCard)}
+      <div className={onlyEnvironmentId ? 'env-overview-host' : 'env-overview-list'}>
+        {sortEnvironmentsForDisplay(environments)
+          .filter((env) => !onlyEnvironmentId || env.id === onlyEnvironmentId)
+          .map(renderEnvironmentCard)}
       </div>
 
       {environmentMenu && (() => {
         const env = environments.find((item) => item.id === environmentMenu.envId);
         if (!env) return null;
 
-        const items = [...buildEnvironmentMenuItems(env)];
-        if (env.status === 'completed') {
-          items.splice(4, 0, {
-            key: 'refresh-version',
-            label: 'Refresh Game Version',
-            icon: 'fas fa-sync-alt',
-            onSelect: async () => {
-              try {
-                await refreshGameVersion(env.id);
-              } catch (err) {
-                console.error('Failed to refresh game version:', err);
-              }
-            },
-          });
-        }
-
         return (
           <AnchoredContextMenu
             id={`environment-actions-${env.id}`}
             x={environmentMenu.x}
             y={environmentMenu.y}
-            items={items}
+            items={buildEnvironmentMenuItems(env)}
             onClose={() => setEnvironmentMenu(null)}
           />
         );

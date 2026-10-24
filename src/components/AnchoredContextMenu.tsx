@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { Fragment, useEffect, useMemo, useRef } from 'react';
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuGroup,
   ContextMenuItem,
+  ContextMenuSeparator,
 } from '@/components/ui/context-menu';
 import { Icon } from './Icon';
 
@@ -13,6 +14,8 @@ export interface AnchoredContextMenuItem {
   icon?: string;
   disabled?: boolean;
   danger?: boolean;
+  /** Draw a separator above this item to start a new group. */
+  separatorBefore?: boolean;
   onSelect: () => void;
 }
 
@@ -79,9 +82,10 @@ export function AnchoredContextMenu({ id, x, y, items, onClose }: Props) {
         sideOffset={0}
       >
         <ContextMenuGroup>
-          {items.map((item) => (
-            <ContextMenuItem
-              key={item.key}
+          {items.map((item, index) => (
+            <Fragment key={item.key}>
+              {item.separatorBefore && index > 0 && <ContextMenuSeparator />}
+              <ContextMenuItem
               className={`workspace-context-menu__item ${item.danger ? 'workspace-context-menu__item--danger' : ''}`}
               disabled={item.disabled}
               onClick={() => {
@@ -93,6 +97,7 @@ export function AnchoredContextMenu({ id, x, y, items, onClose }: Props) {
               {item.icon ? <Icon name={item.icon} /> : <span className="workspace-context-menu__icon-placeholder" />}
               <span>{item.label}</span>
             </ContextMenuItem>
+            </Fragment>
           ))}
         </ContextMenuGroup>
       </ContextMenuContent>

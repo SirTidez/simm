@@ -24,7 +24,7 @@ describe('MelonLoaderUpdateToast', () => {
 
     expect(screen.getByText('MelonLoader v0.7.4')).toBeInTheDocument();
     expect(screen.getByText('Beta, Alternate Beta')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Review environments' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review Environments' }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss MelonLoader update notice' }));
     expect(onReview).toHaveBeenCalledTimes(1);
     expect(onDismiss).toHaveBeenCalledTimes(1);

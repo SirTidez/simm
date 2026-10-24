@@ -1,0 +1,351 @@
+/*
+ * Telemetry: local warning/error history. Preferences live in a popover,
+ * the page shows the events.
+ */
+
+.telemetry-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.telemetry-heading {
+  margin: 0 0 var(--simm-space-2);
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+  font-weight: 600;
+}
+
+/* Monitoring state + sync, one muted line under the title. */
+.telemetry-status {
+  margin-top: 2px;
+}
+
+.telemetry-status__attention {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--simm-space-2);
+  color: var(--simm-warn-text);
+}
+
+.telemetry-status__attention [data-slot='button'][data-variant='link'] {
+  font-size: inherit;
+}
+
+.telemetry-feedback {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-2) var(--simm-space-5);
+  border-bottom: 1px solid var(--simm-line);
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.telemetry-feedback p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-feedback--error {
+  background: var(--simm-danger-soft);
+  color: var(--simm-danger-text);
+}
+
+/* Environments + events */
+.telemetry-layout {
+  display: grid;
+  grid-template-columns: minmax(15rem, 18rem) minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.telemetry-environments {
+  min-height: 0;
+  padding: var(--simm-space-4) var(--simm-space-4) var(--simm-space-4) var(--simm-space-5);
+  border-right: 1px solid var(--simm-line);
+  overflow-y: auto;
+}
+
+.telemetry-environments__empty {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.telemetry-environment {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--simm-space-2) 0;
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.telemetry-environment__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-2);
+  min-width: 0;
+}
+
+.telemetry-environment__title strong {
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.telemetry-environment__meta {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+.telemetry-events {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.telemetry-events__toolbar {
+  flex-wrap: nowrap;
+  padding: var(--simm-space-3) var(--simm-space-5);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.telemetry-events__select[data-slot='select-trigger'] {
+  width: 13rem;
+  min-width: 0;
+}
+
+.telemetry-events__count {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+  white-space: nowrap;
+}
+
+.telemetry-events__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Event row: level word with dot, source, time; message; identity. */
+.telemetry-event {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-1);
+  padding: var(--simm-space-3) var(--simm-space-5);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.telemetry-event:hover {
+  background: var(--simm-hover);
+}
+
+.telemetry-event__head {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--simm-space-3);
+}
+
+.telemetry-event__source {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-width: 0;
+  color: var(--simm-text);
+  font-size: var(--simm-text-base);
+  font-weight: 500;
+}
+
+.telemetry-event__time {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.telemetry-event__message {
+  margin: 0 0 0 calc(5.5rem + var(--simm-space-3));
+  color: var(--simm-text);
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-event__identity {
+  margin-left: calc(5.5rem + var(--simm-space-3));
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+/* Preferences popover */
+.telemetry-preferences.telemetry-preferences {
+  width: 22rem;
+  gap: 0;
+  padding: var(--simm-space-1) var(--simm-space-3);
+}
+
+.telemetry-preferences__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-4);
+  min-height: 2.75rem;
+  padding: var(--simm-space-2) 0;
+  border-bottom: 1px solid var(--simm-line);
+  cursor: pointer;
+}
+
+.telemetry-preferences__row:last-child {
+  border-bottom: 0;
+}
+
+.telemetry-preferences__row[data-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.telemetry-preferences__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.telemetry-preferences__label {
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.telemetry-preferences__help {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+.telemetry-preferences__select[data-slot='select-trigger'] {
+  width: 8rem;
+}
+
+.telemetry-switch[data-slot='switch'] [data-slot='switch-thumb'] {
+  background: var(--simm-text-2);
+}
+
+.telemetry-switch[data-slot='switch'][data-checked] [data-slot='switch-thumb'] {
+  background: var(--simm-on-accent);
+}
+
+.telemetry-menu.telemetry-menu {
+  min-width: 15rem;
+}
+
+/* Export preview dialog */
+.telemetry-export-viewer {
+  --simm-dialog-width: 40rem;
+}
+
+.telemetry-export-viewer__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-4);
+}
+
+.telemetry-export-viewer__facts {
+  grid-template-columns: 10rem minmax(0, 1fr);
+}
+
+.telemetry-export-viewer__exclusions ul {
+  margin: 0;
+  padding-left: var(--simm-space-4);
+  list-style: disc;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.telemetry-export-viewer__raw summary {
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+  cursor: pointer;
+}
+
+.telemetry-export-viewer__raw pre {
+  max-height: 18rem;
+  margin: var(--simm-space-2) 0 0;
+  padding: var(--simm-space-3);
+  overflow: auto;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+  color: var(--simm-text);
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-xs);
+}
+
+/* Mod data rules dialog */
+.telemetry-mod-policy-dialog {
+  --simm-dialog-width: 50rem;
+}
+
+.telemetry-mod-policy-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-4);
+  min-height: 0;
+}
+
+.telemetry-mod-policy-dialog__table {
+  max-height: min(26rem, 55vh);
+  overflow-y: auto;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+}
+
+.telemetry-mod-policy__select[data-slot='select-trigger'] {
+  width: 10.5rem;
+  min-height: var(--simm-control-h-sm);
+}
+
+.telemetry-mod-policy__mod {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-width: 0;
+}
+
+.telemetry-mod-policy__text {
+  min-width: 0;
+}
+
+.telemetry-mod-policy__name {
+  color: var(--simm-text);
+  font-weight: 500;
+}
+
+.telemetry-mod-policy__meta {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+.telemetry-mod-policy-dialog__table td:first-child {
+  width: 100%;
+}
+
+@media (max-width: 1100px) {
+  .telemetry-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .telemetry-environments {
+    max-height: 10rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--simm-line);
+  }
+
+  .telemetry-events__select[data-slot='select-trigger'] {
+    width: 11rem;
+  }
+}

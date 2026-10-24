@@ -290,15 +290,18 @@ vi.mock('./Footer', () => ({
     onOpenModUpdates,
     onOpenAppUpdate,
     appUpdateAvailable,
+    downloads,
   }: {
     onOpenModUpdates?: () => void;
     onOpenAppUpdate?: () => void;
     appUpdateAvailable?: boolean;
+    downloads?: ReactNode;
   }) => {
     appRenderMocks.footerRenderCount += 1;
 
     return (
       <div>
+        {downloads}
         <button onClick={onOpenModUpdates}>Open Mod Updates</button>
         {appUpdateAvailable && (
           <button onClick={onOpenAppUpdate}>Install App Update</button>
@@ -431,7 +434,7 @@ describe('App', () => {
       expect(screen.queryByText('Detecting game and MelonLoader versions')).toBeNull();
     });
     await waitFor(() => expect(windowMocks.setDecorations).toHaveBeenCalledWith(false));
-    expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Home' })).toBeTruthy();
   });
 
   it('hides telemetry navigation while the backend capability is unavailable', async () => {
@@ -442,7 +445,7 @@ describe('App', () => {
     ));
     render(<App />);
 
-    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    await screen.findByRole('region', { name: 'Home' });
     expect(screen.queryByRole('button', { name: 'Telemetry' })).toBeNull();
     expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
   });
@@ -457,7 +460,7 @@ describe('App', () => {
     });
 
     render(<App />);
-    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    await screen.findByRole('region', { name: 'Home' });
     await waitFor(() => expect(runtimeSwitchHandler).not.toBeNull());
     const emitRuntimeSwitch = runtimeSwitchHandler as unknown as (event: { payload: unknown }) => void;
     emitRuntimeSwitch({
@@ -541,7 +544,7 @@ describe('App', () => {
     ))).toBeTruthy();
     expect(windowMocks.requestUserAttention).toHaveBeenCalledWith(2);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Review request' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review Request' }));
     expect(await screen.findByText('Reviewing requests for Alternate Beta')).toBeTruthy();
   });
 
@@ -633,10 +636,11 @@ describe('App', () => {
   it('shows a release and changelog feed on the Home dashboard', async () => {
     render(<App />);
 
-    expect(await screen.findByRole('heading', { name: 'News & Changes' })).toBeTruthy();
-    expect(await screen.findAllByText('SIMM 0.8.4')).toHaveLength(2);
+    expect(await screen.findByRole('heading', { name: "What's new in SIMM" })).toBeTruthy();
+    // The release and the changelog describe the same version: it is listed once.
+    expect(await screen.findAllByText('SIMM 0.8.4')).toHaveLength(1);
     expect(await screen.findByText('Refined the desktop workspace.')).toBeTruthy();
-    expect(screen.getAllByText('Changelog').length).toBeGreaterThan(0);
+    expect(screen.getByText('Fixed update checks.')).toBeTruthy();
     expect(screen.queryByText('Recommended next step')).toBeNull();
     expect(screen.queryByText('App channel checked')).toBeNull();
   });
@@ -660,7 +664,7 @@ describe('App', () => {
 
     render(<App />);
 
-    const statusButton = await screen.findByRole('button', { name: 'Open Environments for Il2Cpp' });
+    const statusButton = await screen.findByRole('button', { name: 'Open Il2Cpp' });
     fireEvent.click(statusButton);
 
     await waitFor(() => {
@@ -700,7 +704,7 @@ describe('App', () => {
 
     render(<App />);
 
-    const statusButton = await screen.findByRole('button', { name: 'Open Environments for Steam Installation' });
+    const statusButton = await screen.findByRole('button', { name: 'Open Steam Installation' });
     fireEvent.click(statusButton);
 
     expect(await screen.findByText('Focused Environment: steam-main')).toBeTruthy();
@@ -733,17 +737,17 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByTitle('Environments'));
+    const sidebar = screen.getByLabelText('Primary navigation');
+    fireEvent.click(within(sidebar).getByRole('button', { name: /^Main/ }));
     expect(await screen.findByText('Focused Environment: env-main')).toBeTruthy();
 
-    const sidebar = screen.getByLabelText('Primary navigation');
     fireEvent.click(within(sidebar).getByRole('button', { name: /Beta/ }));
 
     expect(await screen.findByText('Focused Environment: env-beta')).toBeTruthy();
     expect(screen.getByText('Focus Request: 2')).toBeTruthy();
   });
 
-  it('launches the selected non-Steam environment through Steam from the shell action', async () => {
+  it('launches the selected non-Steam environment through Steam from Home', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'launch_game') {
         return Promise.resolve({ success: true });
@@ -766,7 +770,7 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Play Main' }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith('launch_game', {
@@ -776,7 +780,7 @@ describe('App', () => {
     });
   });
 
-  it('launches the selected Steam-managed environment through Steam from the shell action', async () => {
+  it('launches the selected Steam-managed environment through Steam from Home', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'launch_game') {
         return Promise.resolve({ success: true });
@@ -800,7 +804,7 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Play Steam Installation' }));
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith('launch_game', {
@@ -819,7 +823,7 @@ describe('App', () => {
     });
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({ environments: [{ id: 'env-main', name: 'Main', appId: '3164500', branch: 'main', outputDir: 'C:/Games/Main', runtime: 'IL2CPP', status: 'completed' }] });
     render(<App />);
-    const button = await screen.findByRole('button', { name: 'Launch Game' });
+    const button = await screen.findByRole('button', { name: 'Play Main' });
     vi.useFakeTimers();
     await act(async () => { fireEvent.click(button); });
     expect(invokeMock).toHaveBeenCalledWith('inspect_game_launch', { environmentId: 'env-main', launchStartedAt: 12345 });
@@ -833,7 +837,7 @@ describe('App', () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === 'launch_game')).toHaveLength(1);
   });
 
-  it('offers to restart Steam from the shell action when a shortcut reload is required', async () => {
+  it('offers to restart Steam from Home when a shortcut reload is required', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'launch_game') {
         const lastCall = invokeMock.mock.calls.filter(([name]) => name === 'launch_game').length;
@@ -860,7 +864,7 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Play Il2Cpp' }));
 
     const restart = await screen.findByRole('alertdialog', { name: 'Restart Steam: Il2Cpp' });
     expect(restart).toHaveClass('app-dialog');
@@ -923,17 +927,22 @@ describe('App', () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(document.querySelectorAll('.app-shell-sidebar__environment-item')).toHaveLength(4);
+      expect(document.querySelectorAll('.shell-env__name')).toHaveLength(4);
     });
-    const environmentButtons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.app-shell-sidebar__environment-item'),
-    );
+    const environmentNames = Array.from(document.querySelectorAll('.shell-env__name'));
+    const environmentMeta = Array.from(document.querySelectorAll('.shell-env__meta'));
 
-    expect(environmentButtons.map((button) => button.textContent)).toEqual([
-      'Steam InstallationReady',
-      'Alternate BetaReady',
-      'BetaReady',
-      'Il2CppUpdate',
+    expect(environmentNames.map((name) => name.textContent)).toEqual([
+      'Steam Installation',
+      'Alternate Beta',
+      'Beta',
+      'Il2Cpp',
+    ]);
+    expect(environmentMeta.map((meta) => meta.textContent)).toEqual([
+      'Mono · Ready',
+      'Mono · Ready',
+      'IL2CPP · Ready',
+      'IL2CPP · Game update',
     ]);
   });
 
@@ -1036,7 +1045,7 @@ describe('App', () => {
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
   });
 
-  it('opens downloads as a bottom-docked sidebar popup', async () => {
+  it('opens downloads as a popup from the status bar', async () => {
     downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
       downloads: [
         {
@@ -1059,7 +1068,6 @@ describe('App', () => {
     const downloadsButton = screen.getByRole('button', { name: /Downloads/ });
     expect(popup.classList.contains('downloads-popover')).toBe(true);
     await waitFor(() => expect(popup.classList.contains('downloads-popover--open')).toBe(true));
-    expect(downloadsButton.classList.contains('app-shell-sidebar__tool-item--active')).toBe(false);
     expect(await within(popup).findByText('Downloads Panel')).toBeTruthy();
     expect(within(popup).getByText('popup')).toBeTruthy();
 
@@ -1072,7 +1080,7 @@ describe('App', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Downloads' })).toBeNull());
   });
 
-  it('counts recent completed downloads in the sidebar downloads badge', () => {
+  it('counts recent completed downloads in the status bar downloads button', () => {
     downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
       downloads: [
         {
@@ -1121,20 +1129,6 @@ describe('App', () => {
 
     expect(await screen.findByRole('dialog', { name: 'Downloads' })).toBeTruthy();
     expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeOpen);
-  });
-
-  it('collapses sidebar sections without re-rendering the app shell', async () => {
-    render(<App />);
-
-    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
-
-    const sidebar = screen.getByLabelText('Primary navigation');
-    const renderCountBeforeToggle = appRenderMocks.footerRenderCount;
-
-    fireEvent.click(within(sidebar).getByRole('button', { name: 'Tools' }));
-
-    expect(within(sidebar).queryByRole('button', { name: 'Home' })).toBeNull();
-    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeToggle);
   });
 
   it('updates window chrome state without re-rendering the app shell', async () => {
@@ -1289,7 +1283,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('button', { name: 'Run setup guide again' })).toBeTruthy();
     expect(screen.queryByText('Help Overlay')).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Welcome back to SIMM' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Home' })).toBeNull();
   });
 
   it('opens the downloads tray from another panel without navigating Home', async () => {
@@ -1316,7 +1310,7 @@ describe('App', () => {
 
     expect(await screen.findByText('Downloads Panel')).toBeTruthy();
     expect(screen.getByText('Help Overlay')).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: 'Welcome back to SIMM' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Home' })).toBeNull();
   });
 
   it('uses window close for the custom close button', async () => {
@@ -1383,7 +1377,7 @@ describe('App', () => {
     });
 
     render(<App />);
-    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    await screen.findByRole('region', { name: 'Home' });
 
     expect(
       invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),

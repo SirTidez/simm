@@ -64,10 +64,12 @@ describe('WelcomeOverlay', () => {
     );
 
     expect(await screen.findByText('Choose the layout that fits you')).toBeTruthy();
-    expect(await screen.findByText('C:\\Users\\Tester\\SIMM')).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^Player/ })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByText('Recommended')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /^continue$/i }));
     expect(await screen.findByText('Point SIMM at your game')).toBeTruthy();
+    expect(await screen.findByText('C:\\Users\\Tester\\SIMM')).toBeTruthy();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Open SIMM Folder' })[0]);
 
@@ -108,12 +110,11 @@ describe('WelcomeOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: /branch and tooling workflows/i }));
-    expect(screen.getByText('Open Accounts')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('radio', { name: /^Power User/ }));
 
     fireEvent.click(screen.getByRole('button', { name: /^continue$/i }));
     expect(await screen.findByText('Point SIMM at your game')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Open Accounts After Setup' })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^Open Accounts/ })).toHaveAttribute('aria-checked', 'true');
 
     fireEvent.click(screen.getByRole('button', { name: /^continue$/i }));
     expect(await screen.findByText('Authenticate with Steam for advanced installs')).toBeTruthy();
@@ -168,11 +169,27 @@ describe('WelcomeOverlay', () => {
       />
     );
 
-    expect(await screen.findByText('your home directory\\SIMM')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: /^continue$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^continue$/i }));
     expect(await screen.findByText('Point SIMM at your game')).toBeTruthy();
+    expect(await screen.findByText('your home directory\\SIMM')).toBeTruthy();
     expect((screen.getAllByRole('button', { name: 'Open SIMM Folder' })[0] as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/Folder lookup is unavailable right now/i)).toBeTruthy();
+  });
+
+  it('never marks a different layout as recommended than the one preselected', async () => {
+    render(
+      <WelcomeOverlay
+        isOpen={true}
+        onClose={() => {}}
+        onOpenWizard={() => {}}
+        onOpenSettings={() => {}}
+        initialExperienceMode="powerUser"
+      />
+    );
+
+    expect(await screen.findByRole('radio', { name: /^Power User/ })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByText('Recommended')).toBeNull();
+    expect(screen.getByText('Current')).toBeTruthy();
   });
 
   it('lets upgraded users keep the current layout', async () => {

@@ -4,7 +4,6 @@ import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
 import { SimmButton } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface NexusOAuthStatus {
   connected: boolean;
@@ -20,6 +19,14 @@ interface NexusOAuthStatus {
 }
 
 type SteamAuthMode = 'qr' | 'password';
+
+const DATE_TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
 
 export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const { settings, refreshSettings } = useSettingsStore();
@@ -68,32 +75,27 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     };
   }, []);
 
-  const tierLabel = !nexusStatus.connected
-    ? 'Unauthenticated'
-    : nexusStatus.account?.isPremium
-      ? 'Premium'
-      : nexusStatus.account?.isSupporter
-        ? 'Supporter'
-        : 'Free';
+  const tierLabel = nexusStatus.account?.isPremium
+    ? 'Premium'
+    : nexusStatus.account?.isSupporter
+      ? 'Supporter'
+      : 'Free';
 
-  const capabilityLabel = !nexusStatus.connected
-    ? 'Nexus login required for downloads'
-    : nexusStatus.account?.canDirectDownload
-      ? 'Direct manager downloads'
-      : 'Website confirmation required';
+  const capabilityLabel = nexusStatus.account?.canDirectDownload
+    ? 'Direct downloads in SIMM'
+    : 'Confirm each download on the website';
 
   const steamConnected = Boolean(settings?.steamUsername);
-  const steamIdentity = settings?.steamUsername || 'Steam not connected';
-  const steamSummary = steamConnected
-    ? 'Steam authorization is ready for advanced Schedule I branch installs, and you can refresh the session here whenever Steam Guard or credentials change.'
-    : 'No Steam account is connected yet. You do not need Steam sign-in for the normal Steam install; Steam manages that game and its updates. Authenticate here only when SIMM asks to manage an advanced Schedule I install.';
-  const steamActionNote = steamConnected
-    ? 'Use QR login to refresh the DepotDownloader session without typing a password, or use password login if Steam QR is unavailable.'
-    : 'QR login is recommended. SIMM stores only the Steam account name for QR sessions while DepotDownloader stores the remembered login token.';
   const nexusExpiry = nexusStatus.connected && nexusStatus.expiresAt
-    ? new Date(nexusStatus.expiresAt * 1000).toLocaleString()
+    ? DATE_TIME_FORMAT.format(new Date(nexusStatus.expiresAt * 1000))
     : null;
   const nexusIdentity = nexusStatus.account?.name || 'Connected account';
+  // One primary action per surface: the first service that still needs a sign-in.
+  const primaryService: 'steam' | 'nexus' | null = !steamConnected
+    ? 'steam'
+    : !nexusStatus.connected
+      ? 'nexus'
+      : null;
 
   const loadNexusStatus = async () => {
     const status = await ApiService.getNexusOAuthStatus();
@@ -184,149 +186,113 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   return (
     <>
       <section
-        className="modal-content workspace-panel accounts-panel"
+        className="workspace-panel ui-page accounts-page"
         aria-label="Account panel"
       >
-        <WorkspacePageHeader
-          eyebrow="Workspace"
-          title="Accounts"
-          description="Manage Steam and Nexus access, account capabilities, and local credential storage."
-        />
-
-        <div className="accounts-pane">
-          <div className="accounts-overview">
-            <div className="accounts-overview__copy">
-              <span className="accounts-eyebrow">Connected Services</span>
-              <h3>Manage Steam and Nexus sign-ins.</h3>
-              <p>Keep account links healthy, verify what capabilities are available, and understand how SIMM stores credentials on this machine.</p>
-            </div>
+        <header className="ui-page-header">
+          <div className="ui-page-header__titles">
+            <h2 className="ui-page-title">Accounts</h2>
+            <p className="ui-page-subtitle">Sign-ins SIMM uses for Steam branch installs and Nexus Mods downloads.</p>
           </div>
+        </header>
 
-          <section className="account-service-card">
-            <div className="account-service-card__header">
-              <div className="account-service-card__identity">
-                <div className="account-service-card__icon">
-                  <Icon name="fab fa-steam-symbol" />
-                </div>
-                <div>
-                  <span className="accounts-eyebrow">Steam Account</span>
-                  <h3>{steamIdentity}</h3>
-                  <p>{steamSummary}</p>
-                </div>
+        <div className="ui-page-body">
+          <div className="accounts-list">
+            <section className="account-service" aria-labelledby="account-service-steam">
+              <div className="account-service__icon" aria-hidden="true">
+                <Icon name="steamSymbol" />
               </div>
-            </div>
-
-            <div className="account-inline-pills">
-              <span className={`account-status-pill account-status-pill--${steamConnected ? 'connected' : 'disconnected'}`}>
-                <Icon name={steamConnected ? 'fas fa-check-circle' : 'fas fa-exclamation-circle'} />
-                {steamConnected ? 'Connected' : 'Not connected'}
-              </span>
-              <span className="account-capability-pill">
-                <Icon name="fab fa-steam-symbol" />
-                Steam authorization
-              </span>
-              <span className="account-capability-pill">
-                <Icon name="fas fa-lock" />
-                Encrypted local storage
-              </span>
-            </div>
-
-            {!steamConnected && (
-              <div className="account-disconnected-note">
-                Normal Steam installs do not require signing in here. Authenticate only for advanced SIMM-managed branch installs. If Steam Guard prompts appear, approve them and SIMM will continue automatically.
-              </div>
-            )}
-
-            <div className="account-service-card__actions">
-              <SimmButton onClick={() => openSteamAuth('qr')} className="btn btn-primary">
-                <Icon name="fas fa-mobile-screen-button" />
-                {steamConnected ? 'Refresh with QR Login' : 'Login with Steam QR'}
-              </SimmButton>
-              <SimmButton onClick={() => openSteamAuth('password')} className="btn btn-secondary">
-                <Icon name="fas fa-lock" />
-                Password Login
-              </SimmButton>
-              <span className="account-action-note">{steamActionNote}</span>
-            </div>
-          </section>
-
-          <section className="account-service-card">
-            <div className="account-service-card__header">
-              <div className="account-service-card__identity">
-                <div className="account-service-card__icon">
-                  <Icon name="fas fa-download" />
+              <div className="account-service__main">
+                <div className="account-service__title">
+                  <h3 id="account-service-steam">Steam</h3>
+                  <span className={`ui-status ${steamConnected ? 'ui-status--ok' : 'ui-status--muted'}`}>
+                    {steamConnected ? 'Connected' : 'Not connected'}
+                  </span>
                 </div>
-                <div>
-                  <span className="accounts-eyebrow">Nexus Mods</span>
-                  <h3>{nexusStatus.connected ? nexusIdentity : 'Nexus not connected'}</h3>
-                  <p>Nexus browsing works without signing in, but authenticated access unlocks manager downloads and premium features when the account allows them.</p>
-                </div>
+                {steamConnected && (
+                  <div className="ui-meta account-service__meta">
+                    <span>Signed in as <strong>{settings?.steamUsername}</strong></span>
+                  </div>
+                )}
+                <p className="account-service__purpose">
+                  Only needed for Steam branch installs that SIMM downloads itself. Your normal Steam install works without it.
+                </p>
               </div>
-            </div>
-
-            <div className="account-inline-pills">
-              <span className={`account-status-pill account-status-pill--${nexusStatus.connected ? 'connected' : 'disconnected'}`}>
-                <Icon name={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'} />
-                {nexusStatus.connected ? 'Connected' : 'Disconnected'}
-              </span>
-              <span className="account-capability-pill">
-                <Icon name="fas fa-id-badge" />
-                {tierLabel}
-              </span>
-              <span className="account-capability-pill">
-                <Icon name={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'} />
-                {capabilityLabel}
-              </span>
-              {typeof nexusStatus.account?.memberId === 'number' && (
-                <span className="account-capability-pill">
-                  <Icon name="fas fa-hashtag" />
-                  Member {nexusStatus.account.memberId}
-                </span>
-              )}
-              {nexusExpiry && (
-                <span className="account-capability-pill">
-                  <Icon name="fas fa-clock" />
-                  Expires {nexusExpiry}
-                </span>
-              )}
-            </div>
-
-            {!nexusStatus.connected && (
-              <div className="account-disconnected-note">
-                You can still browse and search Nexus content without linking an account. Sign in here when you want manager downloads or need SIMM to handle the site authorization flow for you.
-              </div>
-            )}
-
-            {nexusError && <div className="account-service-error">{nexusError}</div>}
-
-            <div className="account-service-card__actions">
-              {nexusStatus.connected ? (
-                <SimmButton onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy}>
-                  <Icon name={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-out-alt'} spin={nexusBusy} />
-                  {nexusBusy ? 'Working...' : 'Logout from Nexus'}
+              <div className="account-service__actions">
+                <SimmButton
+                  onClick={() => openSteamAuth('qr')}
+                  variant={primaryService === 'steam' ? 'default' : 'outline'}
+                >
+                  <Icon name="mobileScreenButton" />
+                  {steamConnected ? 'Refresh with QR Login' : 'Login with Steam QR'}
                 </SimmButton>
-              ) : (
-                <SimmButton onClick={handleNexusLogin} className="btn btn-primary" disabled={nexusBusy}>
-                  <Icon name={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-in-alt'} spin={nexusBusy} />
-                  {nexusBusy ? 'Waiting for Nexus authorization...' : 'Login with Nexus'}
+                <SimmButton onClick={() => openSteamAuth('password')} variant="ghost">
+                  Password Login
                 </SimmButton>
-              )}
-              <span className="account-action-note">
-                Free accounts confirm each download on the website. Premium accounts can use direct manager downloads when available.
-              </span>
-            </div>
-          </section>
+              </div>
+            </section>
 
-          <section className="account-note-card">
-            <div className="account-note-card__icon">
-              <Icon name="fas fa-shield-alt" />
-            </div>
-            <div className="account-note-card__content">
-              <span className="accounts-eyebrow">Security & Storage</span>
-              <h3>Credentials stay on this machine</h3>
-              <p>SIMM stores linked-account credentials locally and encrypted. Steam credentials are only used to authorize Schedule I install management, and Nexus tokens are only used for authenticated download flows.</p>
-            </div>
-          </section>
+            <section className="account-service" aria-labelledby="account-service-nexus">
+              <div className="account-service__icon" aria-hidden="true">
+                <Icon name="download" />
+              </div>
+              <div className="account-service__main">
+                <div className="account-service__title">
+                  <h3 id="account-service-nexus">Nexus Mods</h3>
+                  <span className={`ui-status ${nexusStatus.connected ? 'ui-status--ok' : 'ui-status--muted'}`}>
+                    {nexusStatus.connected ? 'Connected' : 'Not connected'}
+                  </span>
+                </div>
+                {nexusStatus.connected && (
+                  <div className="ui-meta account-service__meta">
+                    <strong>{nexusIdentity}</strong>
+                    <span>{tierLabel}</span>
+                    <span>{capabilityLabel}</span>
+                  </div>
+                )}
+                {nexusStatus.connected && (typeof nexusStatus.account?.memberId === 'number' || nexusExpiry) && (
+                  <div className="ui-meta account-service__meta">
+                    {typeof nexusStatus.account?.memberId === 'number' && (
+                      <span>Member {nexusStatus.account.memberId}</span>
+                    )}
+                    {nexusExpiry && <span>Session expires {nexusExpiry}</span>}
+                  </div>
+                )}
+                <p className="account-service__purpose">
+                  Needed to download from Nexus Mods. Browsing and search work without signing in.
+                </p>
+                {nexusError && (
+                  <div className="ui-callout ui-callout--danger account-service__error" role="alert">
+                    {nexusError}
+                  </div>
+                )}
+              </div>
+              <div className="account-service__actions">
+                {nexusStatus.connected ? (
+                  <SimmButton onClick={handleNexusLogout} variant="outline" disabled={nexusBusy}>
+                    {nexusBusy && <Icon name="spinner" spin />}
+                    {nexusBusy ? 'Working...' : 'Logout from Nexus'}
+                  </SimmButton>
+                ) : (
+                  <SimmButton
+                    onClick={handleNexusLogin}
+                    variant={primaryService === 'nexus' ? 'default' : 'outline'}
+                    disabled={nexusBusy}
+                  >
+                    {nexusBusy && <Icon name="spinner" spin />}
+                    {nexusBusy ? 'Waiting for Nexus authorization...' : 'Login with Nexus'}
+                  </SimmButton>
+                )}
+              </div>
+            </section>
+
+            <p className="accounts-note">
+              <Icon name="lock" />
+              <span>
+                Credentials and tokens stay on this device, encrypted. Steam QR sign-in keeps only the account name; DepotDownloader holds the session.
+              </span>
+            </p>
+          </div>
         </div>
       </section>
 

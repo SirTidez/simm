@@ -1,4 +1,4 @@
-import { useState, useEffect, useId, useRef, useCallback } from "react";
+import { useState, useEffect, useId, useRef, useCallback, type ReactNode } from "react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useEnvironmentStore } from "../stores/environmentStore";
 import { ApiService } from "../services/api";
@@ -34,7 +34,6 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { SimmButton, SimmDialogContent } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 type SettingsProps = {
   isOpen: boolean;
@@ -74,6 +73,14 @@ const BUILT_IN_THEME_OPTIONS = [
   { id: "dark", label: "Dark" },
   { id: "light", label: "Light" },
 ] as const;
+
+const DATE_TIME_FORMAT = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
 
 function getCustomThemeDescription(theme: CustomThemeDefinition): string {
   const variableCount = Object.keys(theme.variables).length;
@@ -120,23 +127,38 @@ function TelemetrySettingsPanel() {
       }
     }
   };
+  const feedbackIsError = Boolean(feedback && (feedback.includes('Failed') || feedback.includes('not available')));
   return (
-    <div className="settings-subsection">
-      <div className="settings-subsection__header">
-        <div>
-          <span className="settings-section__eyebrow">Live Telemetry</span>
-          <h3><Icon name="waveSquare" /> Local diagnostic collection</h3>
-        </div>
-        <p>Collection stays on this device until you review an export preview. SIMM never uploads from these controls.</p>
-      </div>
-      <div className="settings-field-grid">
-        <div className="settings-field settings-field--toggle"><SettingsToggle label="Collect local telemetry" description="Monitor warnings and errors while a registered Schedule I environment is running." checked={preferences?.collectionEnabled ?? false} onChange={(collectionEnabled) => void save({ collectionEnabled })} /></div>
-        <div className="settings-field settings-field--toggle"><SettingsToggle label="Permit sanitized diagnostic excerpts" description="Always send structured error identity. When you enable this, reviewed uploads may also retain a bounded, sanitized readable excerpt for administrator diagnosis." checked={preferences?.errorExcerptsEnabled ?? false} onChange={(errorExcerptsEnabled) => void save({ errorExcerptsEnabled })} /></div>
-        <div className="settings-field settings-field--compact"><label>Local retention</label><SettingsSelect ariaLabel="Telemetry retention" value={String(preferences?.retentionDays ?? 30)} onValueChange={(value) => void save({ retentionDays: Number(value) })} options={[{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }, { value: '90', label: '90 days' }]} /></div>
-      </div>
-      {feedback && <p className="settings-inline-feedback" role={feedback.includes('Failed') || feedback.includes('not available') ? 'alert' : 'status'}>{feedback}</p>}
-      {saving && <p className="settings-inline-feedback" role="status">Saving telemetry preference…</p>}
-    </div>
+    <>
+      <SettingsToggle
+        label="Collect local telemetry"
+        description="Record warnings and errors while a registered environment is running. Nothing leaves this device until you review an export."
+        checked={preferences?.collectionEnabled ?? false}
+        onChange={(collectionEnabled) => void save({ collectionEnabled })}
+      />
+      <SettingsToggle
+        label="Permit sanitized diagnostic excerpts"
+        description="Reviewed uploads may keep a short, sanitized excerpt of each error in addition to its structured identity."
+        checked={preferences?.errorExcerptsEnabled ?? false}
+        onChange={(errorExcerptsEnabled) => void save({ errorExcerptsEnabled })}
+      />
+      <SettingRow label="Local retention" help="How long captured telemetry stays on this device.">
+        <SettingsSelect
+          ariaLabel="Telemetry retention"
+          value={String(preferences?.retentionDays ?? 30)}
+          onValueChange={(value) => void save({ retentionDays: Number(value) })}
+          options={[{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }, { value: '90', label: '90 days' }]}
+        />
+      </SettingRow>
+      {(feedback || saving) && (
+        <p
+          className={`settings-feedback${feedbackIsError && !saving ? ' settings-feedback--error' : ''}`}
+          role={feedbackIsError && !saving ? 'alert' : 'status'}
+        >
+          {saving ? 'Saving telemetry preference…' : feedback}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -144,28 +166,18 @@ function WindowBehaviorSettingsPanel() {
   const { settings, updateSettings, loading } = useSettingsStore();
 
   return (
-    <div className="settings-subsection">
-      <div className="settings-subsection__header">
-        <div>
-          <span className="settings-section__eyebrow">Application behavior</span>
-          <h3><Icon name="times" /> When SIMM closes</h3>
-        </div>
-        <p>Choose whether closing the main window asks for a decision, keeps SIMM available in the tray, or exits the application.</p>
-      </div>
-      <div className="settings-field-grid">
-        <div className="settings-field settings-field--compact">
-          <label>Window close behavior</label>
-          <SettingsSelect
-            ariaLabel="Window close behavior"
-            value={settings?.windowCloseBehavior ?? 'ask'}
-            onValueChange={(windowCloseBehavior) => void updateSettings({ windowCloseBehavior: windowCloseBehavior as 'ask' | 'tray' | 'quit' })}
-            disabled={loading}
-            options={[{ value: 'ask', label: 'Ask every time' }, { value: 'tray', label: 'Hide to tray' }, { value: 'quit', label: 'Quit SIMM' }]}
-          />
-          <small>This setting is independent of local telemetry collection.</small>
-        </div>
-      </div>
-    </div>
+    <SettingRow
+      label="When the window closes"
+      help="Ask each time, keep SIMM running in the tray, or quit the app."
+    >
+      <SettingsSelect
+        ariaLabel="Window close behavior"
+        value={settings?.windowCloseBehavior ?? 'ask'}
+        onValueChange={(windowCloseBehavior) => void updateSettings({ windowCloseBehavior: windowCloseBehavior as 'ask' | 'tray' | 'quit' })}
+        disabled={loading}
+        options={[{ value: 'ask', label: 'Ask every time' }, { value: 'tray', label: 'Hide to tray' }, { value: 'quit', label: 'Quit SIMM' }]}
+      />
+    </SettingRow>
   );
 }
 
@@ -225,7 +237,7 @@ function extractReleaseApiLastUpdated(
     if (typeof candidate === "string" && candidate.trim().length > 0) {
       const parsed = new Date(candidate);
       if (!Number.isNaN(parsed.getTime())) {
-        return parsed.toLocaleString();
+        return DATE_TIME_FORMAT.format(parsed);
       }
       return candidate;
     }
@@ -239,28 +251,34 @@ function getReadinessStatusLabel(status: LinuxReadinessCheckStatus): string {
     case "ready":
       return "Ready";
     case "warning":
-      return "Needs Review";
+      return "Needs review";
     case "missing":
       return "Missing";
     case "unknown":
       return "Unknown";
     case "notApplicable":
-      return "Not Applicable";
+      return "Not applicable";
     default:
       return status;
   }
 }
 
-function getReadinessTone(status: LinuxReadinessCheckStatus): "online" | "offline" | "checking" {
+type StatusTone = "ok" | "warn" | "danger" | "info" | "muted";
+
+function getReadinessTone(status: LinuxReadinessCheckStatus): StatusTone {
   if (status === "ready") {
-    return "online";
+    return "ok";
   }
 
   if (status === "missing") {
-    return "offline";
+    return "danger";
   }
 
-  return "checking";
+  if (status === "notApplicable") {
+    return "muted";
+  }
+
+  return "warn";
 }
 
 function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
@@ -300,6 +318,79 @@ function areFormDataEqual(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+type SettingsSectionId =
+  | "app"
+  | "updates"
+  | "downloads"
+  | "mods"
+  | "security"
+  | "diagnostics"
+  | "window";
+
+const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSectionId; label: string }> = [
+  { id: "app", label: "App" },
+  { id: "updates", label: "Updates" },
+  { id: "downloads", label: "Downloads & storage" },
+  { id: "mods", label: "Mods & cache" },
+  { id: "security", label: "Security" },
+  { id: "diagnostics", label: "Diagnostics" },
+  { id: "window", label: "Window" },
+];
+
+function SettingsGroup({
+  id,
+  title,
+  children,
+}: {
+  id: SettingsSectionId;
+  title: string;
+  children: ReactNode;
+}) {
+  const headingId = `settings-section-${id}-title`;
+  return (
+    <section
+      className="settings-group"
+      data-settings-section={id}
+      aria-labelledby={headingId}
+    >
+      <h3 id={headingId} className="settings-group__title">
+        {title}
+      </h3>
+      <div className="settings-group__rows">{children}</div>
+    </section>
+  );
+}
+
+function SettingRow({
+  label,
+  help,
+  labelFor,
+  children,
+  stacked = false,
+}: {
+  label: ReactNode;
+  help?: ReactNode;
+  labelFor?: string;
+  children?: ReactNode;
+  stacked?: boolean;
+}) {
+  return (
+    <div className={stacked ? "settings-row settings-row--stacked" : "settings-row"}>
+      <div className="settings-row__text">
+        {labelFor ? (
+          <label className="settings-row__label" htmlFor={labelFor}>
+            {label}
+          </label>
+        ) : (
+          <span className="settings-row__label">{label}</span>
+        )}
+        {help && <div className="settings-row__help">{help}</div>}
+      </div>
+      {children && <div className="settings-row__control">{children}</div>}
+    </div>
+  );
+}
+
 type SettingsToggleProps = {
   label: string;
   description: string;
@@ -319,7 +410,7 @@ function SettingsToggle({
 
   return (
     <div
-      className="settings-toggle settings-toggle-button"
+      className="settings-row settings-row--toggle"
       data-disabled={disabled ? "true" : undefined}
       onClick={(event) => {
         if (disabled) return;
@@ -327,18 +418,20 @@ function SettingsToggle({
         onChange(!checked);
       }}
     >
-      <Switch
-        id={id}
-        checked={checked}
-        onCheckedChange={onChange}
-        disabled={disabled}
-        aria-label={label}
-        className="settings-toggle__switch"
-      />
-      <span className="settings-toggle__copy">
-        <strong>{label}</strong>
-        <small>{description}</small>
-      </span>
+      <div className="settings-row__text">
+        <span className="settings-row__label">{label}</span>
+        <div className="settings-row__help">{description}</div>
+      </div>
+      <div className="settings-row__control">
+        <Switch
+          id={id}
+          checked={checked}
+          onCheckedChange={onChange}
+          disabled={disabled}
+          aria-label={label}
+          className="settings-switch"
+        />
+      </div>
     </div>
   );
 }
@@ -491,6 +584,9 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const formDataRef = useRef(formData);
   const settingsRef = useRef(settings);
   const isMountedRef = useRef(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const programmaticScrollUntilRef = useRef(0);
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("app");
 
   useEffect(() => {
     formDataRef.current = formData;
@@ -862,11 +958,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const depotInstalled = depotDownloader?.installed === true;
   const depotStatusLabel = depotInstalled ? "Installed" : "Missing";
   const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
-  const releaseApiTone = checkingReleaseApi
-    ? "checking"
+  const releaseApiTone: StatusTone = checkingReleaseApi
+    ? "muted"
     : releaseApiError
-      ? "offline"
-      : "online";
+      ? "danger"
+      : "ok";
   const releaseApiLabel = checkingReleaseApi
     ? "Checking"
     : releaseApiError
@@ -889,11 +985,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     : loadingLinuxReadiness
       ? "Checking"
       : "Unavailable";
-  const linuxReadinessTone = linuxReadinessStatus
+  const linuxReadinessTone: StatusTone = linuxReadinessStatus
     ? getReadinessTone(linuxReadinessStatus.summary)
     : loadingLinuxReadiness
-      ? "checking"
-      : "offline";
+      ? "muted"
+      : "danger";
 
   const handleBackupDatabase = async () => {
     try {
@@ -1042,349 +1138,415 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     customThemes.find((theme) => theme.id === formData.theme) ?? null;
   const selectedBuiltInTheme = getActiveBuiltInTheme(formData.theme, customThemes);
   const selectedCustomThemeId = selectedCustomTheme?.id || "";
+  const scannerTone: StatusTone = loadingSecurityScannerStatus
+    ? "muted"
+    : securityScannerStatus?.installed
+      ? "ok"
+      : "warn";
+  const scannerLabel = loadingSecurityScannerStatus
+    ? "Checking"
+    : securityScannerStatus?.installed
+      ? "Installed"
+      : "Not installed";
+  const scannerDetail = [
+    securityScannerStatus?.installedVersion
+      ? `Version ${securityScannerStatus.installedVersion}`
+      : null,
+    securityScannerStatus?.latestVersion
+      ? `latest ${securityScannerStatus.latestVersion}`
+      : "release metadata unavailable",
+    securityScannerStatus?.installMethod
+      ? `${securityScannerStatus.installMethod} install`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const scrollToSection = (id: SettingsSectionId) => {
+    setActiveSection(id);
+    const container = scrollRef.current;
+    const target = container?.querySelector<HTMLElement>(
+      `[data-settings-section="${id}"]`,
+    );
+    if (!container || !target) return;
+    programmaticScrollUntilRef.current = Date.now() + 800;
+    const reduceMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({
+        top: Math.max(0, target.offsetTop - 8),
+        behavior: reduceMotion ? "auto" : "smooth",
+      });
+    }
+    target.querySelector<HTMLElement>(".settings-group__title")?.focus({
+      preventScroll: true,
+    });
+  };
+
+  const handleContentScroll = () => {
+    if (Date.now() < programmaticScrollUntilRef.current) return;
+    const container = scrollRef.current;
+    if (!container) return;
+    const sections = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-settings-section]"),
+    );
+    if (sections.length === 0) return;
+    let current = sections[0].dataset.settingsSection;
+    const atBottom =
+      container.scrollTop + container.clientHeight >= container.scrollHeight - 4;
+    if (atBottom) {
+      current = sections[sections.length - 1].dataset.settingsSection;
+    } else {
+      for (const section of sections) {
+        if (section.offsetTop - container.scrollTop <= 64) {
+          current = section.dataset.settingsSection;
+        }
+      }
+    }
+    if (current) setActiveSection(current as SettingsSectionId);
+  };
+
+  const renderFeedback = (
+    feedback: { tone: "success" | "error"; message: string } | null,
+  ) =>
+    feedback && (
+      <p
+        className={`settings-feedback settings-feedback--${feedback.tone}`}
+        role={feedback.tone === "error" ? "alert" : "status"}
+      >
+        {feedback.message}
+      </p>
+    );
 
   return (
     <>
       {isOpen && (
         <section
-          className="modal-content workspace-panel settings-panel"
+          className="workspace-panel ui-page settings-page"
           aria-label="Settings panel"
         >
-          <WorkspacePageHeader
-            eyebrow="Workspace"
-            title="Settings"
-            description="Adjust appearance, download locations, update checks, diagnostics, and setup defaults."
-          />
-
-          {error && <div className="settings-error-banner">{error}</div>}
-
-          <div className="settings-content settings-content--desktop">
-            <div className="settings-overview">
-              <div className="settings-overview__copy">
-                <span className="settings-eyebrow">Application Settings</span>
-                <h3>Adjust appearance, downloads, updates, and tooling.</h3>
-                <p>
-                  Changes save automatically. Use this pane to keep SIMM’s
-                  environment setup, update cadence, and theme behavior aligned
-                  with your workflow.
-                </p>
-              </div>
-              <div className="settings-overview__statusline">
-                <span
-                  className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
-                  title={releaseApiError || undefined}
-                >
-                  <Icon name={
-                      checkingReleaseApi
-                        ? "fas fa-spinner fa-spin"
-                        : releaseApiError
-                          ? "fas fa-exclamation-circle"
-                          : "fas fa-check-circle"
-                    }
-                   />
-                  GitHub API {releaseApiLabel}
-                </span>
-              </div>
+          <header className="ui-page-header">
+            <div className="ui-page-header__titles">
+              <h2 className="ui-page-title">Settings</h2>
+              <p className="ui-page-subtitle">Changes save automatically.</p>
             </div>
+          </header>
 
-            <div className="settings-shell settings-shell--single">
-              <section className="settings-sheet">
-                <div className="settings-subsection">
-                  <div className="settings-subsection__header">
-                    <div>
-                      <span className="settings-section__eyebrow">
-                        Interface
-                      </span>
-                      <h3>
-                        <Icon name="fas fa-sliders" /> App defaults
-                      </h3>
-                    </div>
-                    <p>
-                      Pick a built-in palette, optionally layer a custom theme
-                      file on top, then choose how much diagnostic detail SIMM
-                      writes while it runs.
-                    </p>
-                  </div>
+          {error && (
+            <div className="ui-callout ui-callout--danger settings-page__error" role="alert">
+              <Icon name="circleExclamation" />
+              <span>{error}</span>
+            </div>
+          )}
 
-                  <div className="settings-field-grid">
-                    <div className="settings-field">
-                      <label>Theme preset</label>
-                      <SettingsSelect
-                        ariaLabel="Theme preset"
-                        value={selectedBuiltInTheme}
-                        onValueChange={(value) =>
-                          setFormData({ ...formData, theme: value })
-                        }
-                        disabled={loading}
-                        options={BUILT_IN_THEME_OPTIONS.map((theme) => ({
+          <div className="settings-layout">
+            <nav className="settings-nav" aria-label="Settings sections">
+              {SETTINGS_SECTIONS.map((section) => (
+                <button
+                  key={section.id}
+                  type="button"
+                  className="settings-nav__item"
+                  aria-current={activeSection === section.id ? "true" : undefined}
+                  onClick={() => scrollToSection(section.id)}
+                >
+                  {section.label}
+                </button>
+              ))}
+            </nav>
+
+            <div
+              className="settings-content"
+              ref={scrollRef}
+              onScroll={handleContentScroll}
+            >
+              <div className="settings-content__inner">
+                <SettingsGroup id="app" title="App">
+                  <SettingRow
+                    label="Theme"
+                    help="Built-in palette. Choosing one clears an active custom theme."
+                  >
+                    <SettingsSelect
+                      ariaLabel="Theme preset"
+                      value={selectedBuiltInTheme}
+                      onValueChange={(value) =>
+                        setFormData({ ...formData, theme: value })
+                      }
+                      disabled={loading}
+                      options={BUILT_IN_THEME_OPTIONS.map((theme) => ({
+                        value: theme.id,
+                        label: theme.label,
+                      }))}
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Custom theme"
+                    help={
+                      selectedCustomTheme ? (
+                        <>
+                          {getCustomThemeDescription(selectedCustomTheme)}
+                          <span
+                            className="settings-row__path ui-mono"
+                            title={selectedCustomTheme.filePath}
+                          >
+                            {selectedCustomTheme.filePath}
+                          </span>
+                        </>
+                      ) : (
+                        "A theme file layered on top of its built-in base palette."
+                      )
+                    }
+                  >
+                    <SettingsSelect
+                      ariaLabel="Custom theme"
+                      value={selectedCustomThemeId}
+                      onValueChange={(value) =>
+                        setFormData({
+                          ...formData,
+                          theme: value || selectedBuiltInTheme,
+                        })
+                      }
+                      disabled={loading}
+                      options={[
+                        { value: "", label: "None" },
+                        ...customThemes.map((theme) => ({
                           value: theme.id,
-                          label: theme.label,
-                        }))}
-                      />
-                      <small>
-                        Choosing a built-in preset clears any active custom
-                        theme override.
-                      </small>
-                    </div>
+                          label: theme.name,
+                        })),
+                      ]}
+                    />
+                  </SettingRow>
 
-                    <div className="settings-field">
-                      <label>Custom theme</label>
-                      <SettingsSelect
-                        ariaLabel="Custom theme"
-                        value={selectedCustomThemeId}
-                        onValueChange={(value) =>
-                          setFormData({
-                            ...formData,
-                            theme: value || selectedBuiltInTheme,
-                          })
-                        }
-                        disabled={loading}
-                        options={[
-                          { value: "", label: "None" },
-                          ...customThemes.map((theme) => ({
-                            value: theme.id,
-                            label: theme.name,
-                          })),
-                        ]}
-                      />
-                      <small>
-                        JSON files inside the themes folder appear here after
-                        reload and apply on top of the <code>baseTheme</code>{" "}
-                        defined inside each file.
-                      </small>
-                    </div>
-
-                    <div className="settings-field">
-                      <label>Log level</label>
-                      <SettingsSelect
-                        ariaLabel="Log level"
-                        value={formData.logLevel || "info"}
-                        onValueChange={(value) =>
-                          setFormData({
-                            ...formData,
-                            logLevel: value as SettingsFormData["logLevel"],
-                          })
-                        }
-                        options={[
-                          { value: "debug", label: "Debug" },
-                          { value: "info", label: "Info" },
-                          { value: "warn", label: "Warning" },
-                          { value: "error", label: "Error" },
-                        ]}
-                      />
-                      <small>
-                        Minimum log detail written to disk for SIMM
-                        troubleshooting.
-                      </small>
-                    </div>
-
-                    <div className="settings-field">
-                      <label>App mode</label>
-                      <SettingsSelect
-                        ariaLabel="App mode"
-                        value={formData.experienceMode}
-                        onValueChange={(value) => {
-                          const nextMode = value as ExperienceMode;
-                          setFormData({
-                            ...formData,
-                            experienceMode: nextMode,
-                            showAdvancedGameTools:
-                              nextMode === "powerUser"
-                                ? true
-                                : formData.showAdvancedGameTools,
-                          });
-                        }}
-                        disabled={loading}
-                        options={[
-                          { value: "player", label: "Player" },
-                          { value: "powerUser", label: "Power User" },
-                        ]}
-                      />
-                      <small>
-                        Player keeps common mod-management actions prominent.
-                        Power User keeps separate branch installs and tooling visible.
-                      </small>
-                    </div>
-
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Show advanced Steam branch installs"
-                        description="Show separate Steam branch install options inside Add Game."
-                        checked={formData.showAdvancedGameTools}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            showAdvancedGameTools: checked,
-                            experienceMode: checked ? "powerUser" : formData.experienceMode,
-                          })
-                        }
-                      />
-                    </div>
-
-                    {onRunSetupGuide && (
-                      <div className="settings-field settings-field--span">
-                        <label>Setup guide</label>
-                        <SimmButton
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={onRunSetupGuide}
-                        >
-                          <Icon name="sliders" />
-                          Run setup guide again
-                        </SimmButton>
-                        <small>
-                          Revisit Player and Power User choices without changing
-                          installed mods or environments.
-                        </small>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="settings-inline-status-grid">
-                    <div className="settings-inline-status settings-inline-status--path">
-                      <span>Themes Folder</span>
-                      <strong title={themesDirectory || undefined}>
-                        {themesDirectory || "Unavailable"}
-                      </strong>
-                      <small>
+                  <SettingRow
+                    label="Theme files"
+                    stacked
+                    help={
+                      <>
+                        {customThemes.length === 0
+                          ? "No custom themes loaded. "
+                          : `${customThemes.length} custom ${customThemes.length === 1 ? "theme" : "themes"} loaded. `}
                         Drop JSON files here with <code>baseTheme</code> and{" "}
-                        <code>variables</code> keys. SIMM layers them over a
-                        built-in base palette.
-                      </small>
-                    </div>
-
-                    <div className="settings-inline-status">
-                      <span>Theme Files</span>
-                      <strong>
-                        {customThemes.length === 0
-                          ? "No custom themes"
-                          : `${customThemes.length} loaded`}
-                      </strong>
-                      <small>
-                        {customThemes.length === 0
-                          ? "Create a .json file in the themes folder and reload to register it."
-                          : "Custom themes can override any CSS variable already used by the app."}
-                      </small>
-                    </div>
-
-                    <div className="settings-inline-status settings-inline-status--path">
-                      <span>Selected Theme</span>
-                      <strong title={selectedCustomTheme?.filePath || undefined}>
-                        {selectedCustomTheme
-                          ? selectedCustomTheme.name
-                          : BUILT_IN_THEME_OPTIONS.find(
-                              (theme) => theme.id === formData.theme,
-                            )?.label || formData.theme}
-                      </strong>
-                      <small>
-                        {selectedCustomTheme
-                          ? `${getCustomThemeDescription(selectedCustomTheme)} from ${selectedCustomTheme.filePath}`
-                          : "Built-in palettes are stored in the app bundle and can be used as custom theme bases."}
-                      </small>
-                    </div>
-
-                    <div className="settings-inline-status settings-inline-status--action">
-                      <span>Theme File Actions</span>
-                      <strong>Manage JSON themes</strong>
-                      <small>
-                        Open the folder to edit files directly, then reload to
-                        rescan the directory without restarting SIMM.
-                      </small>
-                      <div className="settings-backup-panel__actions">
-                        <SimmButton
-                          type="button"
-                          onClick={() => void handleOpenThemesFolder()}
-                          disabled={openingThemesFolder || !themesDirectory}
-                          className="btn btn-secondary btn-small"
+                        <code>variables</code> keys, then reload.
+                        <span
+                          className="settings-row__path ui-mono"
+                          title={themesDirectory || undefined}
                         >
-                          {openingThemesFolder
-                            ? "Opening..."
-                            : "Open Themes Folder"}
-                        </SimmButton>
-                        <SimmButton
-                          type="button"
-                          onClick={() => void handleReloadThemes()}
-                          disabled={reloadingThemes}
-                          className="btn btn-secondary btn-small"
-                        >
-                          {reloadingThemes ? "Reloading..." : "Reload Theme Files"}
-                        </SimmButton>
-                      </div>
-                    </div>
-                  </div>
-
-                  {themeFeedback && (
-                    <div
-                      className={`settings-inline-feedback settings-inline-feedback--${themeFeedback.tone}`}
-                      role={themeFeedback.tone === "error" ? "alert" : "status"}
+                          {themesDirectory || "Themes folder unavailable"}
+                        </span>
+                      </>
+                    }
+                  >
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleOpenThemesFolder()}
+                      disabled={openingThemesFolder || !themesDirectory}
                     >
-                      {themeFeedback.message}
-                    </div>
+                      {openingThemesFolder ? "Opening…" : "Open Themes Folder"}
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleReloadThemes()}
+                      disabled={reloadingThemes}
+                    >
+                      {reloadingThemes ? "Reloading…" : "Reload Theme Files"}
+                    </SimmButton>
+                  </SettingRow>
+                  {renderFeedback(themeFeedback)}
+
+                  <SettingRow
+                    label="App mode"
+                    help="Power User adds separate Steam branch installs to Add Environment. Everything else is the same in both modes."
+                  >
+                    <SettingsSelect
+                      ariaLabel="App mode"
+                      value={formData.experienceMode}
+                      onValueChange={(value) => {
+                        const nextMode = value as ExperienceMode;
+                        setFormData({
+                          ...formData,
+                          experienceMode: nextMode,
+                          showAdvancedGameTools:
+                            nextMode === "powerUser"
+                              ? true
+                              : formData.showAdvancedGameTools,
+                        });
+                      }}
+                      disabled={loading}
+                      options={[
+                        { value: "player", label: "Player" },
+                        { value: "powerUser", label: "Power User" },
+                      ]}
+                    />
+                  </SettingRow>
+
+                  <SettingsToggle
+                    label="Show advanced Steam branch installs"
+                    description="Offer separate Steam branch installs in Add Environment."
+                    checked={formData.showAdvancedGameTools}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        showAdvancedGameTools: checked,
+                        experienceMode: checked ? "powerUser" : formData.experienceMode,
+                      })
+                    }
+                  />
+
+                  {onRunSetupGuide && (
+                    <SettingRow
+                      label="Setup guide"
+                      help="Revisit the Player and Power User choices. Installed mods and environments stay as they are."
+                    >
+                      <SimmButton
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={onRunSetupGuide}
+                      >
+                        Run Setup Guide Again
+                      </SimmButton>
+                    </SettingRow>
                   )}
-                </div>
+                </SettingsGroup>
 
-                <hr className="settings-divider" />
+                <SettingsGroup id="updates" title="Updates">
+                  <SettingsToggle
+                    label="Automatically check for updates"
+                    description="Check environments and mods in the background at the interval below."
+                    checked={formData.autoCheckUpdates !== false}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        autoCheckUpdates: checked,
+                      })
+                    }
+                  />
 
-                <WindowBehaviorSettingsPanel />
-
-                {telemetryAvailable && <>
-                  <hr className="settings-divider" />
-
-                  <TelemetrySettingsPanel />
-                </>}
-
-                <hr className="settings-divider" />
-
-                <div className="settings-subsection">
-                  <div className="settings-subsection__header">
-                    <div>
-                      <span className="settings-section__eyebrow">
-                        Install Defaults
-                      </span>
-                      <h3>
-                        <Icon name="fas fa-folder-tree" /> Downloads,
-                        storage, and loader setup
-                      </h3>
-                    </div>
-                    <p>
-                      Control where installs stage by default, how many
-                      transfers SIMM runs at once, and which MelonLoader version
-                      new environments prefer.
-                    </p>
-                  </div>
-
-                  <div className="settings-field-grid">
-                    <div className="settings-field settings-field--span">
-                      <label>Default download directory</label>
-                      <div className="settings-inline-row">
-                        <Input
-                          type="text"
-                          value={formData.defaultDownloadDir}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              defaultDownloadDir: e.target.value,
-                            })
-                          }
-                          placeholder="C:\DevEnvironments"
-                        />
-                        <SimmButton
-                          type="button"
-                          onClick={() => void openDirectoryPicker()}
-                          className="btn btn-secondary"
-                        >
-                          Browse
-                        </SimmButton>
-                      </div>
-                      <small>
-                        New downloads and extracted install payloads default to
-                        this path.
-                      </small>
-                    </div>
-
-                    <div className="settings-field settings-field--compact">
-                      <label>Max concurrent downloads</label>
+                  <SettingRow
+                    label="Check interval"
+                    labelFor="settings-update-interval"
+                    help="1 to 1440 minutes. Default 60."
+                  >
+                    <div className="settings-number">
                       <Input
+                        id="settings-update-interval"
+                        type="number"
+                        value={formData.updateCheckInterval || 60}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            updateCheckInterval: parseInt(e.target.value) || 60,
+                          })
+                        }
+                        min="1"
+                        max="1440"
+                      />
+                      <span className="settings-number__unit">minutes</span>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="App update channel"
+                    help="Stable gets production releases. Beta gets prerelease builds."
+                  >
+                    <SettingsSelect
+                      ariaLabel="App update channel"
+                      value={formData.appUpdateChannel}
+                      onValueChange={(value) =>
+                        setFormData({
+                          ...formData,
+                          appUpdateChannel: value as "stable" | "beta",
+                        })
+                      }
+                      options={[
+                        { value: "stable", label: "Stable" },
+                        { value: "beta", label: "Beta" },
+                      ]}
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="App updates"
+                    help="Check the selected channel now, even when automatic checks are off."
+                  >
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => window.dispatchEvent(new CustomEvent("simm:check-app-update"))}
+                    >
+                      Check for App Updates
+                    </SimmButton>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Environment and mod updates"
+                    help="Check every installed environment now."
+                  >
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runCheckAllUpdates()}
+                      disabled={checkingAllUpdates}
+                    >
+                      {checkingAllUpdates ? "Checking…" : "Check All Updates"}
+                    </SimmButton>
+                  </SettingRow>
+
+                  <SettingRow label="Release service" help={releaseApiDetail}>
+                    <span
+                      className={`ui-status ui-status--${releaseApiTone}`}
+                      title={releaseApiError || undefined}
+                    >
+                      {releaseApiLabel}
+                    </span>
+                  </SettingRow>
+                </SettingsGroup>
+
+                <SettingsGroup id="downloads" title="Downloads & storage">
+                  <SettingRow
+                    label="Download folder"
+                    labelFor="settings-download-dir"
+                    help="New environments and downloads are stored here."
+                  >
+                    <div className="settings-path-control">
+                      <Input
+                        id="settings-download-dir"
+                        type="text"
+                        className="ui-mono"
+                        value={formData.defaultDownloadDir}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            defaultDownloadDir: e.target.value,
+                          })
+                        }
+                        placeholder={"C:\\DevEnvironments"}
+                      />
+                      <SimmButton
+                        type="button"
+                        variant="outline"
+                        onClick={() => void openDirectoryPicker()}
+                      >
+                        Browse
+                      </SimmButton>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Parallel downloads"
+                    labelFor="settings-max-downloads"
+                    help="More finish sooner but use more bandwidth and disk. 1 to 10."
+                  >
+                    <div className="settings-number">
+                      <Input
+                        id="settings-max-downloads"
                         type="number"
                         value={formData.maxConcurrentDownloads}
                         onChange={(e) =>
@@ -1397,273 +1559,48 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         min="1"
                         max="10"
                       />
-                      <small>
-                        Higher values improve throughput but use more bandwidth
-                        and disk I/O.
-                      </small>
+                      <span className="settings-number__unit">at once</span>
                     </div>
+                  </SettingRow>
 
-                    <div className="settings-field">
-                      <label>Preferred MelonLoader version</label>
-                      <SettingsSelect
-                        ariaLabel="Preferred MelonLoader version"
-                        value={formData.melonLoaderVersion || ""}
-                        onValueChange={(value) =>
-                          setFormData({
-                            ...formData,
-                            melonLoaderVersion: value,
-                          })
-                        }
-                        disabled={loadingVersions}
-                        options={[
-                          {
-                            value: "",
-                            label: "None (Manual Installation)",
-                          },
-                          ...(loadingVersions
-                            ? [
-                                {
-                                  value: "__loading",
-                                  label: "Loading versions...",
-                                  disabled: true,
-                                },
-                              ]
-                            : melonLoaderVersions.map((version) => ({
-                                value: version.tag,
-                                label: version.name,
-                              }))),
-                        ]}
-                      />
-                      <small>
-                        Use this version when creating new managed environments.
-                      </small>
-                    </div>
-
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Auto-install after download"
-                        description="Apply MelonLoader automatically when an environment finishes downloading."
-                        checked={formData.autoInstallMelonLoader || false}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            autoInstallMelonLoader: checked,
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="settings-inline-status-grid">
-                    <div className="settings-inline-status">
-                      <span>DepotDownloader</span>
-                      <strong>{depotStatusLabel}</strong>
-                      <small>{depotStatusDetail}</small>
-                    </div>
-                    {depotDownloader?.path && (
-                      <div className="settings-inline-status settings-inline-status--path">
-                        <span>Detected Path</span>
-                        <strong title={depotDownloader.path}>
-                          {depotDownloader.path}
-                        </strong>
-                      </div>
-                    )}
-                    <div className="settings-inline-status settings-inline-status--action">
-                      <span>Tooling Check</span>
-                      <SimmButton
-                        onClick={refreshDepotDownloader}
-                        className="btn btn-secondary btn-small"
-                      >
-                        Refresh
-                      </SimmButton>
-                    </div>
-                  </div>
-
-                  {formData.platform === "linux" && (
-                    <div className="settings-inline-status-grid">
-                      <div className="settings-inline-status">
-                        <span>Linux Readiness</span>
-                        <strong>{linuxReadinessSummary}</strong>
-                        <small>
-                          Steam, Protontricks, DepotDownloader, MLVScan, and desktop link checks for Linux parity.
-                        </small>
-                      </div>
-                      {(linuxReadinessStatus?.checks ?? []).map((check) => (
-                        <div className="settings-inline-status" key={check.id}>
-                          <span>{check.label}</span>
-                          <strong>
-                            {getReadinessStatusLabel(check.status)}
-                          </strong>
-                          <small title={check.path || check.command || undefined}>
-                            {check.detail}
-                          </small>
-                        </div>
-                      ))}
-                      {(linuxReadinessStatus?.schemeHandlers ?? []).map((scheme) => (
-                        <div className="settings-inline-status" key={scheme.scheme}>
-                          <span>{scheme.scheme}:// handler</span>
-                          <strong>{scheme.ready ? "SIMM" : "Needs Repair"}</strong>
-                          <small title={scheme.handler || undefined}>
-                            {scheme.detail}
-                          </small>
-                        </div>
-                      ))}
-                      <div className="settings-inline-status settings-inline-status--action">
-                        <span>Linux Actions</span>
-                        <strong>
+                  <SettingRow
+                    label="DepotDownloader"
+                    help={
+                      <>
+                        {depotStatusDetail}
+                        {depotDownloader?.path && (
                           <span
-                            className={`settings-status-pill settings-status-pill--${linuxReadinessTone}`}
+                            className="settings-row__path ui-mono"
+                            title={depotDownloader.path}
                           >
-                            {linuxReadinessSummary}
+                            {depotDownloader.path}
                           </span>
-                        </strong>
-                        <small>
-                          Repair is useful after moving an AppImage or changing desktop defaults.
-                        </small>
-                        <div className="settings-backup-panel__actions">
-                          <SimmButton
-                            type="button"
-                            onClick={() => void handleRefreshLinuxReadiness()}
-                            disabled={loadingLinuxReadiness}
-                            className="btn btn-secondary btn-small"
-                          >
-                            {loadingLinuxReadiness ? "Checking..." : "Refresh"}
-                          </SimmButton>
-                          <SimmButton
-                            type="button"
-                            onClick={() => void handleRepairLinuxDesktopIntegration()}
-                            disabled={repairingLinuxDesktopIntegration}
-                            className="btn btn-secondary btn-small"
-                          >
-                            {repairingLinuxDesktopIntegration
-                              ? "Repairing..."
-                              : "Repair Desktop Links"}
-                          </SimmButton>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {linuxReadinessFeedback && (
-                    <div
-                      className={`settings-inline-feedback settings-inline-feedback--${linuxReadinessFeedback.tone}`}
-                      role={linuxReadinessFeedback.tone === "error" ? "alert" : "status"}
+                        )}
+                      </>
+                    }
+                  >
+                    <span className={`ui-status ui-status--${depotInstalled ? "ok" : "warn"}`}>
+                      {depotStatusLabel}
+                    </span>
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={refreshDepotDownloader}
+                      aria-label="Refresh DepotDownloader status"
                     >
-                      {linuxReadinessFeedback.message}
-                    </div>
-                  )}
-                </div>
+                      Refresh
+                    </SimmButton>
+                  </SettingRow>
 
-                <hr className="settings-divider" />
-
-                <div className="settings-subsection">
-                  <div className="settings-subsection__header">
-                    <div>
-                      <span className="settings-section__eyebrow">
-                        Updates & Maintenance
-                      </span>
-                      <h3>
-                        <Icon name="fas fa-rotate" /> Cadence, cache, and
-                        service state
-                      </h3>
-                    </div>
-                    <p>
-                      Balance background checks, cache size, and manual update
-                      runs without leaving the main settings sheet.
-                    </p>
-                  </div>
-
-                  <div className="settings-field-grid">
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Automatically check for updates"
-                        description="Run background update checks using the interval below."
-                        checked={formData.autoCheckUpdates !== false}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            autoCheckUpdates: checked,
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="settings-field settings-field--compact">
-                      <label>Check interval (minutes)</label>
+                  <SettingRow
+                    label="Database backups to keep"
+                    labelFor="settings-backup-count"
+                    help="Older snapshots beyond this count are removed. Default 10."
+                  >
+                    <div className="settings-number">
                       <Input
-                        type="number"
-                        value={formData.updateCheckInterval || 60}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            updateCheckInterval: parseInt(e.target.value) || 60,
-                          })
-                        }
-                        min="1"
-                        max="1440"
-                      />
-                      <small>Allowed range: 1 to 1440 minutes.</small>
-                    </div>
-
-                    <div className="settings-field settings-field--compact">
-                      <label>App update channel</label>
-                      <SettingsSelect
-                        ariaLabel="App update channel"
-                        value={formData.appUpdateChannel}
-                        onValueChange={(value) =>
-                          setFormData({
-                            ...formData,
-                            appUpdateChannel: value as "stable" | "beta",
-                          })
-                        }
-                        options={[
-                          { value: "stable", label: "Stable" },
-                          { value: "beta", label: "Beta" },
-                        ]}
-                      />
-                      <small>
-                        Stable uses production releases. Beta opts this app into prerelease updater manifests.
-                      </small>
-                    </div>
-
-                    <div className="settings-field settings-field--compact">
-                      <label>Manual app update check</label>
-                      <SimmButton
-                        type="button"
-                        onClick={() => window.dispatchEvent(new CustomEvent("simm:check-app-update"))}
-                        className="btn btn-secondary"
-                      >
-                        Check for App Updates
-                      </SimmButton>
-                      <small>
-                        Check the selected app update channel now, even when automatic checks are disabled.
-                      </small>
-                    </div>
-
-                    <div className="settings-field settings-field--compact">
-                      <label>Mod icon cache limit (MB)</label>
-                      <Input
-                        type="number"
-                        value={formData.modIconCacheLimitMb ?? 500}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            modIconCacheLimitMb: normalizeModIconCacheLimitMb(
-                              e.target.value,
-                            ),
-                          })
-                        }
-                        min="100"
-                        max="8192"
-                      />
-                      <small>
-                        Disk budget for cached mod icons. Default is 500 MB.
-                      </small>
-                    </div>
-
-                    <div className="settings-field settings-field--compact">
-                      <label>Database backups to keep</label>
-                      <Input
+                        id="settings-backup-count"
                         type="number"
                         value={formData.databaseBackupCount ?? 10}
                         onChange={(e) =>
@@ -1677,335 +1614,351 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         min="1"
                         max="100"
                       />
-                      <small>
-                        Automatic and manual backups prune the oldest snapshots
-                        above this count.
-                      </small>
+                      <span className="settings-number__unit">backups</span>
                     </div>
+                  </SettingRow>
 
-                    <div className="settings-field settings-field--compact">
-                      <label>Manual batch actions</label>
-                      <SimmButton
-                        type="button"
-                        onClick={() => void runCheckAllUpdates()}
-                        disabled={checkingAllUpdates}
-                        className="btn btn-secondary"
-                      >
-                        {checkingAllUpdates
-                          ? "Checking..."
-                          : "Check All Updates"}
-                      </SimmButton>
-                      <small>
-                        Run an immediate check across all completed
-                        environments.
-                      </small>
-                    </div>
-                  </div>
+                  <SettingRow
+                    label="Database"
+                    stacked
+                    help="SIMM backs up its database before upgrades and migrations. Repair adds missing schema after switching between installed and development builds."
+                  >
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleBackupDatabase()}
+                      disabled={backingUpDatabase || repairingDatabase}
+                    >
+                      {backingUpDatabase ? "Backing Up…" : "Back Up Database"}
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleOpenBackupsFolder()}
+                      disabled={openingBackupsFolder || repairingDatabase}
+                    >
+                      {openingBackupsFolder ? "Opening…" : "Open Backups Folder"}
+                    </SimmButton>
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleRepairDatabase()}
+                      disabled={repairingDatabase || backingUpDatabase}
+                    >
+                      {repairingDatabase ? "Repairing…" : "Repair Database"}
+                    </SimmButton>
+                  </SettingRow>
+                  {renderFeedback(databaseBackupFeedback)}
+                </SettingsGroup>
 
-                  <div className="settings-inline-status-grid">
-                    <div className="settings-inline-status">
-                      <span>Release API</span>
-                      <strong>
-                        <span
-                          className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
-                          title={releaseApiError || undefined}
-                        >
-                          <Icon name={
-                              checkingReleaseApi
-                                ? "fas fa-spinner fa-spin"
-                                : releaseApiError
-                                  ? "fas fa-exclamation-circle"
-                                  : "fas fa-check-circle"
-                            }
-                           />
-                          {releaseApiLabel}
-                        </span>
-                      </strong>
-                      <small>{releaseApiDetail}</small>
-                    </div>
-                    <div className="settings-inline-status">
-                      <span>Update Checks</span>
-                      <strong>
-                        {formData.autoCheckUpdates ? "Enabled" : "Disabled"}
-                      </strong>
-                      <small>
-                        {formData.autoCheckUpdates
-                          ? "Background checks follow the configured interval."
-                          : "Checks only run when you trigger them manually."}
-                      </small>
-                    </div>
-                    <div className="settings-inline-status">
-                      <span>App Update Channel</span>
-                      <strong>{formData.appUpdateChannel === "beta" ? "Beta" : "Stable"}</strong>
-                      <small>
-                        {formData.appUpdateChannel === "beta"
-                          ? "Checks the beta updater manifest and prerelease builds."
-                          : "Checks the stable updater manifest and production releases."}
-                      </small>
-                    </div>
-                  </div>
+                <SettingsGroup id="mods" title="Mods & cache">
+                  <SettingRow
+                    label="Preferred MelonLoader version"
+                    help="Installed into new environments SIMM creates."
+                  >
+                    <SettingsSelect
+                      ariaLabel="Preferred MelonLoader version"
+                      value={formData.melonLoaderVersion || ""}
+                      onValueChange={(value) =>
+                        setFormData({
+                          ...formData,
+                          melonLoaderVersion: value,
+                        })
+                      }
+                      disabled={loadingVersions}
+                      options={[
+                        {
+                          value: "",
+                          label: "None (manual install)",
+                        },
+                        ...(loadingVersions
+                          ? [
+                              {
+                                value: "__loading",
+                                label: "Loading versions…",
+                                disabled: true,
+                              },
+                            ]
+                          : melonLoaderVersions.map((version) => ({
+                              value: version.tag,
+                              label: version.name,
+                            }))),
+                      ]}
+                    />
+                  </SettingRow>
 
-                  <div className="settings-backup-panel">
-                    <div className="settings-backup-panel__header">
-                      <div>
-                        <span className="settings-section__eyebrow">
-                          Database Backups
-                        </span>
-                        <h4>Snapshots before upgrades and migrations</h4>
-                      </div>
-                      <p>
-                        SIMM automatically backs up the SQLite database before
-                        app-version upgrades and migration work. You can also
-                        create a manual snapshot or repair safe additive schema
-                        after switching between installed and development builds.
-                      </p>
-                    </div>
+                  <SettingsToggle
+                    label="Auto-install after download"
+                    description="Install MelonLoader automatically when an environment finishes downloading."
+                    checked={formData.autoInstallMelonLoader || false}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        autoInstallMelonLoader: checked,
+                      })
+                    }
+                  />
 
-                    <div className="settings-backup-panel__actions">
-                      <SimmButton
-                        type="button"
-                        onClick={() => void handleBackupDatabase()}
-                        disabled={backingUpDatabase || repairingDatabase}
-                        className="btn btn-secondary"
-                      >
-                        {backingUpDatabase
-                          ? "Backing Up..."
-                          : "Back Up Database"}
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        onClick={() => void handleRepairDatabase()}
-                        disabled={repairingDatabase || backingUpDatabase}
-                        className="btn btn-secondary"
-                      >
-                        <Icon name="wrench" /> {repairingDatabase ? "Repairing..." : "Repair Database"}
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        onClick={() => void handleOpenBackupsFolder()}
-                        disabled={openingBackupsFolder || repairingDatabase}
-                        className="btn btn-secondary"
-                      >
-                        {openingBackupsFolder
-                          ? "Opening..."
-                          : "Open Backups Folder"}
-                      </SimmButton>
-                    </div>
-
-                    {databaseBackupFeedback && (
-                      <div
-                        className={`settings-inline-feedback settings-inline-feedback--${databaseBackupFeedback.tone}`}
-                        role={
-                          databaseBackupFeedback.tone === "error"
-                            ? "alert"
-                            : "status"
+                  <SettingRow
+                    label="Mod icon cache limit"
+                    labelFor="settings-icon-cache"
+                    help="Disk budget for cached mod icons. Default 500 MB."
+                  >
+                    <div className="settings-number">
+                      <Input
+                        id="settings-icon-cache"
+                        type="number"
+                        value={formData.modIconCacheLimitMb ?? 500}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            modIconCacheLimitMb: normalizeModIconCacheLimitMb(
+                              e.target.value,
+                            ),
+                          })
                         }
+                        min="100"
+                        max="8192"
+                      />
+                      <span className="settings-number__unit">MB</span>
+                    </div>
+                  </SettingRow>
+                </SettingsGroup>
+
+                <SettingsGroup id="security" title="Security">
+                  <SettingsToggle
+                    label="Scan downloads"
+                    description="Run MLVScan on supported downloads before they enter the Mod Library."
+                    checked={formData.enableSecurityScanner ?? true}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        enableSecurityScanner: checked,
+                      })
+                    }
+                  />
+                  <SettingsToggle
+                    label="Auto-install scanner"
+                    description="Let SIMM install or repair MLVScan when a scan needs it."
+                    checked={formData.autoInstallSecurityScanner ?? true}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        autoInstallSecurityScanner: checked,
+                      })
+                    }
+                  />
+                  <SettingsToggle
+                    label="Block critical findings"
+                    description="Stop a download when MLVScan reports a critical risk."
+                    checked={formData.blockCriticalScans ?? true}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        blockCriticalScans: checked,
+                      })
+                    }
+                  />
+                  <SettingsToggle
+                    label="Prompt on high-risk results"
+                    description="Ask before continuing when a scan needs review."
+                    checked={formData.promptOnHighScans ?? true}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        promptOnHighScans: checked,
+                      })
+                    }
+                  />
+                  <SettingsToggle
+                    label="Show scan results in lists"
+                    description="Mark mods that need review or could not be scanned in the Mod Library and Mods."
+                    checked={formData.showSecurityScanBadges ?? true}
+                    onChange={(checked) =>
+                      setFormData({
+                        ...formData,
+                        showSecurityScanBadges: checked,
+                      })
+                    }
+                  />
+
+                  <SettingRow
+                    label="MLVScan"
+                    help={
+                      securityScannerStatus?.installed
+                        ? scannerDetail
+                        : "The setup guide normally installs MLVScan. Use Fallback Install if that failed."
+                    }
+                  >
+                    <span className={`ui-status ui-status--${scannerTone}`}>{scannerLabel}</span>
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label="Refresh MLVScan status"
+                      disabled={
+                        loadingSecurityScannerStatus || installingSecurityScanner
+                      }
+                      onClick={async () => {
+                        setLoadingSecurityScannerStatus(true);
+                        try {
+                          const status =
+                            await ApiService.getSecurityScannerStatus();
+                          setSecurityScannerStatus(status);
+                        } catch (err) {
+                          setError(
+                            err instanceof Error
+                              ? err.message
+                              : "Failed to refresh the security scanner status",
+                          );
+                        } finally {
+                          setLoadingSecurityScannerStatus(false);
+                        }
+                      }}
+                    >
+                      {loadingSecurityScannerStatus ? "Refreshing…" : "Refresh"}
+                    </SimmButton>
+                    {!securityScannerStatus?.installed && (
+                      <SimmButton
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={installingSecurityScanner || loadingSecurityScannerStatus}
+                        onClick={async () => {
+                          setInstallingSecurityScanner(true);
+                          try {
+                            const status =
+                              await ApiService.installSecurityScanner();
+                            setSecurityScannerStatus(status);
+                          } catch (err) {
+                            setError(
+                              err instanceof Error
+                                ? err.message
+                                : "Failed to install the security scanner",
+                            );
+                          } finally {
+                            setInstallingSecurityScanner(false);
+                          }
+                        }}
                       >
-                        {databaseBackupFeedback.message}
-                      </div>
+                        {installingSecurityScanner ? "Installing…" : "Fallback Install"}
+                      </SimmButton>
                     )}
-                  </div>
-                </div>
-                <hr className="settings-divider" />
-
-                <div className="settings-subsection">
-                  <div className="settings-subsection__header">
-                    <div>
-                      <span className="settings-section__eyebrow">MLVScan</span>
-                      <h3>
-                        <Icon name="fas fa-shield-virus" /> Security
-                        scanning and trust signals
-                      </h3>
-                    </div>
-                    <p>
-                      Control when SIMM runs MLVScan, how aggressive the safety
-                      gates are, and whether scan badges appear in the library
-                      and installed mod views.
+                  </SettingRow>
+                  {securityScannerStatus?.lastError && (
+                    <p className="settings-feedback settings-feedback--error" role="alert">
+                      {securityScannerStatus.lastError}
                     </p>
-                  </div>
+                  )}
+                </SettingsGroup>
 
-                  <div className="settings-field-grid">
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Enable download-time scanning"
-                        description="Run MLVScan against supported downloads before they enter the library."
-                        checked={formData.enableSecurityScanner ?? true}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            enableSecurityScanner: checked,
-                          })
-                        }
-                      />
-                    </div>
+                <SettingsGroup id="diagnostics" title="Diagnostics">
+                  <SettingRow
+                    label="Log level"
+                    help="Minimum detail SIMM writes to its own log file."
+                  >
+                    <SettingsSelect
+                      ariaLabel="Log level"
+                      value={formData.logLevel || "info"}
+                      onValueChange={(value) =>
+                        setFormData({
+                          ...formData,
+                          logLevel: value as SettingsFormData["logLevel"],
+                        })
+                      }
+                      options={[
+                        { value: "debug", label: "Debug" },
+                        { value: "info", label: "Info" },
+                        { value: "warn", label: "Warning" },
+                        { value: "error", label: "Error" },
+                      ]}
+                    />
+                  </SettingRow>
 
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Auto-install scanner"
-                        description="Let SIMM acquire or repair the scanner when download safety checks need it."
-                        checked={formData.autoInstallSecurityScanner ?? true}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            autoInstallSecurityScanner: checked,
-                          })
-                        }
-                      />
-                    </div>
+                  {telemetryAvailable && <TelemetrySettingsPanel />}
 
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Block critical findings"
-                        description="Stop downloads automatically when MLVScan reports a critical risk."
-                        checked={formData.blockCriticalScans ?? true}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            blockCriticalScans: checked,
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Prompt on high-risk results"
-                        description="Require manual confirmation before continuing when a scan needs review."
-                        checked={formData.promptOnHighScans ?? true}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            promptOnHighScans: checked,
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="settings-field settings-field--toggle">
-                      <SettingsToggle
-                        label="Show scan badges"
-                        description="Display verified, review, and unavailable states across library and installed mod cards."
-                        checked={formData.showSecurityScanBadges ?? true}
-                        onChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            showSecurityScanBadges: checked,
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="settings-inline-status-grid">
-                    <div className="settings-inline-status">
-                      <span>Scanner Status</span>
-                      <strong>
-                        {loadingSecurityScannerStatus
-                          ? "Checking"
-                          : securityScannerStatus?.installed
-                            ? "Installed"
-                            : "Not Installed"}
-                      </strong>
-                      <small>
-                        {securityScannerStatus?.installedVersion
-                          ? `Installed ${securityScannerStatus.installedVersion}`
-                          : "Install the scanner to enforce download safety checks."}
-                      </small>
-                    </div>
-                    <div className="settings-inline-status">
-                      <span>Install Method</span>
-                      <strong>
-                        {securityScannerStatus?.installMethod || "None"}
-                      </strong>
-                      <small>
-                        {securityScannerStatus?.latestVersion
-                          ? `Latest ${securityScannerStatus.latestVersion}`
-                          : "Release metadata unavailable"}
-                      </small>
-                    </div>
-                    <div className="settings-inline-status settings-inline-status--action">
-                      <span>Scanner Management</span>
-                      <strong>Prepared by setup guide</strong>
-                      <small>
-                        The first-run guide installs MLVScan automatically.
-                        Use the fallback action here if setup failed or the
-                        scanner is still missing.
-                      </small>
-                      <div className="settings-backup-panel__actions">
+                  {formData.platform === "linux" && (
+                    <>
+                      <SettingRow
+                        label="Linux readiness"
+                        help="Steam, Protontricks, DepotDownloader, MLVScan, and desktop link checks. Repair after moving the AppImage or changing desktop defaults."
+                        stacked
+                      >
+                        <span className={`ui-status ui-status--${linuxReadinessTone}`}>
+                          {linuxReadinessSummary}
+                        </span>
                         <SimmButton
                           type="button"
-                          className="btn btn-secondary btn-small"
-                          disabled={
-                            loadingSecurityScannerStatus || installingSecurityScanner
-                          }
-                          onClick={async () => {
-                            setLoadingSecurityScannerStatus(true);
-                            try {
-                              const status =
-                                await ApiService.getSecurityScannerStatus();
-                              setSecurityScannerStatus(status);
-                            } catch (err) {
-                              setError(
-                                err instanceof Error
-                                  ? err.message
-                                  : "Failed to refresh the security scanner status",
-                              );
-                            } finally {
-                              setLoadingSecurityScannerStatus(false);
-                            }
-                          }}
+                          variant="outline"
+                          size="sm"
+                          aria-label="Refresh Linux readiness"
+                          onClick={() => void handleRefreshLinuxReadiness()}
+                          disabled={loadingLinuxReadiness}
                         >
-                          {loadingSecurityScannerStatus
-                            ? "Refreshing..."
-                            : "Refresh"}
+                          {loadingLinuxReadiness ? "Checking…" : "Refresh"}
                         </SimmButton>
-                        {!securityScannerStatus?.installed && (
-                          <SimmButton
-                            type="button"
-                            className="btn btn-secondary btn-small"
-                            disabled={installingSecurityScanner || loadingSecurityScannerStatus}
-                            onClick={async () => {
-                              setInstallingSecurityScanner(true);
-                              try {
-                                const status =
-                                  await ApiService.installSecurityScanner();
-                                setSecurityScannerStatus(status);
-                              } catch (err) {
-                                setError(
-                                  err instanceof Error
-                                    ? err.message
-                                    : "Failed to install the security scanner",
-                                );
-                              } finally {
-                                setInstallingSecurityScanner(false);
-                              }
-                            }}
-                          >
-                            {installingSecurityScanner
-                              ? "Installing..."
-                              : "Fallback Install"}
-                          </SimmButton>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {securityScannerStatus?.lastError && (
-                    <div
-                      className="settings-inline-feedback settings-inline-feedback--error"
-                      role="alert"
-                    >
-                      {securityScannerStatus.lastError}
-                    </div>
+                        <SimmButton
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleRepairLinuxDesktopIntegration()}
+                          disabled={repairingLinuxDesktopIntegration}
+                        >
+                          {repairingLinuxDesktopIntegration
+                            ? "Repairing…"
+                            : "Repair Desktop Links"}
+                        </SimmButton>
+                      </SettingRow>
+                      {((linuxReadinessStatus?.checks.length ?? 0) > 0 ||
+                        (linuxReadinessStatus?.schemeHandlers.length ?? 0) > 0) && (
+                        <ul className="settings-checks" aria-label="Linux readiness checks">
+                          {(linuxReadinessStatus?.checks ?? []).map((check) => (
+                            <li className="settings-check" key={check.id}>
+                              <span className="settings-check__label">{check.label}</span>
+                              <span
+                                className="settings-check__detail"
+                                title={check.path || check.command || undefined}
+                              >
+                                {check.detail}
+                              </span>
+                              <span className={`ui-status ui-status--${getReadinessTone(check.status)}`}>
+                                {getReadinessStatusLabel(check.status)}
+                              </span>
+                            </li>
+                          ))}
+                          {(linuxReadinessStatus?.schemeHandlers ?? []).map((scheme) => (
+                            <li className="settings-check" key={scheme.scheme}>
+                              <span className="settings-check__label">{scheme.scheme}:// handler</span>
+                              <span
+                                className="settings-check__detail"
+                                title={scheme.handler || undefined}
+                              >
+                                {scheme.detail}
+                              </span>
+                              <span className={`ui-status ui-status--${scheme.ready ? "ok" : "warn"}`}>
+                                {scheme.ready ? "SIMM" : "Needs repair"}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {renderFeedback(linuxReadinessFeedback)}
+                    </>
                   )}
-                </div>
-              </section>
+                </SettingsGroup>
+
+                <SettingsGroup id="window" title="Window">
+                  <WindowBehaviorSettingsPanel />
+                </SettingsGroup>
+              </div>
             </div>
           </div>
         </section>
       )}
 
-      {/* Directory Picker Modal */}
       {showDirectoryPicker && (
         <Dialog open={showDirectoryPicker} onOpenChange={(open) => {
           if (!open) {
@@ -2014,11 +1967,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
         }}>
           <SimmDialogContent
             nested
-            className="wizard-directory-dialog settings-directory-dialog"
+            className="settings-directory-dialog"
             showCloseButton={false}
           >
-            <DialogHeader className="modal-header">
-              <DialogTitle>Select Download Directory</DialogTitle>
+            <DialogHeader className="modal-header settings-directory-dialog__header">
+              <DialogTitle>Select download directory</DialogTitle>
               <SimmButton
                 variant="ghost"
                 size="icon-sm"
@@ -2026,26 +1979,18 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                 onClick={() => setShowDirectoryPicker(false)}
                 aria-label="Close directory picker"
               >
-                ×
+                <Icon name="times" />
               </SimmButton>
             </DialogHeader>
 
-            <div className="wizard-directory-dialog__body">
-              <div className="wizard-directory-dialog__overview">
-                <span className="settings-eyebrow">Directory Browser</span>
-                <h3>Choose the default download location</h3>
-                <p>
-                  Browse folders, create a new subdirectory if needed, and
-                  confirm the current location when you are ready.
-                </p>
-              </div>
-
-              <div className="settings-field-card settings-field-card--full">
+            <div className="settings-directory-dialog__body">
+              <div className="settings-directory-dialog__field">
                 <label htmlFor="settings-directory-path">Current path</label>
-                <div className="settings-inline-field">
+                <div className="settings-path-control">
                   <Input
                     id="settings-directory-path"
                     type="text"
+                    className="ui-mono"
                     value={directoryPath}
                     onChange={(e) => setDirectoryPath(e.target.value)}
                     onKeyDown={(e) => {
@@ -2053,31 +1998,75 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         void loadDirectory(directoryPath);
                       }
                     }}
-                    placeholder="C:\\Users\\YourName"
+                    placeholder={"C:\\Users\\YourName"}
                   />
                   <SimmButton
                     type="button"
+                    variant="outline"
                     onClick={() => void loadDirectory(directoryPath)}
-                    className="btn btn-secondary"
                     disabled={browsing}
                   >
-                    <Icon name={
-                        browsing
-                          ? "fas fa-spinner fa-spin"
-                          : "fas fa-location-crosshairs"
-                      }
-                      aria-hidden="true"
-                     />
                     {browsing ? "Loading…" : "Go to Path"}
                   </SimmButton>
                 </div>
               </div>
 
-              <div className="settings-field-card settings-field-card--full">
+              <div className="settings-directory-dialog__list" role="list" aria-label="Folders" aria-busy={browsing}>
+                {browsing ? (
+                  <div className="settings-directory-dialog__skeleton" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                ) : (
+                  <>
+                    {getParentPath(directoryPath) && (
+                      <div role="listitem">
+                        <SimmButton
+                          type="button"
+                          variant="ghost"
+                          className="settings-directory-row h-auto"
+                          onClick={() =>
+                            void loadDirectory(getParentPath(directoryPath) || "")
+                          }
+                        >
+                          <Icon name="arrowUp" />
+                          <span>Parent folder</span>
+                        </SimmButton>
+                      </div>
+                    )}
+                    {directoryList.length === 0 ? (
+                      <div className="ui-empty settings-directory-dialog__empty" role="listitem">
+                        <p className="ui-empty__copy">
+                          {directoryPath
+                            ? "No subfolders here. Select this folder or create one below."
+                            : "Enter a path above, then press Go to Path."}
+                        </p>
+                      </div>
+                    ) : (
+                      directoryList.map((dir) => (
+                        <div role="listitem" key={dir.path}>
+                          <SimmButton
+                            type="button"
+                            variant="ghost"
+                            className="settings-directory-row h-auto"
+                            onClick={() => void loadDirectory(dir.path)}
+                          >
+                            <Icon name="folder" />
+                            <span className="ui-truncate">{dir.name}</span>
+                          </SimmButton>
+                        </div>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div className="settings-directory-dialog__field">
                 <label htmlFor="settings-new-folder">
                   Create a folder in the current location
                 </label>
-                <div className="settings-inline-field">
+                <div className="settings-path-control">
                   <Input
                     id="settings-new-folder"
                     type="text"
@@ -2093,90 +2082,33 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                   />
                   <SimmButton
                     type="button"
-                    className="btn btn-secondary"
+                    variant="outline"
                     onClick={() => void handleCreateFolder()}
                     disabled={
                       creatingFolder || !newFolderName.trim() || !directoryPath
                     }
                   >
-                    <Icon name={
-                        creatingFolder
-                          ? "fas fa-spinner fa-spin"
-                          : "fas fa-folder-plus"
-                      }
-                      aria-hidden="true"
-                     />
                     {creatingFolder ? "Creating…" : "Create Folder"}
                   </SimmButton>
                 </div>
               </div>
+            </div>
 
-              <div className="wizard-directory-dialog__list" role="list">
-                {browsing ? (
-                  <div className="wizard-empty-card">
-                    <Icon name="fas fa-spinner fa-spin" />
-                    <strong>Loading directories</strong>
-                    <p>SIMM is reading the current folder contents.</p>
-                  </div>
-                ) : (
-                  <>
-                    {getParentPath(directoryPath) && (
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className="wizard-directory-row wizard-directory-row--parent h-auto"
-                        onClick={() =>
-                          void loadDirectory(getParentPath(directoryPath) || "")
-                        }
-                      >
-                        <Icon name="fas fa-arrow-up" />
-                        <span>Parent Directory</span>
-                      </SimmButton>
-                    )}
-                    {directoryList.length === 0 ? (
-                      <div className="wizard-empty-card">
-                        <Icon name="fas fa-folder-open" />
-                        <strong>No subdirectories found</strong>
-                        <p>
-                          This location does not contain any folders that SIMM
-                          can browse into right now.
-                        </p>
-                      </div>
-                    ) : (
-                      directoryList.map((dir) => (
-                        <SimmButton
-                          key={dir.path}
-                          type="button"
-                          variant="ghost"
-                          className="wizard-directory-row h-auto"
-                          onClick={() => void loadDirectory(dir.path)}
-                        >
-                          <Icon name="fas fa-folder" />
-                          <span>{dir.name}</span>
-                        </SimmButton>
-                      ))
-                    )}
-                  </>
-                )}
-              </div>
-
-              <div className="wizard-panel__actions wizard-panel__actions--dialog">
-                <SimmButton
-                  type="button"
-                  onClick={() => setShowDirectoryPicker(false)}
-                  className="btn btn-secondary"
-                >
-                  Cancel
-                </SimmButton>
-                <SimmButton
-                  type="button"
-                  onClick={() => handleDirectorySelect(directoryPath)}
-                  className="btn btn-primary"
-                  disabled={!directoryPath}
-                >
-                  Select This Directory
-                </SimmButton>
-              </div>
+            <div className="settings-directory-dialog__footer">
+              <SimmButton
+                type="button"
+                variant="outline"
+                onClick={() => setShowDirectoryPicker(false)}
+              >
+                Cancel
+              </SimmButton>
+              <SimmButton
+                type="button"
+                onClick={() => handleDirectorySelect(directoryPath)}
+                disabled={!directoryPath}
+              >
+                Select This Directory
+              </SimmButton>
             </div>
           </SimmDialogContent>
         </Dialog>

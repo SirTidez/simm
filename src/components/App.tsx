@@ -41,6 +41,17 @@ import {
 } from '../utils/uxSettings';
 import { getErrorMessage } from '../utils/errors';
 import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
+import { readPreferredLaunchMethod } from '../utils/launchPreferences';
+import {
+  environmentGameVersion,
+  environmentSourceLabel,
+  runtimeLabel,
+  runtimeTagClass,
+  summarizeEnvironmentStatus,
+} from './shell/environmentPresentation';
+import { useEnvironmentModUpdateCounts } from './shell/useEnvironmentModUpdateCounts';
+import { GameArt } from './media/GameArt';
+import { EnvironmentWorkspaceHeader, type EnvironmentWorkspaceTab } from './shell/EnvironmentWorkspaceHeader';
 import type {
   Environment,
   ExperienceMode,
@@ -63,7 +74,7 @@ import {
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
-import { SimmBadge, SimmButton, SimmDialogContent, SimmIconButton } from './primitives';
+import { SimmButton, SimmDialogContent, SimmIconButton } from './primitives';
 import type { IconName } from './icons';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
@@ -585,54 +596,124 @@ async function loadHomeFeed(signal?: AbortSignal): Promise<HomeFeedItem[]> {
     feed.push(...parseChangelogFeed(markdown));
   }
 
-  return feed.slice(0, 4);
+  const seen = new Set<string>();
+  return feed.filter((item) => {
+    const match = item.title.match(/(\d+\.\d+\.\d+)(?:\D*beta\D*(\d+))?/i);
+    const version = match ? `${match[1]}${match[2] ? `-beta.${match[2]}` : ''}` : item.title;
+    if (seen.has(version)) return false;
+    seen.add(version);
+    return true;
+  }).slice(0, 3);
+}
+
+function HomeEnvironmentRow({
+  environment,
+  modUpdateCount,
+  primary,
+  launching,
+  onLaunch,
+  onOpenEnvironment,
+  onOpenModUpdates,
+}: {
+  environment: Environment;
+  modUpdateCount: number;
+  primary: boolean;
+  launching: boolean;
+  onLaunch: (environment: Environment) => void;
+  onOpenEnvironment: (environmentId: string) => void;
+  onOpenModUpdates: (environmentId: string) => void;
+}) {
+  const status = summarizeEnvironmentStatus(environment, modUpdateCount);
+  const playable = environment.status === 'completed';
+  const gameVersion = environmentGameVersion(environment);
+  const nextStep = !playable
+    ? {
+        label: environment.status === 'not_downloaded' || environment.status === 'downloading' ? 'Set Up' : 'Review',
+        onClick: () => onOpenEnvironment(environment.id),
+      }
+    : environment.updateAvailable
+      ? { label: 'Update Game', onClick: () => onOpenEnvironment(environment.id) }
+      : modUpdateCount > 0
+        ? {
+            label: modUpdateCount === 1 ? 'Review 1 Update' : `Review ${modUpdateCount} Updates`,
+            onClick: () => onOpenModUpdates(environment.id),
+          }
+        : null;
+
+  return (
+    <li className={`home-env${primary ? ' home-env--primary' : ''}`}>
+      {primary && <GameArt appId={environment.appId} className="home-env__art" />}
+      <button
+        type="button"
+        className="home-env__identity"
+        onClick={() => onOpenEnvironment(environment.id)}
+        aria-label={`Open ${environment.name}`}
+      >
+        <span className="home-env__name">{environment.name}</span>
+        <span className="ui-meta home-env__meta">
+          <span className={runtimeTagClass(environment.runtime)}>{runtimeLabel(environment.runtime)}</span>
+          <span>{environmentSourceLabel(environment)}</span>
+          {gameVersion && <span className="ui-num">Game {gameVersion}</span>}
+          {environment.melonLoaderVersion && <span className="ui-num">MelonLoader {environment.melonLoaderVersion}</span>}
+        </span>
+      </button>
+      <span className={`ui-status ui-status--${status.tone} home-env__status`}>{status.label}</span>
+      <div className="home-env__actions">
+        {nextStep && (
+          <SimmButton type="button" variant="secondary" onClick={nextStep.onClick}>
+            {nextStep.label}
+          </SimmButton>
+        )}
+        <SimmButton
+          type="button"
+          variant={primary ? 'default' : 'secondary'}
+          className="home-env__play"
+          onClick={() => onLaunch(environment)}
+          disabled={!playable || launching}
+          aria-label={`Play ${environment.name}`}
+        >
+          <Icon name={launching ? 'spinner' : 'play'} spin={launching} />
+          {launching ? 'Starting…' : 'Play'}
+        </SimmButton>
+      </div>
+    </li>
+  );
 }
 
 function HomeDashboard({
   environments,
   environmentsLoading,
-  downloadsInProgress,
   appUpdateState,
   selectedEnvironmentId,
-  onOpenEnvironments,
-  onOpenModLibrary,
+  platform,
+  onOpenEnvironment,
   onOpenModUpdates,
   onOpenWizard,
-  onOpenSettings,
-  onOpenProfiles,
+  onOpenModLibrary,
 }: {
   environments: Environment[];
   environmentsLoading: boolean;
-  downloadsInProgress: number;
   appUpdateState:
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
     | { status: 'available'; result: AppUpdateStatus };
   selectedEnvironmentId?: string | null;
-  onOpenEnvironments: (environmentId?: string | null) => void;
-  onOpenModLibrary: () => void;
-  onOpenModUpdates: () => void;
+  platform?: string;
+  onOpenEnvironment: (environmentId: string) => void;
+  onOpenModUpdates: (environmentId: string) => void;
   onOpenWizard: () => void;
-  onOpenSettings: () => void;
-  onOpenProfiles: () => void;
+  onOpenModLibrary: () => void;
 }) {
-  const completed = environments.filter((env) => env.status === 'completed');
-  const updateCount = completed.filter((env) => env.updateAvailable).length;
-  const steamCount = completed.filter((env) => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')).length;
-  const lastChecked = completed
-    .map((env) => env.lastUpdateCheck)
-    .filter((value): value is string | number => Boolean(value))
-    .map((value) => ({
-      raw: value,
-      time: typeof value === 'number'
-        ? (value > 1_000_000_000_000 ? value : value * 1000)
-        : Date.parse(value),
-    }))
-    .filter((entry) => Number.isFinite(entry.time))
-    .sort((a, b) => b.time - a.time)[0]?.raw;
-  const selectedEnvironment = selectedEnvironmentId
-    ? environments.find((env) => env.id === selectedEnvironmentId) ?? null
-    : null;
-  const primaryEnvironment = selectedEnvironment ?? completed.find((env) => env.updateAvailable) ?? completed[0] ?? environments[0] ?? null;
+  const { attempts: launchAttempts, requestLaunch } = useGameLaunchStore();
+  const { byEnvironment: modUpdateCounts } = useEnvironmentModUpdateCounts(environments);
+  const sorted = sortEnvironmentsForDisplay(environments);
+  const primaryEnvironment = (selectedEnvironmentId ? sorted.find((env) => env.id === selectedEnvironmentId) : null)
+    ?? sorted.find((env) => env.status === 'completed')
+    ?? sorted[0]
+    ?? null;
+  const otherEnvironments = sorted.filter((env) => env.id !== primaryEnvironment?.id);
+  const attentionCount = environments.filter((env) => (
+    env.updateAvailable || (modUpdateCounts.get(env.id) ?? 0) > 0 || env.status === 'error' || env.status === 'unavailable'
+  )).length;
   const [feedItems, setFeedItems] = useState<HomeFeedItem[]>([]);
   const [feedStatus, setFeedStatus] = useState<'loading' | 'ready' | 'empty'>('loading');
 
@@ -664,213 +745,113 @@ function HomeDashboard({
     };
   }, []);
 
+  const handleLaunch = (environment: Environment) => {
+    void requestLaunch(environment, readPreferredLaunchMethod(environment.id, platform));
+  };
+
+  const renderRow = (environment: Environment, primary: boolean) => (
+    <HomeEnvironmentRow
+      key={environment.id}
+      environment={environment}
+      modUpdateCount={modUpdateCounts.get(environment.id) ?? 0}
+      primary={primary}
+      launching={isLaunchPending(launchAttempts.get(environment.id))}
+      onLaunch={handleLaunch}
+      onOpenEnvironment={onOpenEnvironment}
+      onOpenModUpdates={onOpenModUpdates}
+    />
+  );
+
+  const heading = environmentsLoading
+    ? 'Checking your game installs'
+    : environments.length === 0
+      ? 'Set up your first game install'
+      : attentionCount > 0
+        ? (attentionCount === 1 ? '1 install needs attention' : `${attentionCount} installs need attention`)
+        : 'Ready to play';
+
   return (
-    <section className="home-dashboard" aria-label="Home dashboard">
-      <div className="home-dashboard__header">
-        <div>
-          <span className="workspace-eyebrow">Home</span>
-          <h1>Welcome back to SIMM</h1>
-          <p>Review install health, updates, and common mod manager actions from one desktop workspace.</p>
-        </div>
-        <div className="home-dashboard__header-actions">
-          <SimmButton type="button" className="btn btn-primary" onClick={onOpenModLibrary} aria-label="Open Mod Library from dashboard">
+    <section className="home" aria-label="Home">
+      <header className="home__header">
+        <h1 className="home__title">{heading}</h1>
+        {!environmentsLoading && environments.length > 0 && (
+          <SimmButton type="button" variant="ghost" onClick={onOpenModLibrary}>
             <Icon name="boxOpen" />
-            Mod Library
+            Find Mods
           </SimmButton>
-          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenWizard}>
+        )}
+      </header>
+
+      {environmentsLoading ? (
+        <div className="home__loading" role="status" aria-live="polite" aria-label="Loading environments">
+          <Skeleton className="home__skeleton home__skeleton--primary" />
+          <Skeleton className="home__skeleton" />
+        </div>
+      ) : environments.length === 0 ? (
+        <div className="ui-empty home__empty">
+          <p className="ui-empty__title">No game installs yet</p>
+          <p className="ui-empty__copy">
+            Import your Steam copy of Schedule I or add another folder. SIMM keeps mods for each install separate.
+          </p>
+          <SimmButton type="button" onClick={onOpenWizard}>
             <Icon name="plus" />
             Add Environment
           </SimmButton>
-          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenProfiles}>
-            <Icon name="userGear" />
-            Profiles
-          </SimmButton>
         </div>
-      </div>
-
-      <div className="home-dashboard__stats">
-        <article className="home-dashboard__stat">
-          <span>Installs</span>
-          {environmentsLoading ? (
-            <>
-              <Skeleton className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
-              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
-            </>
-          ) : (
-            <>
-              <strong>{completed.length}</strong>
-              <small>{steamCount} Steam linked</small>
-            </>
+      ) : (
+        <>
+          <ul className="home__list home__list--primary" aria-label="Selected environment">
+            {primaryEnvironment && renderRow(primaryEnvironment, true)}
+          </ul>
+          {otherEnvironments.length > 0 && (
+            <section className="home__section" aria-labelledby="home-other-envs">
+              <h2 className="ui-section-title" id="home-other-envs">Other environments</h2>
+              <ul className="home__list">
+                {otherEnvironments.map((environment) => renderRow(environment, false))}
+              </ul>
+            </section>
           )}
-        </article>
-        <article className="home-dashboard__stat">
-          <span>Game Updates</span>
-          {environmentsLoading ? (
-            <>
-              <Skeleton className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
-              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
-            </>
-          ) : (
-            <>
-              <strong>{updateCount}</strong>
-              <small>{updateCount > 0 ? 'Attention needed' : 'Everything current'}</small>
-            </>
-          )}
-        </article>
-        <article className="home-dashboard__stat">
-          <span>Downloads</span>
-          <strong>{downloadsInProgress}</strong>
-          <small>{downloadsInProgress > 0 ? 'In progress' : 'Queue is clear'}</small>
-        </article>
-        <article className="home-dashboard__stat">
-          <span>Last Check</span>
-          {environmentsLoading ? (
-            <>
-              <Skeleton className="loading-skeleton loading-skeleton--wide" aria-hidden="true" />
-              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
-            </>
-          ) : (
-            <>
-              <strong title={formatDashboardTimeDetail(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
-              <small>Environment metadata</small>
-            </>
-          )}
-        </article>
-      </div>
+        </>
+      )}
 
-      <div className="home-dashboard__layout">
-        <section className="home-dashboard__panel home-dashboard__panel--wide">
-          <div className="home-dashboard__panel-header">
-            <div>
-              <span className="workspace-eyebrow">Status</span>
-              <h2>
-                {environmentsLoading
-                  ? 'Loading your game installs'
-                  : updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}
-              </h2>
-            </div>
-            <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => onOpenEnvironments()} aria-label="Open Environments from dashboard">
-              <Icon name="hardDrive" />
-              Environments
-            </SimmButton>
-          </div>
-          {environmentsLoading ? (
-            <div className="home-dashboard__focus home-dashboard__focus--loading" role="status" aria-live="polite">
-              <div>
-                <Skeleton className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
-                <Skeleton className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
-              </div>
-              <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--loading">Scanning</SimmBadge>
-            </div>
-          ) : (
-            <SimmButton
-              type="button"
-              variant="ghost"
-              className="home-dashboard__focus home-dashboard__focus--action h-auto"
-              onClick={primaryEnvironment ? () => onOpenEnvironments(primaryEnvironment.id) : onOpenWizard}
-              aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
-            >
-              <div>
-                <strong>{primaryEnvironment?.name ?? 'No environments yet'}</strong>
-                <p>
-                  {primaryEnvironment
-                    ? `${primaryEnvironment.runtime} ${primaryEnvironment.currentGameVersion ?? primaryEnvironment.updateGameVersion ?? 'version unknown'} on ${primaryEnvironment.branch}.`
-                    : 'Add or import a Schedule I install to start managing mods.'}
-                </p>
-              </div>
-              {primaryEnvironment?.updateAvailable && (
-                <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--warn">
-                  Update available
-                </SimmBadge>
-              )}
-            </SimmButton>
-          )}
-          <div className="home-dashboard__quick-grid">
-            <SimmButton type="button" variant="ghost" onClick={onOpenModUpdates}>
-              <Icon name="arrowUp" />
-              Mod Updates
-            </SimmButton>
-            <SimmButton type="button" variant="ghost" onClick={onOpenModLibrary}>
-              <Icon name="boxOpen" />
-              Discover Mods
-            </SimmButton>
-            <SimmButton type="button" variant="ghost" onClick={onOpenSettings}>
-              <Icon name="sliders" />
-              Preferences
-            </SimmButton>
-            <SimmButton type="button" variant="ghost" onClick={onOpenProfiles}>
-              <Icon name="userGear" />
-              Profiles
-            </SimmButton>
-          </div>
-        </section>
-
-        <aside className="home-dashboard__panel home-dashboard__feed" aria-label="News and changes">
-          <div className="home-dashboard__panel-header">
-            <div>
-              <span className="workspace-eyebrow">Updates</span>
-              <h2>News & Changes</h2>
-            </div>
-          </div>
-          <div className="home-dashboard__feed-list">
-            {appUpdateState.status === 'available' && (
-              <article className="home-dashboard__feed-item home-dashboard__feed-item--action">
-                <span>{appUpdateState.result.channel} channel</span>
-                <strong>SIMM {appUpdateState.result.version} is available</strong>
-                <p>{summarizeFeedText(appUpdateState.result.notes) || 'A new SIMM build is ready to install.'}</p>
-              </article>
-            )}
-
-            {feedStatus === 'loading' && (
-              <article className="home-dashboard__feed-item">
-                <span>GitHub</span>
-                <strong>Loading project updates</strong>
-                <p>Checking recent releases and changelog entries.</p>
-              </article>
-            )}
-
-            {feedStatus === 'empty' && (
-              <article className="home-dashboard__feed-item">
-                <span>Offline</span>
-                <strong>Project feed unavailable</strong>
-                <p>Recent SIMM releases and changelog entries will appear here when GitHub can be reached.</p>
-              </article>
-            )}
-
-            {feedItems.map((item) => (
-              <article className="home-dashboard__feed-item" key={item.id}>
-                <span>{item.source}{item.date ? ` / ${formatFeedDate(item.date)}` : ''}</span>
-                {item.url ? (
-                  <a href={item.url} target="_blank" rel="noreferrer">{item.title}</a>
-                ) : (
-                  <strong>{item.title}</strong>
-                )}
-                {item.detail && <p>{item.detail}</p>}
-                <ul className="home-dashboard__feed-points">
-                  {item.bullets.map((bullet) => (
-                    <li key={bullet}>{bullet}</li>
-                  ))}
-                </ul>
-              </article>
+      <section className="home__section home__news" aria-labelledby="home-news">
+        <h2 className="ui-section-title" id="home-news">What&apos;s new in SIMM</h2>
+        {appUpdateState.status === 'available' && (
+          <p className="home__news-update">
+            SIMM {appUpdateState.result.version} is available on the {appUpdateState.result.channel} channel.
+          </p>
+        )}
+        {feedStatus === 'loading' && <p className="ui-subtle">Loading recent releases…</p>}
+        {feedStatus === 'empty' && <p className="ui-subtle">Release notes appear here when GitHub can be reached.</p>}
+        {feedStatus === 'ready' && (
+          <ul className="home__news-list">
+            {feedItems.slice(0, 2).map((item) => (
+              <li key={item.id} className="home__news-item">
+                <div className="home__news-heading">
+                  {item.url ? (
+                    <a href={item.url} target="_blank" rel="noreferrer">{item.title}</a>
+                  ) : (
+                    <strong>{item.title}</strong>
+                  )}
+                  {item.date && <span className="ui-subtle ui-num">{formatFeedDate(item.date)}</span>}
+                </div>
+                <p className="home__news-summary">{item.bullets.slice(0, 2).join(' · ')}</p>
+              </li>
             ))}
-          </div>
-        </aside>
-      </div>
+          </ul>
+        )}
+      </section>
     </section>
   );
 }
 
 function AppShellDownloadsDock({
-  badge,
-  icon,
-  label,
-  shellNavCollapsed,
+  activeCount,
+  totalCount,
   onOpenProfile,
 }: {
-  badge: number;
-  icon: 'download';
-  label: string;
-  shellNavCollapsed: boolean;
+  activeCount: number;
+  totalCount: number;
   onOpenProfile: (profileId: string) => void;
 }) {
   const [downloadsPanelMounted, setDownloadsPanelMounted] = useState(false);
@@ -954,31 +935,30 @@ function AppShellDownloadsDock({
   return (
     <>
       <div
-        className="app-shell-sidebar__download-dock"
+        className="statusbar-downloads"
         onPointerEnter={clearDownloadsPanelDismissTimer}
         onPointerLeave={scheduleDownloadsPanelDismiss}
       >
-        <SimmButton
+        <button
           type="button"
-          variant="ghost"
-          className="app-shell-sidebar__tool-item app-shell-sidebar__download-item"
+          className={`statusbar-downloads__button${activeCount > 0 ? ' statusbar-downloads__button--active' : ''}`}
           onClick={toggleDownloadsPanel}
           aria-expanded={downloadsPanelVisible}
           aria-controls="downloads-popover"
-          title={label}
+          aria-label={activeCount > 0 ? `Downloads, ${activeCount} active` : `Downloads ${totalCount}`}
         >
-          <Icon name={icon} />
-          <span>{label}</span>
-          <SimmBadge variant="secondary" className="app-shell-sidebar__tool-badge">{badge}</SimmBadge>
-        </SimmButton>
+          <Icon name={activeCount > 0 ? 'spinner' : 'download'} spin={activeCount > 0} />
+          <span>{activeCount > 0 ? `${activeCount} downloading` : 'Downloads'}</span>
+          {activeCount === 0 && totalCount > 0 && <span className="statusbar-downloads__count">{totalCount}</span>}
+        </button>
       </div>
       {downloadsPanelMounted && (
         <div
           className={[
             'downloads-popover',
+            'downloads-popover--statusbar',
             downloadsPanelVisible ? 'downloads-popover--open' : 'downloads-popover--closing',
-            shellNavCollapsed ? 'downloads-popover--nav-collapsed' : '',
-          ].filter(Boolean).join(' ')}
+          ].join(' ')}
           id="downloads-popover"
           role="dialog"
           aria-label="Downloads"
@@ -1002,20 +982,54 @@ function AppShellDownloadsDock({
   );
 }
 
+const ENVIRONMENT_SCOPED_VIEWS = new Set<WorkspaceRoute['view']>(['environments', 'mods', 'plugins', 'userLibs', 'logs', 'config']);
+
+function ShellNavItem({
+  label,
+  icon,
+  active,
+  onClick,
+  count,
+  countTone,
+  showLabel,
+}: {
+  label: string;
+  icon: IconName;
+  active: boolean;
+  onClick: () => void;
+  count?: number;
+  countTone?: 'attention';
+  showLabel: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={`shell-nav__item${active ? ' shell-nav__item--active' : ''}`}
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      title={label}
+    >
+      <Icon name={icon} />
+      {showLabel && <span className="shell-nav__label">{label}</span>}
+      {showLabel && count !== undefined && count > 0 && (
+        <span className={`shell-nav__count${countTone === 'attention' ? ' shell-nav__count--attention' : ''}`}>{count}</span>
+      )}
+    </button>
+  );
+}
+
 const AppShellSidebar = memo(function AppShellSidebar({
   activeWorkspace,
   currentEnvironmentId,
-  downloadsBadgeCount,
   environments,
   environmentsLoading,
+  modUpdateCounts,
+  totalModUpdates,
+  telemetryAvailable,
   onEnvironmentSelect,
-  onOpenEnvironmentWorkspace,
-  onOpenEnvironmentsWorkspace,
+  onOpenWorkspace,
   onOpenHome,
   onOpenLibrary,
-  onOpenProfiles,
-  onOpenProfile,
-  onOpenSaveBackups,
   onShellNavTransitionEnd,
   onToggleShellNavigation,
   shellNavAnimating,
@@ -1024,226 +1038,126 @@ const AppShellSidebar = memo(function AppShellSidebar({
 }: {
   activeWorkspace: WorkspaceRoute;
   currentEnvironmentId: string | null;
-  downloadsBadgeCount: number;
   environments: Environment[];
   environmentsLoading: boolean;
+  modUpdateCounts: Map<string, number>;
+  totalModUpdates: number;
+  telemetryAvailable: boolean;
   onEnvironmentSelect: (environmentId: string) => void;
-  onOpenEnvironmentWorkspace: (view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => void;
-  onOpenEnvironmentsWorkspace: () => void;
+  onOpenWorkspace: (route: Exclude<WorkspaceRoute, { view: 'home' }>) => void;
   onOpenHome: () => void;
   onOpenLibrary: () => void;
-  onOpenProfiles: () => void;
-  onOpenProfile: (profileId: string) => void;
-  onOpenSaveBackups: () => void;
   onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
   onToggleShellNavigation: () => void;
   shellNavAnimating: boolean;
   shellNavCollapsed: boolean;
   shellNavExpandedContentVisible: boolean;
 }) {
-  const [collapsedShellSections, setCollapsedShellSections] = useState({
-    environments: false,
-    tools: false,
-  });
-
-  const toggleShellSection = useCallback((section: 'environments' | 'tools') => {
-    setCollapsedShellSections((previous) => ({
-      ...previous,
-      [section]: !previous[section],
-    }));
-  }, []);
-
   const sortedEnvironments = sortEnvironmentsForDisplay(environments);
+  const environmentScoped = ENVIRONMENT_SCOPED_VIEWS.has(activeWorkspace.view);
+  const view = activeWorkspace.view;
   const shellSidebarClassName = [
     'app-shell-sidebar',
     shellNavCollapsed ? 'app-shell-sidebar--collapsed' : '',
     shellNavAnimating ? 'app-shell-sidebar--animating' : '',
     shellNavExpandedContentVisible ? 'app-shell-sidebar--expanded-content-visible' : '',
   ].filter(Boolean).join(' ');
-  const toolNavItems = [
-    {
-      key: 'home',
-      label: 'Home',
-      icon: 'house',
-      active: activeWorkspace.view === 'home',
-      onClick: onOpenHome,
-    },
-    {
-      key: 'environments',
-      label: 'Environments',
-      icon: 'hardDrive',
-      active: activeWorkspace.view === 'environments' || activeWorkspace.view === 'wizard',
-      onClick: () => onOpenEnvironmentsWorkspace(),
-    },
-    {
-      key: 'library',
-      label: 'Mod Library',
-      icon: 'boxOpen',
-      active: activeWorkspace.view === 'library',
-      onClick: onOpenLibrary,
-    },
-    {
-      key: 'profiles',
-      label: 'Profiles',
-      icon: 'userGear',
-      active: activeWorkspace.view === 'profiles',
-      onClick: onOpenProfiles,
-    },
-    {
-      key: 'mods',
-      label: 'Installed Mods',
-      icon: 'boxArchive',
-      active: activeWorkspace.view === 'mods',
-      onClick: () => onOpenEnvironmentWorkspace('mods'),
-    },
-    {
-      key: 'config',
-      label: 'Config Files',
-      icon: 'fileCode',
-      active: activeWorkspace.view === 'config',
-      onClick: () => onOpenEnvironmentWorkspace('config'),
-    },
-    {
-      key: 'logs',
-      label: 'Logs',
-      icon: 'fileLines',
-      active: activeWorkspace.view === 'logs',
-      onClick: () => onOpenEnvironmentWorkspace('logs'),
-    },
-    {
-      key: 'saveBackups',
-      label: 'Save Management',
-      icon: 'boxArchive',
-      active: activeWorkspace.view === 'saveBackups',
-      onClick: onOpenSaveBackups,
-    },
-  ] as const;
 
   return (
     <aside className={shellSidebarClassName} aria-label="Primary navigation" onTransitionEnd={onShellNavTransitionEnd}>
-      <SimmButton
-        type="button"
-        variant="ghost"
-        className="app-shell-sidebar__collapse-toggle"
-        onClick={onToggleShellNavigation}
-        aria-label={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
-        title={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
-      >
-        <Icon name={shellNavCollapsed ? 'anglesRight' : 'anglesLeft'} />
-      </SimmButton>
-      {shellNavExpandedContentVisible ? (
-        <section className="app-shell-sidebar__section app-shell-sidebar__section--environments">
-          <SimmButton
+      <nav className="shell-nav shell-nav--primary" aria-label="Workspaces">
+        <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Home" icon="house" active={view === 'home'} onClick={onOpenHome} />
+        <ShellNavItem
+          showLabel={shellNavExpandedContentVisible}
+          label="Mod Library"
+          icon="boxOpen"
+          active={view === 'library' || view === 'securityReport'}
+          onClick={onOpenLibrary}
+          count={totalModUpdates}
+          countTone="attention"
+        />
+        <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Profiles" icon="userGear" active={view === 'profiles'} onClick={() => onOpenWorkspace({ view: 'profiles' })} />
+        <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Saves" icon="save" active={view === 'saveBackups'} onClick={() => onOpenWorkspace({ view: 'saveBackups' })} />
+      </nav>
+
+      <section className="shell-envs" aria-labelledby="shell-envs-title">
+        <div className="shell-envs__header">
+          <h2 className="shell-envs__title" id="shell-envs-title">{shellNavExpandedContentVisible ? 'Environments' : <span className="sr-only">Environments</span>}</h2>
+          <button
             type="button"
-            variant="ghost"
-            className="app-shell-sidebar__section-toggle"
-            onClick={() => toggleShellSection('environments')}
-            aria-expanded={!collapsedShellSections.environments}
+            className={`shell-envs__add${view === 'wizard' ? ' shell-envs__add--active' : ''}`}
+            onClick={() => onOpenWorkspace({ view: 'wizard' })}
+            aria-label="Add Environment"
+            title="Add Environment"
           >
-            <span>Environments</span>
-            <Icon name={collapsedShellSections.environments ? 'chevronRight' : 'chevronDown'} />
-          </SimmButton>
-          {!collapsedShellSections.environments ? (
-            <div className="app-shell-sidebar__section-body">
-              {environmentsLoading && sortedEnvironments.length === 0 ? (
-                <div className="app-shell-sidebar__environment-list app-shell-sidebar__environment-list--loading" role="status" aria-live="polite" aria-label="Loading environments">
-                  {[0, 1, 2].map((index) => (
-                    <div key={index} className="app-shell-sidebar__environment-item app-shell-sidebar__environment-item--skeleton">
-                      <Skeleton className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
-                      <Skeleton className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
-                    </div>
-                  ))}
-                </div>
-              ) : sortedEnvironments.length > 0 ? (
-                <div className="app-shell-sidebar__environment-list">
-                  {sortedEnvironments.map((environment) => (
-                    <SimmButton
-                      key={environment.id}
-                      type="button"
-                      variant="ghost"
-                      className={`app-shell-sidebar__environment-item${currentEnvironmentId === environment.id ? ' app-shell-sidebar__environment-item--active' : ''}`}
-                      onClick={() => onEnvironmentSelect(environment.id)}
-                      aria-current={currentEnvironmentId === environment.id ? 'page' : undefined}
-                      title={`${environment.name}${environment.updateAvailable ? ' - Update available' : environment.status === 'completed' ? ' - Ready' : ''}`}
-                    >
-                      <span className="app-shell-sidebar__environment-icon" aria-hidden="true">
-                        <Icon name={environment.environmentType === 'Steam' ? 'steam' : 'hardDrive'} />
-                      </span>
-                      <span className="app-shell-sidebar__environment-name">{environment.name}</span>
-                      {environment.updateAvailable ? (
-                        <SimmBadge variant="secondary" className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
-                          Update
-                        </SimmBadge>
-                      ) : environment.status === 'completed' ? (
-                        <SimmBadge variant="outline" className="app-shell-sidebar__environment-meta">Ready</SimmBadge>
-                      ) : null}
-                    </SimmButton>
-                  ))}
-                </div>
-              ) : (
-                <div className="app-shell-sidebar__empty">
-                  <span>No environments yet.</span>
-                </div>
-              )}
-            </div>
-          ) : null}
-        </section>
-      ) : null}
-      <section className="app-shell-sidebar__section app-shell-sidebar__section--tools">
-        <SimmButton
-          type="button"
-          variant="ghost"
-          className="app-shell-sidebar__section-toggle"
-          onClick={() => toggleShellSection('tools')}
-          aria-expanded={!collapsedShellSections.tools}
-        >
-          <span>Tools</span>
-          <Icon name={collapsedShellSections.tools ? 'chevronRight' : 'chevronDown'} />
-        </SimmButton>
-        {!collapsedShellSections.tools || shellNavCollapsed ? (
-          <div className="app-shell-sidebar__section-body">
-            <div className="app-shell-sidebar__tool-list">
-              {toolNavItems.map((item) => (
-                <SimmButton
-                  key={item.key}
-                  type="button"
-                  variant="ghost"
-                  className={`app-shell-sidebar__tool-item${item.active ? ' app-shell-sidebar__tool-item--active' : ''}`}
-                  onClick={item.onClick}
-                  aria-current={item.active ? 'page' : undefined}
-                  title={item.label}
-                >
-                  <Icon name={item.icon} />
-                  <span>{item.label}</span>
-                </SimmButton>
-              ))}
-            </div>
+            <Icon name="plus" />
+          </button>
+        </div>
+        {environmentsLoading && sortedEnvironments.length === 0 ? (
+          <div className="shell-envs__list" role="status" aria-live="polite" aria-label="Loading environments">
+            {[0, 1, 2].map((index) => (
+              <div key={index} className="shell-env shell-env--skeleton">
+                <Skeleton className="shell-env__skeleton" aria-hidden="true" />
+              </div>
+            ))}
           </div>
-        ) : null}
+        ) : sortedEnvironments.length > 0 ? (
+          <ul className="shell-envs__list">
+            {sortedEnvironments.map((environment) => {
+              const active = environmentScoped && currentEnvironmentId === environment.id;
+              const status = summarizeEnvironmentStatus(environment, modUpdateCounts.get(environment.id) ?? 0);
+              return (
+                <li key={environment.id}>
+                  <button
+                    type="button"
+                    className={`shell-env${active ? ' shell-env--active' : ''}`}
+                    onClick={() => onEnvironmentSelect(environment.id)}
+                    aria-current={active ? 'page' : undefined}
+                    title={`${environment.name} · ${runtimeLabel(environment.runtime)} · ${status.label}`}
+                  >
+                    <span className={`shell-env__dot shell-env__dot--${status.tone}`} aria-hidden="true" />
+                    {shellNavExpandedContentVisible && (
+                      <span className="shell-env__text">
+                        <span className="shell-env__name">{environment.name}</span>
+                        <span className="shell-env__meta">
+                          {runtimeLabel(environment.runtime)} · {status.label}
+                        </span>
+                      </span>
+                    )}
+                    <span className="shell-env__initial" aria-hidden="true">{environment.name.trim().charAt(0).toUpperCase()}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="shell-envs__empty">No environments yet.</p>
+        )}
       </section>
-      <AppShellDownloadsDock
-        badge={downloadsBadgeCount}
-        label="Downloads"
-        icon="download"
-        shellNavCollapsed={shellNavCollapsed}
-        onOpenProfile={onOpenProfile}
-      />
+
+      <nav className="shell-nav shell-nav--secondary" aria-label="App">
+        <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Accounts" icon="userCircle" active={view === 'accounts'} onClick={() => onOpenWorkspace({ view: 'accounts' })} />
+        {telemetryAvailable && (
+          <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Telemetry" icon="waveSquare" active={view === 'telemetry'} onClick={() => onOpenWorkspace({ view: 'telemetry' })} />
+        )}
+        <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Help" icon="circleQuestion" active={view === 'help'} onClick={() => onOpenWorkspace({ view: 'help' })} />
+        <ShellNavItem showLabel={shellNavExpandedContentVisible} label="Settings" icon="cog" active={view === 'settings'} onClick={() => onOpenWorkspace({ view: 'settings' })} />
+        <button
+          type="button"
+          className="shell-nav__item shell-nav__collapse"
+          onClick={onToggleShellNavigation}
+          aria-label={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+          title={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+        >
+          <Icon name={shellNavCollapsed ? 'anglesRight' : 'anglesLeft'} />
+          {shellNavExpandedContentVisible && <span className="shell-nav__label">Collapse</span>}
+        </button>
+      </nav>
     </aside>
   );
 });
 
-type ShellUtilityAction = {
-  key: string;
-  label: string;
-  icon: IconName;
-  active: boolean;
-  variant: 'btn-primary' | 'btn-secondary';
-  onClick: () => void;
-  disabled: boolean;
-  title: string;
-};
-
-function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUtilityAction[] }) {
+function AppWindowChrome() {
   const appWindow = getCurrentWindow();
   const [isMaximized, setIsMaximized] = useState(false);
 
@@ -1322,29 +1236,12 @@ function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUti
       <div className="window-brand" data-tauri-drag-region>
         <img src={appIcon256} alt="SIMM" className="window-brand-icon" />
         <div className="window-brand-text">
-          <strong>SIMM - Schedule I Mod Manager</strong>
+          <strong>SIMM</strong>
+          <span>Schedule I Mod Manager</span>
         </div>
       </div>
 
       <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
-
-      <div className="window-toolbar-actions window-toolbar-actions--shell" aria-label="Shell actions">
-        {utilityActions.map((action) => (
-          <SimmButton
-            key={action.key}
-            type="button"
-            variant={action.variant === 'btn-primary' ? 'default' : 'secondary'}
-            className={`btn ${action.variant} app-shell-toolbar-button${action.active ? ' app-shell-toolbar-button--active' : ''}`}
-            onClick={action.onClick}
-            aria-current={action.active ? 'page' : undefined}
-            disabled={action.disabled}
-            title={action.title}
-          >
-            <Icon name={action.icon} spin={action.icon === 'spinner'} />
-            <span>{action.label}</span>
-          </SimmButton>
-        ))}
-      </div>
 
       <div className="window-controls" aria-label="Window controls">
         <SimmIconButton
@@ -2472,6 +2369,7 @@ function AppContent() {
         return (
           <EnvironmentList
             onOpenWorkspace={openWorkspace}
+            onlyEnvironmentId={selectedEnvironmentId}
             focusedEnvironmentId={selectedEnvironmentId}
             focusedEnvironmentRequestId={environmentFocusRequestId}
           />
@@ -2631,7 +2529,6 @@ function AppContent() {
         ?? environments[0]?.id
         ?? null;
   const currentEnvironment = currentEnvironmentId ? getEnvironmentById(currentEnvironmentId) : null;
-  const isShellLaunchInProgress = currentEnvironmentId !== null && isLaunchPending(launchAttempts.get(currentEnvironmentId));
   const downloadsInProgress = downloads.filter((download) => (
     download.status === 'queued'
     || download.status === 'downloading'
@@ -2651,13 +2548,6 @@ function AppContent() {
     }
     openWorkspace({ view: 'environments' });
   }, [currentEnvironmentId, openWorkspace, selectEnvironmentForShell]);
-  const openEnvironmentWorkspace = useCallback((view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
-    if (!currentEnvironmentId) {
-      openWorkspace({ view: 'wizard' });
-      return;
-    }
-    pushWorkspace({ view, environmentId: currentEnvironmentId });
-  }, [currentEnvironmentId, openWorkspace, pushWorkspace]);
   const openLibraryWorkspaceFromShell = useCallback(() => {
     openLibraryWorkspace();
   }, [openLibraryWorkspace]);
@@ -2693,100 +2583,70 @@ function AppContent() {
         openEnvironmentsWorkspace(environmentId);
         return;
       default:
-        selectEnvironmentForShell(environmentId);
+        openEnvironmentsWorkspace(environmentId);
         return;
     }
   }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace, selectEnvironmentForShell]);
 
-  const handleShellLaunchGame = useCallback(async () => {
-    if (!currentEnvironment) { openWorkspace({ view: 'wizard' }); return; }
-    await requestLaunch(currentEnvironment, 'steam');
-  }, [currentEnvironment, openWorkspace, requestLaunch]);
-  const telemetryUtilityAction: ShellUtilityAction = {
-    key: 'telemetry',
-    label: 'Telemetry',
-    icon: 'waveSquare',
-    active: activeWorkspace.view === 'telemetry',
-    variant: 'btn-secondary',
-    onClick: () => openWorkspace({ view: 'telemetry' }),
-    disabled: false,
-    title: 'Open live telemetry diagnostics',
-  };
-  const utilityActions: readonly ShellUtilityAction[] = [
-    {
-      key: 'launch',
-      label: isShellLaunchInProgress ? 'Launching...' : 'Launch Game',
-      icon: isShellLaunchInProgress ? 'spinner' : 'play',
-      active: false,
-      variant: 'btn-primary' as const,
-      onClick: handleShellLaunchGame,
-      disabled: isShellLaunchInProgress || !currentEnvironmentId,
-      title: currentEnvironment
-        ? `Launch ${currentEnvironment.name} via Steam`
-        : 'Select or create an environment to launch the game',
-    },
-    {
-      key: 'wizard',
-      label: 'Add Environment',
-      icon: 'plus',
-      active: activeWorkspace.view === 'wizard',
-      variant: 'btn-secondary' as const,
-      onClick: () => openWorkspace({ view: 'wizard' }),
-      disabled: false,
-      title: 'Create or import another environment',
-    },
-    {
-      key: 'accounts',
-      label: 'Accounts',
-      icon: 'userCircle',
-      active: activeWorkspace.view === 'accounts',
-      variant: 'btn-secondary' as const,
-      onClick: () => openWorkspace({ view: 'accounts' }),
-      disabled: false,
-      title: 'Open connected accounts and services',
-    },
-    {
-      key: 'help',
-      label: 'Help',
-      icon: 'circleQuestion',
-      active: activeWorkspace.view === 'help',
-      variant: 'btn-secondary' as const,
-      onClick: () => openWorkspace({ view: 'help' }),
-      disabled: false,
-      title: 'Open help and troubleshooting guidance',
-    },
-    ...(telemetryAvailable ? [telemetryUtilityAction] : []),
-    {
-      key: 'settings',
-      label: 'Settings',
-      icon: 'cog',
-      active: activeWorkspace.view === 'settings',
-      variant: 'btn-secondary' as const,
-      onClick: () => openWorkspace({ view: 'settings' }),
-      disabled: false,
-      title: 'Open application settings',
-    },
-  ];
+  const { byEnvironment: modUpdateCounts, distinctTotal: distinctModUpdateCount } = useEnvironmentModUpdateCounts(environments);
+  const environmentWorkspaceTab: EnvironmentWorkspaceTab | null = (() => {
+    switch (activeWorkspace.view) {
+      case 'environments':
+        return 'overview';
+      case 'mods':
+      case 'plugins':
+      case 'userLibs':
+      case 'config':
+      case 'logs':
+        return activeWorkspace.view;
+      default:
+        return null;
+    }
+  })();
+  const workspaceEnvironment = environmentWorkspaceTab ? currentEnvironment : null;
+
+  const launchEnvironment = useCallback((environment: Environment) => {
+    void requestLaunch(environment, readPreferredLaunchMethod(environment.id, settings?.platform));
+  }, [requestLaunch, settings?.platform]);
+
+  const selectEnvironmentWorkspaceTab = useCallback((tab: EnvironmentWorkspaceTab) => {
+    if (!currentEnvironmentId) {
+      return;
+    }
+    selectEnvironmentForShell(currentEnvironmentId);
+    const route: Exclude<WorkspaceRoute, { view: 'home' }> = tab === 'overview'
+      ? { view: 'environments' }
+      : { view: tab, environmentId: currentEnvironmentId };
+    if (environmentWorkspaceTab) {
+      replaceWorkspace(route);
+      return;
+    }
+    openWorkspace(route);
+  }, [currentEnvironmentId, environmentWorkspaceTab, openWorkspace, replaceWorkspace, selectEnvironmentForShell]);
+
+  const workspacePanel = (
+    <Suspense fallback={<WorkspacePanelFallback />}>
+      {renderWorkspacePanel()}
+    </Suspense>
+  );
 
   return (
     <div className="app app-desktop-shell">
       <div className="app-window">
-        <AppWindowChrome utilityActions={utilityActions} />
+        <AppWindowChrome />
         <div className={`app-body ${shellNavCollapsed ? 'app-body--nav-collapsed' : ''}`}>
           <AppShellSidebar
             activeWorkspace={activeWorkspace}
             currentEnvironmentId={currentEnvironmentId}
-            downloadsBadgeCount={downloadsBadgeCount}
             environments={environments}
             environmentsLoading={environmentsLoading}
+            modUpdateCounts={modUpdateCounts}
+            totalModUpdates={distinctModUpdateCount}
+            telemetryAvailable={telemetryAvailable}
             onEnvironmentSelect={handleShellEnvironmentSelect}
-            onOpenEnvironmentWorkspace={openEnvironmentWorkspace}
-            onOpenEnvironmentsWorkspace={openEnvironmentsWorkspace}
+            onOpenWorkspace={openWorkspace}
             onOpenHome={goHome}
             onOpenLibrary={openLibraryWorkspaceFromShell}
-            onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
-            onOpenProfile={(profileId) => openWorkspace({ view: 'profiles', profileId })}
-            onOpenSaveBackups={() => openWorkspace({ view: 'saveBackups' })}
             onShellNavTransitionEnd={handleShellNavTransitionEnd}
             onToggleShellNavigation={toggleShellNavigation}
             shellNavAnimating={shellNavAnimating}
@@ -2800,29 +2660,39 @@ function AppContent() {
                   <HomeDashboard
                     environments={environments}
                     environmentsLoading={environmentsLoading}
-                    downloadsInProgress={downloadsInProgress}
                     appUpdateState={appUpdateState}
                     selectedEnvironmentId={currentEnvironmentId}
-                    onOpenEnvironments={openEnvironmentsWorkspace}
-                    onOpenModLibrary={() => openLibraryWorkspace()}
-                    onOpenModUpdates={() => openLibraryWorkspace({
-                      initialTab: 'updates',
-                      navigationState: {
-                        libraryTab: 'updates',
-                      },
-                    })}
+                    platform={settings?.platform}
+                    onOpenEnvironment={(environmentId) => openEnvironmentsWorkspace(environmentId)}
+                    onOpenModUpdates={(environmentId) => {
+                      selectEnvironmentForShell(environmentId);
+                      openWorkspace({ view: 'mods', environmentId, initialTab: 'updates' });
+                    }}
                     onOpenWizard={() => openWorkspace({ view: 'wizard' })}
-                    onOpenSettings={() => openWorkspace({ view: 'settings' })}
-                    onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
+                    onOpenModLibrary={() => openLibraryWorkspace()}
                   />
+                </main>
+              </div>
+            ) : workspaceEnvironment && environmentWorkspaceTab ? (
+              <div className="workspace-layout">
+                <main className="app-main workspace-main app-workspace-main env-workspace">
+                  <EnvironmentWorkspaceHeader
+                    environment={workspaceEnvironment}
+                    activeTab={environmentWorkspaceTab}
+                    modUpdateCount={modUpdateCounts.get(workspaceEnvironment.id) ?? 0}
+                    launching={isLaunchPending(launchAttempts.get(workspaceEnvironment.id))}
+                    onSelectTab={selectEnvironmentWorkspaceTab}
+                    onLaunch={() => launchEnvironment(workspaceEnvironment)}
+                  />
+                  <div className={`env-workspace__body env-workspace__body--${environmentWorkspaceTab}`}>
+                    {workspacePanel}
+                  </div>
                 </main>
               </div>
             ) : (
               <div className="workspace-layout">
                 <main className="app-main workspace-main app-workspace-main">
-                  <Suspense fallback={<WorkspacePanelFallback />}>
-                    {renderWorkspacePanel()}
-                  </Suspense>
+                  {workspacePanel}
                 </main>
               </div>
             )}
@@ -2839,6 +2709,13 @@ function AppContent() {
           })}
           appUpdateAvailable={appUpdateState.status === 'available'}
           onOpenAppUpdate={() => void handleInstallAppUpdate()}
+          downloads={(
+            <AppShellDownloadsDock
+              activeCount={downloadsInProgress}
+              totalCount={downloadsBadgeCount}
+              onOpenProfile={(profileId) => openWorkspace({ view: 'profiles', profileId })}
+            />
+          )}
         />
       </div>
 
@@ -2897,7 +2774,6 @@ function AppContent() {
           >
             <header className="mod-integration-notice__header">
               <div>
-                <span className="mod-integration-notice__eyebrow">Your decision is needed</span>
                 <strong id="mod-integration-notice-title">
                   {modIntegrationNotice.operation === 'requestManagement'
                     ? 'Mod management request'
@@ -2946,7 +2822,7 @@ function AppContent() {
                 onClick={() => setModIntegrationReviewEnvironmentId(modIntegrationNotice.environmentId)}
                 disabled={!environment}
               >
-                Review request
+                Review Request
               </SimmButton>
             </div>
           </section>
@@ -3014,7 +2890,7 @@ function AppContent() {
           >
             <DialogHeader className="modal-header">
               <DialogTitle>Select Runtime</DialogTitle>
-              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()} aria-label="Close runtime selection dialog">×</SimmButton>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()} aria-label="Close runtime selection dialog"><Icon name="times" /></SimmButton>
             </DialogHeader>
             <div className="app-dialog__body app-runtime-dialog__body">
               <div className="app-dialog__callout app-dialog__callout--info">
@@ -3127,7 +3003,7 @@ function AppContent() {
           </div>
           <DialogFooter className="app-dialog__footer">
             <div className="app-dialog__actions">
-              <SimmButton className="btn btn-secondary" onClick={() => void resolveClosePrompt('quit')}>Quit SIMM</SimmButton>
+              <SimmButton variant="secondary" className="btn btn-secondary" onClick={() => void resolveClosePrompt('quit')}>Quit SIMM</SimmButton>
               <SimmButton className="btn btn-primary" onClick={() => void resolveClosePrompt('tray')} autoFocus>Hide to Tray</SimmButton>
             </div>
           </DialogFooter>

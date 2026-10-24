@@ -1,0 +1,365 @@
+/*
+ * Dialogs: one anatomy for every modal.
+ *
+ *   .modal-header.app-dialog__header   title (+ optional .ui-meta line), close button
+ *   .app-dialog__body                  message, fields, lists
+ *   .app-dialog__footer                Cancel/secondary on the left of the primary;
+ *                                      destructive confirms use .ui-btn-danger-solid
+ *
+ * `.modal-content` is also used by a few workspace pages as their container;
+ * those get a flat panel surface and no overlay depth.
+ */
+
+/* ------------------------------------------------------------ Overlay */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  margin: 0;
+  padding: var(--simm-space-8) var(--simm-space-4);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 10000;
+  background: var(--simm-scrim);
+  backdrop-filter: none;
+  overflow: hidden;
+  isolation: isolate;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.modal-overlay-nested {
+  z-index: 20000;
+}
+
+/* ------------------------------------------------------------ Surface */
+
+.modal-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 37.5rem;
+  border: 1px solid var(--simm-line-strong);
+  border-radius: var(--simm-radius-lg);
+  background: var(--simm-panel);
+  color: var(--simm-text);
+  overflow-x: hidden;
+  overflow-y: auto;
+  z-index: 10001;
+  pointer-events: auto;
+  isolation: isolate;
+}
+
+.modal-content-nested {
+  z-index: 20001;
+}
+
+.simm-dialog-content {
+  position: fixed;
+  top: 5rem;
+  left: 50%;
+  max-height: calc(100vh - 8rem);
+  /* Base UI supplies -50% translation utilities on both axes. Reset their
+   * custom properties before applying SIMM's own placement so production CSS
+   * ordering cannot pull top-aligned dialogs partly outside the viewport. */
+  --tw-translate-x: 0px !important;
+  --tw-translate-y: 0px !important;
+  translate: -50% 0 !important;
+  box-shadow: var(--simm-shadow-overlay);
+  color: var(--simm-text);
+}
+
+.simm-dialog-content.app-dialog--message,
+.simm-dialog-content.app-dialog--confirm {
+  top: 50% !important;
+  left: 50% !important;
+  translate: -50% -50% !important;
+}
+
+.simm-dialog-content.app-dialog {
+  padding: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+  width: min(var(--simm-dialog-width, 34rem), calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+  overflow: hidden;
+}
+
+.app-dialog--nested {
+  --simm-dialog-width: 30rem;
+}
+
+/* ------------------------------------------------------------ Header */
+
+.modal-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-3);
+  min-height: 3.25rem;
+  padding: var(--simm-space-3) var(--simm-space-4) var(--simm-space-3) var(--simm-space-5);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.simm-dialog-content > [data-slot='dialog-header'].modal-header,
+.simm-dialog-content > [data-slot='alert-dialog-header'].modal-header {
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Dialogs without the app-dialog anatomy keep the primitive's 1rem padding;
+ * their header still spans the full width. */
+.simm-dialog-content:not(.app-dialog) > .modal-header {
+  margin: -1rem -1rem 0;
+}
+
+.modal-header h2,
+.simm-dialog-content [data-slot='dialog-title'],
+.simm-dialog-content [data-slot='alert-dialog-title'] {
+  margin: 0;
+  color: var(--simm-text);
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.app-dialog__header {
+  align-items: flex-start;
+}
+
+.app-dialog__heading {
+  display: grid;
+  gap: var(--simm-space-1);
+  min-width: 0;
+}
+
+.app-dialog__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-width: 0;
+}
+
+.app-dialog__tone-icon {
+  display: inline-flex;
+  color: var(--simm-info-text);
+}
+
+.app-dialog--success .app-dialog__tone-icon { color: var(--simm-ok-text); }
+.app-dialog--danger .app-dialog__tone-icon { color: var(--simm-danger-text); }
+
+/* Eyebrows are retired; hide any that remain in older dialog markup. */
+.app-dialog__eyebrow {
+  display: none;
+}
+
+.modal-close {
+  flex: none;
+  width: var(--simm-control-h-sm);
+  height: var(--simm-control-h-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--simm-radius);
+  background: transparent;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.modal-close:hover {
+  background: var(--simm-hover);
+  color: var(--simm-text);
+}
+
+/* ------------------------------------------------------------ Body */
+
+.app-dialog__body {
+  display: grid;
+  align-content: start;
+  gap: var(--simm-space-4);
+  min-height: 0;
+  padding: var(--simm-space-5);
+  overflow: auto;
+}
+
+.app-dialog__message,
+.simm-dialog-content [data-slot='dialog-description'],
+.simm-dialog-content [data-slot='alert-dialog-description'] {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-base);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.app-dialog__supplement {
+  display: grid;
+  gap: var(--simm-space-3);
+}
+
+/* Option row (checkbox + label + hint). */
+.app-dialog__option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-3);
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+  cursor: pointer;
+}
+
+.app-dialog__option-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-dialog__option-copy strong {
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.app-dialog__option-copy span {
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-xs);
+  line-height: 1.45;
+}
+
+/* Callout with icon (older markup): rendered flat, the icon carries the tone. */
+.app-dialog__callout {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--simm-space-3);
+}
+
+.app-dialog__icon {
+  display: inline-flex;
+  padding-top: 2px;
+  color: var(--simm-info-text);
+}
+
+.app-dialog__callout--danger .app-dialog__icon { color: var(--simm-danger-text); }
+.app-dialog__callout--success .app-dialog__icon { color: var(--simm-ok-text); }
+
+.app-dialog__meta {
+  display: grid;
+  gap: var(--simm-space-1);
+  min-width: 0;
+}
+
+.app-dialog__meta strong {
+  color: var(--simm-text);
+  font-size: var(--simm-text-base);
+  font-weight: 600;
+}
+
+.app-dialog__meta p {
+  margin: 0;
+  color: var(--simm-text-2);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------ Footer */
+
+.app-dialog__footer,
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--simm-space-2);
+  margin: 0;
+  padding: var(--simm-space-3) var(--simm-space-5);
+  border-top: 1px solid var(--simm-line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.app-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--simm-space-2);
+  width: 100%;
+}
+
+/* ------------------------------------------------------------ Variants */
+
+.simm-dialog-content.auth-modal {
+  top: var(--simm-space-4);
+  max-height: calc(100vh - 2rem);
+}
+
+.app-runtime-dialog {
+  --simm-dialog-width: 38rem;
+  max-width: 38rem;
+}
+
+.app-runtime-dialog__body {
+  display: grid;
+  gap: var(--simm-space-4);
+}
+
+.app-runtime-dialog__details {
+  display: grid;
+  gap: var(--simm-space-1);
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.app-runtime-dialog__details strong {
+  color: var(--simm-text);
+}
+
+.app-runtime-dialog__actions,
+.app-runtime-dialog__runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--simm-space-2);
+}
+
+.app-runtime-dialog__actions {
+  justify-content: space-between;
+}
+
+.app-close-behavior-dialog .app-dialog__option {
+  align-items: center;
+}
+
+@media (max-height: 42.5rem) {
+  .simm-dialog-content,
+  .simm-dialog-content.app-dialog {
+    top: var(--simm-space-2);
+    max-height: calc(100vh - 1rem);
+  }
+
+  .simm-dialog-content.app-dialog--message,
+  .simm-dialog-content.app-dialog--confirm {
+    top: 50% !important;
+  }
+}
+
+@media (max-width: 40rem) {
+  .app-dialog__actions,
+  .app-runtime-dialog__actions,
+  .app-runtime-dialog__runtime-actions {
+    justify-content: stretch;
+  }
+
+  .app-dialog__actions > *,
+  .app-runtime-dialog__actions > * {
+    flex: 1 1 100%;
+  }
+}

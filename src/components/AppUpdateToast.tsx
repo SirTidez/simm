@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
+import { AnchoredContextMenu } from './AnchoredContextMenu';
 import { Icon } from './Icon';
-import { Input } from './ui/input';
 import { SimmButton, SimmIconButton } from './primitives';
 
 type AppUpdateToastProps = {
@@ -12,7 +12,12 @@ type AppUpdateToastProps = {
   onDismiss: () => void;
 };
 
-const formatSnoozeLabel = (days: number) => (days === 1 ? '1 day' : `${days} days`);
+const snoozeOptions: Array<{ days: number; label: string }> = [
+  { days: 1, label: 'Remind Me Tomorrow' },
+  { days: 3, label: 'Remind Me in 3 Days' },
+  { days: 7, label: 'Remind Me in 1 Week' },
+  { days: 14, label: 'Remind Me in 2 Weeks' },
+];
 
 export function AppUpdateToast({
   currentVersion,
@@ -22,18 +27,19 @@ export function AppUpdateToast({
   onSnooze,
   onDismiss,
 }: AppUpdateToastProps) {
-  const [snoozeDays, setSnoozeDays] = useState(7);
-  const snoozeLabel = useMemo(() => formatSnoozeLabel(snoozeDays), [snoozeDays]);
+  const [laterMenu, setLaterMenu] = useState<{ x: number; y: number } | null>(null);
 
   return (
-    <section className="app-update-toast" role="status" aria-live="polite">
-      <header className="app-update-toast__header">
-        <div>
-          <span className="app-update-toast__eyebrow">Update ready</span>
-          <strong>SIMM update available</strong>
-        </div>
+    <section
+      className="app-update-toast notice-toast"
+      role="status"
+      aria-live="polite"
+      aria-labelledby="app-update-toast-title"
+    >
+      <header className="notice-toast__header">
+        <strong id="app-update-toast-title" className="notice-toast__title">SIMM update available</strong>
         <SimmIconButton
-          className="window-control-btn app-update-toast__dismiss"
+          className="notice-toast__dismiss"
           onClick={onDismiss}
           aria-label="Dismiss app update notice"
         >
@@ -41,54 +47,47 @@ export function AppUpdateToast({
         </SimmIconButton>
       </header>
 
-      <p className="app-update-toast__summary">
-        A newer SIMM build is ready to download and install.
+      <p className="notice-toast__body">
+        Version <strong>{latestVersion}</strong> is ready to install. You have <span>{currentVersion}</span>.
       </p>
 
-      <dl className="app-update-toast__versions">
-        <div>
-          <dt>Current version</dt>
-          <dd>{currentVersion}</dd>
-        </div>
-        <div>
-          <dt>Available version</dt>
-          <dd>{latestVersion}</dd>
-        </div>
-      </dl>
-
-      <div className="app-update-toast__snooze">
-        <div className="app-update-toast__snooze-header">
-          <label htmlFor="app-update-snooze-range">Remind me again in</label>
-          <span>{snoozeLabel}</span>
-        </div>
-        <Input
-          id="app-update-snooze-range"
-          className="app-update-toast__slider"
-          type="range"
-          min={1}
-          max={14}
-          step={1}
-          value={snoozeDays}
-          onChange={(event) => setSnoozeDays(Number(event.target.value))}
-          aria-label="Snooze app update reminder"
-        />
-        <div className="app-update-toast__slider-scale" aria-hidden="true">
-          <span>1 day</span>
-          <span>2 weeks</span>
-        </div>
-      </div>
-
-      <footer className="app-update-toast__actions">
-        <SimmButton type="button" className="btn btn-primary" onClick={onUpdate}>
+      <footer className="notice-toast__actions">
+        <SimmButton
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-haspopup="menu"
+          aria-expanded={laterMenu !== null}
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            setLaterMenu((current) => current ? null : { x: rect.left, y: rect.top - 4 - 6 * 32 });
+          }}
+        >
+          Later
+          <Icon name="chevronDown" />
+        </SimmButton>
+        <SimmButton type="button" size="sm" onClick={onUpdate}>
           Update
         </SimmButton>
-        <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onSnooze(snoozeDays)}>
-          Snooze
-        </SimmButton>
-        <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onSkip}>
-          Skip this version
-        </SimmButton>
       </footer>
+
+      {laterMenu && (
+        <AnchoredContextMenu
+          id="app-update-later-menu"
+          x={laterMenu.x}
+          y={laterMenu.y}
+          onClose={() => setLaterMenu(null)}
+          items={[
+            ...snoozeOptions.map((option) => ({
+              key: `snooze-${option.days}`,
+              label: option.label,
+              icon: 'clock',
+              onSelect: () => onSnooze(option.days),
+            })),
+            { key: 'skip', label: 'Skip This Version', icon: 'ban', onSelect: onSkip },
+          ]}
+        />
+      )}
     </section>
   );
 }

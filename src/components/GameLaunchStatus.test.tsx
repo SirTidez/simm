@@ -12,7 +12,7 @@ it('uses neutral nonmodal feedback with accessible actions bound to the captured
   expect(screen.getByRole('status')).toHaveAttribute('aria-live', 'polite');
   expect(screen.getByText('Schedule I is taking longer to start')).toBeInTheDocument();
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'View logs' })); expect(logs).toHaveBeenCalledWith('captured');
+  fireEvent.click(screen.getByRole('button', { name: 'View Logs' })); expect(logs).toHaveBeenCalledWith('captured');
   fireEvent.click(screen.getByRole('button', { name: 'Dismiss' })); expect(store.dismissNotice).toHaveBeenCalledWith('captured');
 });
 it.each([
@@ -22,7 +22,7 @@ it.each([
 ] as const)('qualifies the deadline result for %s and checks again without a launch action', (processState, copy) => {
   store.attempts = new Map([['captured', { ...attempt, state: 'unconfirmed', snapshot: { ...attempt.snapshot!, processState } }]]);
   render(<GameLaunchStatus onViewLogs={vi.fn()} />); expect(screen.getByText(copy)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Check again' })); expect(store.checkAgain).toHaveBeenCalledWith('captured');
+  fireEvent.click(screen.getByRole('button', { name: 'Check Again' })); expect(store.checkAgain).toHaveBeenCalledWith('captured');
   expect(screen.queryByRole('button', { name: /relaunch/i })).not.toBeInTheDocument();
 });
 it('describes an early exit neutrally and exposes inspection diagnostics', () => {

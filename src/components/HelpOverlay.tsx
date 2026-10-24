@@ -1,10 +1,5 @@
-import { useEffect } from 'react';
-import { Icon } from './Icon';
-import type { IconName } from './icons';
-import { SimmBadge, SimmButton } from './primitives';
-import { Separator } from '@/components/ui/separator';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { SimmButton } from './primitives';
 
 interface HelpOverlayProps {
   isOpen: boolean;
@@ -14,126 +9,116 @@ interface HelpOverlayProps {
   onOpenAccounts: () => void;
 }
 
-const quickStartSteps = [
-  {
-    icon: 'plusCircle',
-    title: 'Add a game',
-    body: 'SIMM usually finds your Steam install automatically. Use Add Game to link it, or import a folder only if detection misses it.',
-  },
-  {
-    icon: 'userCircle',
-    title: 'Authenticate when needed',
-    body: 'You do not need to sign in to Steam for your normal Steam install. Authenticate only when SIMM needs authorization for advanced Schedule I installs.',
-  },
-  {
-    icon: 'download',
-    title: 'Download and maintain',
-    body: 'Track updates, install mods, and manage support tools from each environment workspace.',
-  },
-] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string }>;
+type HelpTab = 'start' | 'tasks' | 'reference';
+type HelpAction = 'wizard' | 'accounts' | 'settings';
 
-const primaryHelpCards = [
-  {
-    icon: 'hardDrive',
-    title: 'Manage Game Installs',
-    copy: 'Use install actions from the Home workspace to keep each environment healthy and easy to launch.',
-    items: [
-      'Start with the detected Steam install. Import a folder only if automatic detection does not find it.',
-      'The Steam install stays managed by Steam. SIMM manages mods, plugins, tools, and support actions around it.',
-      'Power User mode can add separate Steam branches when you need test or alternate installs.',
-      'Steam handles updates for the Steam install. SIMM updates the separate installs it creates or imports.',
-      'Run Check Updates when you want an immediate refresh for SIMM-managed installs.',
-      'Use Update to apply the newest available build to a SIMM-managed install.',
-      'Use Launch and Folder for quick verification and support work.',
-      'Delete only removes the SIMM entry. Files remain on disk.',
-    ],
-  },
-  {
-    icon: 'userGear',
-    title: 'Settings and Accounts',
-    copy: 'Use the utility panes for environment defaults, tools, update cadence, and linked service access.',
-    items: [
-      'Settings controls download paths, theme, cache size, update checks, and logging.',
-      'Accounts keeps Steam and Nexus links current and shows what each service can do.',
-      'Credentials and tokens are stored locally and encrypted.',
-    ],
-  },
-  {
-    icon: 'boxesStacked',
-    title: 'Mods, Plugins, and UserLibs',
-    copy: 'SIMM separates global acquisition from per-environment management so you can browse once and manage locally.',
-    items: [
-      'Mod Library is the global place to discover, download, and update shared mod assets.',
-      'Mods is the environment-specific place to enable, disable, update, and inspect installed mods.',
-      'Plugins and UserLibs expose the files found in those runtime folders.',
-    ],
-  },
-  {
-    icon: 'triangleExclamation',
-    title: 'Troubleshooting',
-    copy: 'Start with the most common causes before assuming the install itself is broken.',
-    items: [
-      'If your Steam install is missing, refresh detection first. Import the folder only when detection still misses it.',
-      'Advanced Steam install failures usually point to Steam sign-in, Steam Guard, or network issues.',
-      'Launch failures usually mean the executable path or loader setup needs review.',
-      'If DepotDownloader is missing, SIMM can install it automatically before advanced branch installs.',
-      'Use Logs and Settings together when you need deeper diagnostics.',
-    ],
-  },
-] as const satisfies ReadonlyArray<{ icon: IconName; title: string; copy: string; items: readonly string[] }>;
+const HELP_TABS: ReadonlyArray<{ id: HelpTab; label: string }> = [
+  { id: 'start', label: 'Start' },
+  { id: 'tasks', label: 'Tasks' },
+  { id: 'reference', label: 'Reference' },
+];
 
-const referenceCards = [
+const startSteps: ReadonlyArray<{ title: string; body: string; action?: { label: string; target: HelpAction } }> = [
   {
-    icon: 'penToSquare',
-    title: 'Edit Install Details',
+    title: 'Add your game',
+    body: 'SIMM usually finds your Steam install on its own. Add it as an environment, or import a folder only if detection misses it.',
+    action: { label: 'Add Environment', target: 'wizard' },
+  },
+  {
+    title: 'Sign in only when needed',
+    body: 'Your normal Steam install needs no sign-in. Connect Steam for branch installs SIMM downloads itself, and Nexus Mods for Nexus downloads.',
+    action: { label: 'Open Accounts', target: 'accounts' },
+  },
+  {
+    title: 'Check your defaults',
+    body: 'Pick the download folder, how often SIMM checks for updates, and the theme.',
+    action: { label: 'Open Settings', target: 'settings' },
+  },
+  {
+    title: 'Install mods and play',
+    body: 'Find mods in the Mod Library and install them into an environment. Home shows what needs updating and starts the game.',
+  },
+];
+
+const taskSections: ReadonlyArray<{ title: string; items: readonly string[] }> = [
+  {
+    title: 'Manage game installs',
     items: [
-      'Rename installs when you want clearer environment labels.',
-      'Add descriptions to keep test builds and stable builds easy to distinguish.',
+      'Start with the detected Steam install. Import a folder only if detection does not find it.',
+      'Steam keeps managing the Steam install and its updates. SIMM manages mods, plugins, and tools around it.',
+      'Power User mode adds separate Steam branch installs for test or alternate builds. SIMM updates the installs it creates or imports.',
+      'Use Check Updates for an immediate refresh, and Update to apply the newest build to a SIMM-managed install.',
+      'Deleting an environment removes it from SIMM. Its files stay on disk.',
     ],
   },
   {
-    icon: 'rotate',
-    title: 'Update Checks',
+    title: 'Install and update mods',
     items: [
-      'Automatic checks run on the interval configured in Settings.',
-      'Manual checks bypass the wait and refresh status immediately.',
-      'Steam installs update through Steam. SIMM only applies game updates to SIMM-managed installs.',
-      'Update badges show when a newer version is available.',
+      'The Mod Library is the one place to find, download, and update mods from Thunderstore and Nexus Mods.',
+      'Each environment has its own Mods tab to enable, disable, update, and inspect what is installed there.',
+      'Plugins and UserLibs tabs list the files in those runtime folders.',
+      'Profiles save a set of mods so you can apply it to another environment.',
     ],
   },
   {
-    icon: 'puzzlePiece',
+    title: 'Change settings and accounts',
+    items: [
+      'Settings holds download paths, theme, cache size, update checks, security scanning, and logging.',
+      'Accounts shows whether Steam and Nexus Mods are connected and what each sign-in is used for.',
+      'Credentials and tokens are stored encrypted on this device.',
+    ],
+  },
+  {
+    title: 'Fix common problems',
+    items: [
+      'Steam install missing: refresh detection first, then import the folder if it is still not found.',
+      'Branch install fails: check the Steam sign-in, Steam Guard approval, and your network.',
+      'Game does not launch: review the executable path and the MelonLoader setup in the environment.',
+      'DepotDownloader missing: SIMM can install it before the next branch install.',
+      'For deeper diagnosis, open the environment’s Logs and Config tabs side by side.',
+    ],
+  },
+];
+
+const referenceSections: ReadonlyArray<{ title: string; items: readonly string[]; code?: readonly string[] }> = [
+  {
+    title: 'Environment details',
+    items: [
+      'Rename environments to keep labels clear.',
+      'Add a description to tell test builds and stable builds apart.',
+    ],
+  },
+  {
+    title: 'Update checks',
+    items: [
+      'Automatic checks run on the interval set in Settings.',
+      'Manual checks skip the wait and refresh status right away.',
+      'Steam updates the Steam install. SIMM only applies game updates to the installs it manages.',
+    ],
+  },
+  {
     title: 'MelonLoader',
     items: [
-      'Preferred MelonLoader versions are managed from Settings.',
-      'SIMM keeps version handling aligned with the target runtime when possible.',
-      'Per-install loader state is tracked with the environment.',
+      'The preferred MelonLoader version for new environments is set in Settings.',
+      'SIMM matches the loader to each environment’s runtime where it can and tracks it per environment.',
     ],
   },
-] as const satisfies ReadonlyArray<{ icon: IconName; title: string; items: readonly string[] }>;
-
-const quickActions = [
   {
-    icon: 'plusCircle',
-    title: 'Add Game',
-    body: 'Link the detected Steam install first, import a folder if needed, or open advanced branch installs in Power User mode.',
-    action: 'wizard' as const,
+    title: 'DepotDownloader',
+    items: [
+      'DepotDownloader powers Steam branch installs. If SIMM reports it missing, use the automatic install or install the SteamRE release yourself.',
+    ],
+    code: [
+      'Windows: winget install --exact --id SteamRE.DepotDownloader',
+      'Linux: SIMM installs DepotDownloader to ~/.local/bin',
+    ],
   },
-  {
-    icon: 'userGear',
-    title: 'Open Accounts',
-    body: 'Steam sign-in is not needed for the normal Steam install. Use Accounts for advanced Steam authorization or Nexus manager downloads.',
-    action: 'accounts' as const,
-  },
-  {
-    icon: 'sliders',
-    title: 'Open Settings',
-    body: 'Adjust paths, update cadence, theme, tools, and logging behavior.',
-    action: 'settings' as const,
-  },
-] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string; action: 'wizard' | 'accounts' | 'settings' }>;
+];
 
 export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onOpenAccounts }: HelpOverlayProps) {
+  const [activeTab, setActiveTab] = useState<HelpTab>('start');
+  const tabRefs = useRef<Record<HelpTab, HTMLButtonElement | null>>({ start: null, tasks: null, reference: null });
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -149,175 +134,122 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
 
   if (!isOpen) return null;
 
+  const runAction = (target: HelpAction) => {
+    if (target === 'wizard') onOpenWizard();
+    else if (target === 'accounts') onOpenAccounts();
+    else onOpenSettings();
+  };
+
+  const handleTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const index = HELP_TABS.findIndex((tab) => tab.id === activeTab);
+    let nextIndex = index;
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % HELP_TABS.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + HELP_TABS.length) % HELP_TABS.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = HELP_TABS.length - 1;
+    else return;
+    event.preventDefault();
+    const next = HELP_TABS[nextIndex].id;
+    setActiveTab(next);
+    tabRefs.current[next]?.focus();
+  };
+
   return (
-    <section className="modal-content help-overlay workspace-panel" aria-label="Help panel">
-      <WorkspacePageHeader
-        eyebrow="Workspace"
-        title="Help Center"
-        description="Find setup guidance, account help, update diagnostics, and common recovery steps."
-      />
-
-      <div className="help-pane">
-        <div className="help-overview">
-          <div className="help-overview__copy">
-            <span className="help-eyebrow">Operator Guide</span>
-            <h3>Start with setup, then use the focused tabs for maintenance and recovery.</h3>
-            <p>Help is grouped around the work SIMM actually does: creating environments, managing mods and support files, and fixing account, update, or loader issues.</p>
-          </div>
-          <div className="help-overview__badges">
-            <SimmBadge variant="outline" className="help-badge">3 setup steps</SimmBadge>
-            <SimmBadge variant="outline" className="help-badge">4 task guides</SimmBadge>
-            <SimmBadge variant="outline" className="help-badge">Focused reference</SimmBadge>
-          </div>
+    <section className="workspace-panel ui-page help-page" aria-label="Help panel">
+      <header className="ui-page-header">
+        <div className="ui-page-header__titles">
+          <h2 className="ui-page-title">Help</h2>
+          <p className="ui-page-subtitle">Set up SIMM, find the right place for a task, and fix common problems.</p>
         </div>
+      </header>
 
-        <div className="help-action-grid">
-          {quickActions.map((actionCard) => {
-            const handleClick = actionCard.action === 'wizard'
-              ? onOpenWizard
-              : actionCard.action === 'accounts'
-                ? onOpenAccounts
-                : onOpenSettings;
+      <div className="ui-tabs-line" role="tablist" aria-label="Help topics">
+        {HELP_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            ref={(node) => { tabRefs.current[tab.id] = node; }}
+            type="button"
+            role="tab"
+            id={`help-tab-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`help-panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            className="ui-tabs-line__tab"
+            onClick={() => setActiveTab(tab.id)}
+            onKeyDown={handleTabKeyDown}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-            return (
-              <SimmButton
-                key={actionCard.title}
-                type="button"
-                variant="secondary"
-                className="help-action-card"
-                onClick={handleClick}
-              >
-                <Icon name={actionCard.icon} />
-                <span>{actionCard.title}</span>
-                <Icon name="arrowRight" className="help-action-card__chevron" />
-              </SimmButton>
-            );
-          })}
-        </div>
-
-        <Tabs defaultValue="start" className="help-tabs">
-          <TabsList className="help-tabs__list" variant="line" aria-label="Help topics">
-            <TabsTrigger value="start">Start</TabsTrigger>
-            <TabsTrigger value="tasks">Tasks</TabsTrigger>
-            <TabsTrigger value="reference">Reference</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="start" className="help-tabs__content">
-            <div className="help-layout help-layout--start">
-              <section className="help-panel">
-                <div className="help-card-header">
-                  <div className="help-card-header__icon">
-                    <Icon name="circleInfo" />
+      <div
+        className="ui-page-body help-body"
+        role="tabpanel"
+        id={`help-panel-${activeTab}`}
+        aria-labelledby={`help-tab-${activeTab}`}
+        tabIndex={0}
+      >
+        {activeTab === 'start' && (
+          <div className="help-content">
+            <h3 className="help-heading">Get started</h3>
+            <ol className="help-steps">
+              {startSteps.map((step, index) => (
+                <li key={step.title} className="help-step">
+                  <span className="help-step__index" aria-hidden="true">{index + 1}</span>
+                  <div className="help-step__copy">
+                    <h4>{step.title}</h4>
+                    <p>{step.body}</p>
                   </div>
-                  <div>
-                    <span className="help-eyebrow">Quick Start</span>
-                    <h3>Get from first launch to a managed environment quickly.</h3>
-                    <p>These are the first decisions most users need. Everything else is supporting reference.</p>
-                  </div>
-                </div>
+                  {step.action && (
+                    <SimmButton
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="help-step__action"
+                      onClick={() => runAction(step.action!.target)}
+                    >
+                      {step.action.label}
+                    </SimmButton>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
 
-                <div className="help-step-list">
-                  {quickStartSteps.map((step, index) => (
-                    <div key={step.title} className="help-step-card">
-                      <span className="help-step-card__index">{index + 1}</span>
-                      <div className="help-step-card__body">
-                        <h4>
-                          <Icon name={step.icon} />
-                          {step.title}
-                        </h4>
-                        <p>{step.body}</p>
-                      </div>
-                    </div>
+        {activeTab === 'tasks' && (
+          <div className="help-content help-content--grid">
+            {taskSections.map((section) => (
+              <section key={section.title} className="help-topic">
+                <h3 className="help-heading">{section.title}</h3>
+                <ul className="help-list">
+                  {section.items.map((item) => (
+                    <li key={item}>{item}</li>
                   ))}
-                </div>
-              </section>
-
-              <section className="help-panel help-panel--quiet">
-                <div className="help-reference-card__header">
-                  <Icon name="compass" />
-                  <h4>Where to Start</h4>
-                </div>
-                <ul className="help-list help-list--compact">
-                  <li>Let SIMM detect your Steam install first.</li>
-                  <li>Use Import only when detection does not find the folder.</li>
-                  <li>Let Steam update the Steam install; use SIMM updates for SIMM-managed installs.</li>
-                  <li>Use Accounts when Steam or Nexus sign-in becomes a blocker.</li>
-                  <li>Open Logs and Config together when deeper diagnostics are needed.</li>
                 </ul>
               </section>
-            </div>
-          </TabsContent>
+            ))}
+          </div>
+        )}
 
-          <TabsContent value="tasks" className="help-tabs__content">
-            <div className="help-section-group">
-              <div className="help-section-group__header">
-                <span className="help-eyebrow">Task Guides</span>
-                <h3>Find the right workspace for the job.</h3>
-              </div>
-
-              <div className="help-task-grid">
-                {primaryHelpCards.map((card) => (
-                  <article key={card.title} className="help-task-card">
-                    <div className="help-task-card__header">
-                      <div className="help-card-header__icon">
-                        <Icon name={card.icon} />
-                      </div>
-                      <div>
-                        <h4>{card.title}</h4>
-                        <p>{card.copy}</p>
-                      </div>
-                    </div>
-                    <Separator className="help-separator" />
-                    <ul className="help-list">
-                      {card.items.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
-                  </article>
+        {activeTab === 'reference' && (
+          <div className="help-content help-content--grid">
+            {referenceSections.map((section) => (
+              <section key={section.title} className="help-topic">
+                <h3 className="help-heading">{section.title}</h3>
+                <ul className="help-list">
+                  {section.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+                {section.code?.map((line) => (
+                  <code key={line} className="help-code">{line}</code>
                 ))}
-              </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="reference" className="help-tabs__content">
-            <div className="help-section-group__header">
-              <span className="help-eyebrow">Reference</span>
-              <h3>Supporting details for common maintenance tasks.</h3>
-            </div>
-
-            <div className="help-layout help-layout--reference">
-              <div className="help-reference-grid">
-                {referenceCards.map((card) => (
-                  <article key={card.title} className="help-reference-card">
-                    <div className="help-reference-card__header">
-                      <Icon name={card.icon} />
-                      <h4>{card.title}</h4>
-                    </div>
-                    <ul className="help-list help-list--compact">
-                      {card.items.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
-                  </article>
-                ))}
-              </div>
-              <section className="help-callout-card">
-                <div className="help-card-header">
-                  <div className="help-card-header__icon">
-                    <Icon name="wrench" />
-                  </div>
-                  <div>
-                    <span className="help-eyebrow">Repair Hint</span>
-                    <h3>DepotDownloader powers advanced Steam branch installs.</h3>
-                    <p>If SIMM reports that DepotDownloader is missing, use SIMM's automatic installer or install the SteamRE release manually.</p>
-                  </div>
-                </div>
-                <code>Windows: winget install --exact --id SteamRE.DepotDownloader</code>
-                <code>Linux: SIMM installs DepotDownloader to ~/.local/bin</code>
               </section>
-            </div>
-          </TabsContent>
-        </Tabs>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

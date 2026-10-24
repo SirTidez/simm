@@ -5,6 +5,9 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { PluginsOverlay } from './PluginsOverlay';
 import type { Environment } from '../types';
 
+// Library artwork comes from the app-wide Mod Library store; these surfaces render without it here.
+vi.mock('./media/useModArtwork', () => ({ useModArtwork: () => () => null }));
+
 const apiMocks = vi.hoisted(() => ({
   getEnvironment: vi.fn(),
   getPlugins: vi.fn(),
@@ -88,7 +91,8 @@ describe('PluginsOverlay', () => {
     );
 
     expect((await screen.findAllByText('MLVScan.dll')).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Plugin inventory/i)).toBeTruthy();
+    expect(screen.getByText(/2 plugins · 1 disabled/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull();
     expect(await screen.findByText('C:/env/Plugins/MLVScan.dll')).toBeTruthy();
   });
 
@@ -170,6 +174,57 @@ describe('PluginsOverlay', () => {
     await waitFor(() => {
       expect(apiMocks.enablePlugin).toHaveBeenCalledWith('env-1', 'RuntimeFix.dll');
     });
+  });
+
+  it('toggles plugin state from the row switch', async () => {
+    render(
+      <PluginsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('switch', { name: 'MLVScan enabled' }));
+
+    await waitFor(() => {
+      expect(apiMocks.disablePlugin).toHaveBeenCalledWith('env-1', 'MLVScan.dll');
+    });
+  });
+
+  it('deletes a plugin only after confirmation', async () => {
+    const onPluginsChanged = vi.fn();
+    render(
+      <PluginsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        onPluginsChanged={onPluginsChanged}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    expect(apiMocks.deletePlugin).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete Plugin' }));
+
+    await waitFor(() => {
+      expect(apiMocks.deletePlugin).toHaveBeenCalledWith('env-1', 'MLVScan.dll');
+      expect(onPluginsChanged).toHaveBeenCalled();
+    });
+  });
+
+  it('teaches what plugins are when the environment has none', async () => {
+    apiMocks.getPlugins.mockResolvedValue({ plugins: [], pluginsDirectory: 'C:/env/Plugins', count: 0 });
+    render(
+      <PluginsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    expect(await screen.findByText('No plugins in this environment')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add Plugin File' })).toBeTruthy();
   });
 
   it('uploads plugin and notifies parent on success', async () => {
