@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+- Reorganized SIMM around environment pages with Overview, Mods, Plugins, UserLibs, Config, and Logs tabs, a shared environment header, consistent status information, and per-environment launch preferences.
+- Simplified global navigation and moved downloads into the status bar, with a Home view that shows each environment's state and next action.
+- Unified desktop styling and theme tokens, improved text contrast and responsive layouts, and added shared mod thumbnails and game artwork across management tools.
+- Rebuilt mod, plugin, library, configuration, and log views; added environment tab counts and bulk mod updates that preserve security-review requirements.
+- Contributors: [DooDesch](https://github.com/DooDesch) designed and implemented the UI/UX redesign in [PR #33](https://github.com/SirTidez/simm/pull/33).
+
 ## [0.8.9-beta.1]
 
 - Fixed new-branch download progress so small setup files cannot be mistaken for the full game size. Transferred bytes continue advancing when an earlier estimate is too small, and the total is recalculated from download milestones.
