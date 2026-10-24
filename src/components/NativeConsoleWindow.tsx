@@ -69,7 +69,12 @@ export function EnvironmentStatus({ environmentId, environment, initialTab = 'co
   const [busy, setBusy] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [viewportError, setViewportError] = useState<string | null>(null);
-  const [closeRequestedAt, setCloseRequestedAt] = useState<number | null>(null);
+  const [closeRequest, setCloseRequest] = useState<{
+    environmentId: string;
+    processId: number | null;
+    processStartedAt: number | null;
+    requestedAt: number;
+  } | null>(null);
   const [showLayout, setShowLayout] = useState(false);
   const viewOptions = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -98,6 +103,11 @@ export function EnvironmentStatus({ environmentId, environment, initialTab = 'co
     return () => { disposed = true; };
   }, [environment, environmentId]);
   const now = Date.now();
+  const closeRequestedAt = snapshot && snapshot.status !== 'exited'
+    && closeRequest?.environmentId === environmentId
+    && closeRequest.processId === snapshot.processId
+    && closeRequest.processStartedAt === snapshot.processStartedAt
+    ? closeRequest.requestedAt : null;
   const pane = useRef<HTMLDivElement>(null);
   const reportError = useCallback((error: unknown) => setError(String(error)), []);
   const reportViewportError = useCallback((error: unknown) => setViewportError(error == null ? null : `Console position: ${String(error)}`), []);
@@ -122,7 +132,7 @@ export function EnvironmentStatus({ environmentId, environment, initialTab = 'co
     finally { setBusy(false); }
   };
   const retry = async () => {
-    setBusy(true); setError(null); setCloseRequestedAt(null);
+    setBusy(true); setError(null); setCloseRequest(null);
     try {
       if (ready) await ApiService.retryNativeConsole(environmentId);
       else { refreshInventory(); return; }
@@ -131,8 +141,10 @@ export function EnvironmentStatus({ environmentId, environment, initialTab = 'co
     finally { setBusy(false); }
   };
   const closeGame = async () => {
+    // A late response still belongs to the game that received this request.
+    const target = { environmentId, processId: snapshot?.processId ?? null, processStartedAt: snapshot?.processStartedAt ?? null };
     setConfirmClose(false); setBusy(true); setError(null);
-    try { await ApiService.closeNativeConsoleGame(environmentId); setCloseRequestedAt(Date.now()); }
+    try { await ApiService.closeNativeConsoleGame(environmentId); setCloseRequest({ ...target, requestedAt: Date.now() }); }
     catch (error) { reportError(error); }
     finally { setBusy(false); }
   };
@@ -245,7 +257,7 @@ export function EnvironmentStatus({ environmentId, environment, initialTab = 'co
             <strong>Close Schedule I?</strong><p id="console-close-description">Unsaved progress may be lost.</p>
             <div className="native-console-button-row"><SimmButton className="btn btn-danger" variant="destructive" onClick={() => void closeGame()}>Close game now</SimmButton><SimmButton className="btn btn-secondary" variant="outline" onClick={() => setConfirmClose(false)}>Cancel</SimmButton></div>
           </div> : <>
-            {closeRequestedAt && snapshot?.status !== 'exited' ? <p role="status">{now - closeRequestedAt > 10_000 ? 'Game is still running' : 'Closing game…'}</p> : null}
+            {closeRequestedAt !== null ? <p role="status">{now - closeRequestedAt > 10_000 ? 'Game is still running' : 'Closing game…'}</p> : null}
             <div className="native-console-button-row">{canRetry ? <SimmButton className="btn btn-secondary" variant="outline" disabled={busy} onClick={() => void retry()}>Retry connection</SimmButton> : null}
               <SimmButton className="btn btn-danger" variant="destructive" disabled={busy || !running} onClick={() => setConfirmClose(true)}>Close Game</SimmButton></div>
           </>}

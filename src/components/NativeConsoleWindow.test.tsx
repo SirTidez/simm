@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { EnvironmentStatus, ConsolePreferences } from './NativeConsoleWindow';
 import { ApiService } from '../services/api';
@@ -208,6 +208,65 @@ describe('Native Console', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Game' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close game now' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Game identity changed');
+  });
+  it.each(['after an observed exit', 'without an exit snapshot', 'with a reused PID'] as const)(
+    'does not revive the previous close message on relaunch %s', async (transition) => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(ApiService.getNativeConsoleSnapshot).mockImplementation(async () => ({ ...snapshot }));
+        await act(async () => { render(<EnvironmentStatus environmentId="env" onBack={vi.fn()} />); });
+        fireEvent.click(screen.getByRole('button', { name: 'Close Game' }));
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close game now' })); });
+        expect(screen.getByText('Closing game…')).toBeInTheDocument();
+        await act(async () => { await vi.advanceTimersByTimeAsync(11_000); });
+        expect(screen.getByText('Game is still running')).toBeInTheDocument();
+
+        if (transition === 'after an observed exit') {
+          vi.mocked(ApiService.getNativeConsoleSnapshot).mockResolvedValue({ ...snapshot, status: 'exited' });
+          await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+          expect(screen.queryByText('Game is still running')).not.toBeInTheDocument();
+        }
+        vi.mocked(ApiService.getNativeConsoleSnapshot).mockResolvedValue({
+          ...snapshot,
+          processId: transition === 'with a reused PID' ? snapshot.processId : 456,
+          processStartedAt: snapshot.processStartedAt! + 60_000,
+        });
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+        expect(screen.getByText(transition === 'with a reused PID' ? '123' : '456')).toBeInTheDocument();
+        expect(screen.queryByText('Game is still running')).not.toBeInTheDocument();
+        expect(screen.queryByText('Closing game…')).not.toBeInTheDocument();
+        expect(ApiService.retryNativeConsole).not.toHaveBeenCalled();
+        expect(ApiService.closeNativeConsoleGame).toHaveBeenCalledTimes(1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Close Game' }));
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close game now' })); });
+        expect(screen.getByText('Closing game…')).toBeInTheDocument();
+      } finally {
+        cleanup();
+        vi.useRealTimers();
+      }
+    },
+  );
+  it('does not apply a delayed close response to a newer game', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(ApiService.getNativeConsoleSnapshot).mockImplementation(async () => ({ ...snapshot }));
+      let finishClose!: () => void;
+      vi.mocked(ApiService.closeNativeConsoleGame).mockImplementationOnce(() => new Promise<void>(resolve => { finishClose = resolve; }));
+      await act(async () => { render(<EnvironmentStatus environmentId="env" onBack={vi.fn()} />); });
+      fireEvent.click(screen.getByRole('button', { name: 'Close Game' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Close game now' }));
+      vi.mocked(ApiService.getNativeConsoleSnapshot).mockResolvedValue({ ...snapshot, processId: 456, processStartedAt: snapshot.processStartedAt! + 60_000 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      await act(async () => { finishClose(); });
+      expect(screen.getByText('456')).toBeInTheDocument();
+      expect(screen.queryByText('Closing game…')).not.toBeInTheDocument();
+      expect(screen.queryByText('Game is still running')).not.toBeInTheDocument();
+      expect(ApiService.closeNativeConsoleGame).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
   it('does not close the game when the Console component unmounts', async () => {
     const view = render(<EnvironmentStatus environmentId="env" onBack={vi.fn()} />);
