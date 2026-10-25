@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.8.9-beta.1]
+## [0.8.9]
 
 - Added a Windows Console tab within each environment page, with a shared Console/Logs session sidebar, per-environment View options, automatic opening after launch, native console pop-out/redock, and a confirmed Close Game action while preserving Steam launch ownership and game survival after SIMM closes.
 - Added local DLL author/version extraction and automatic inventory refresh across installed mods, plugins, and Mod Library, including enabled/disabled changes.
@@ -20,7 +20,7 @@
 
 - Contributors:
   - [DooDesch](https://github.com/DooDesch): UI/UX redesign, environment-page navigation, shared design system, management-tool layouts, and artwork integration in [PR #33](https://github.com/SirTidez/simm/pull/33).
-  - [SirTidez](https://github.com/SirTidez): Steam launch/startup handling, native console and shared session sidebar integration, DLL metadata and inventory refresh, log attribution and layout fixes, Node tooling updates, and beta preparation.
+  - [SirTidez](https://github.com/SirTidez): Steam launch/startup handling, native console and shared session sidebar integration, DLL metadata and inventory refresh, log attribution and layout fixes, Node tooling updates, and release preparation.
 
 ## [0.8.8]
 

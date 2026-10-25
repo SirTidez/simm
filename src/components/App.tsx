@@ -91,6 +91,8 @@ const CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY = 'simm:consumedNexusOAuthCallbacks';
 const SIMM_RELEASES_URL = 'https://api.github.com/repos/SirTidez/simm/releases?per_page=4';
 const SIMM_CHANGELOG_URL = 'https://raw.githubusercontent.com/SirTidez/simm/master/CHANGELOG.md';
 
+declare const __APP_VERSION__: string;
+
 const runtimeDisplayName = (runtime: RuntimeSwitchResult['runtime']) => (
   runtime === 'Mono' || runtime === 'MONO' ? 'Mono' : 'IL2CPP'
 );
@@ -815,7 +817,7 @@ function HomeDashboard({
       <section className="home__section home__news" aria-labelledby="home-news">
         <h2 className="ui-section-title" id="home-news">What&apos;s new in SIMM</h2>
         <p className="home__news-update">
-          Redesigned environment workspaces with native console docking, live mod inventory, and unified log filtering.
+          SIMM {__APP_VERSION__}: Redesigned environment workspaces with native console docking, live mod inventory, and unified log filtering.
         </p>
         {appUpdateState.status === 'available' && (
           <p className="home__news-update">
