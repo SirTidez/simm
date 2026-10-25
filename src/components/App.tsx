@@ -814,6 +814,9 @@ function HomeDashboard({
 
       <section className="home__section home__news" aria-labelledby="home-news">
         <h2 className="ui-section-title" id="home-news">What&apos;s new in SIMM</h2>
+        <p className="home__news-update">
+          Redesigned environment workspaces with native console docking, live mod inventory, and unified log filtering.
+        </p>
         {appUpdateState.status === 'available' && (
           <p className="home__news-update">
             SIMM {appUpdateState.result.version} is available on the {appUpdateState.result.channel} channel.
