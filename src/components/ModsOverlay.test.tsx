@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ModsOverlay } from './ModsOverlay';
 import type { Environment } from '../types';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -59,6 +59,22 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 const openMock = vi.mocked(open);
 const saveMock = vi.mocked(save);
 
+function getInspector(): HTMLElement {
+  return document.querySelector('.env-assets__inspector') as HTMLElement;
+}
+
+/** Inspector secondary actions live in the "More" menu. */
+async function chooseInspectorMenuItem(name: string | RegExp) {
+  fireEvent.click(await within(getInspector()).findByRole('button', { name: 'More actions' }));
+  fireEvent.click(await screen.findByRole('menuitem', { name }));
+}
+
+/** Toolbar folder/profile actions live in the toolbar "More" menu. */
+async function chooseToolbarMenuItem(name: string | RegExp) {
+  fireEvent.click(await screen.findByRole('button', { name: 'More mod actions' }));
+  fireEvent.click(await screen.findByRole('menuitem', { name }));
+}
+
 const baseEnvironment: Environment = {
   id: 'env-1',
   name: 'Test Env',
@@ -78,6 +94,9 @@ describe('ModsOverlay', () => {
         fileName: string;
         path: string;
         source?: string;
+        author?: string;
+        version?: string;
+        disabled?: boolean;
       }>;
       modsDirectory: string;
       count: number;
@@ -242,6 +261,49 @@ describe('ModsOverlay', () => {
     expect((await screen.findAllByText('S1API.Mono.MelonLoader.dll')).length).toBeGreaterThan(0);
   });
 
+  it('displays local author and version in the list and filters by author', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Local Mod', fileName: 'Local.dll', path: 'C:/env/Mods/Local.dll', source: 'local', author: 'Local Author', version: '2.7.1-beta.4+local', managed: false },
+        { name: 'Other Mod', fileName: 'Other.dll', path: 'C:/env/Mods/Other.dll', source: 'local', author: 'Another Author' },
+      ], modsDirectory: 'C:/env/Mods', count: 2,
+    });
+    const { container } = render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    await screen.findAllByText('Local Mod');
+    const row = Array.from(container.querySelectorAll('.env-assets-table tbody tr')).find((item) => item.textContent?.includes('Local Mod')) as HTMLElement;
+    expect(row).toHaveTextContent('Local Author');
+    expect(within(row).getByText('2.7.1-beta.4+local')).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('Search installed mods'), { target: { value: 'local author' } });
+    expect(screen.queryByText('Other Mod')).toBeNull();
+    expect(screen.getAllByText('Local Mod').length).toBeGreaterThan(0);
+  });
+
+  it('keeps watcher author, version and enabled status when an older initial read finishes late', async () => {
+    let finishOld: (value: unknown) => void = () => {};
+    apiMocks.getMods.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }));
+    render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    await waitFor(() => expect(apiMocks.getMods).toHaveBeenCalledTimes(1));
+    const current = { name: 'Watched Mod', fileName: 'Watched.dll', path: 'C:/env/Mods/Watched.dll.disabled', source: 'local', author: 'New author', version: '2.0.0', disabled: true };
+    modsSnapshotHandler?.({ environmentId: 'env-1', snapshot: { mods: [current], modsDirectory: 'C:/env/Mods', count: 1 } });
+    expect((await screen.findAllByText('New author')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('2.0.0').length).toBeGreaterThan(0);
+    await act(async () => { finishOld({ mods: [{ ...current, author: 'Old author', version: '1.0.0', disabled: false }], modsDirectory: 'C:/env/Mods', count: 1 }); });
+    await waitFor(() => expect(screen.queryByText('Old author')).toBeNull());
+    expect(screen.getAllByText('2.0.0').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy();
+  });
+
+  it('cleans up a watcher subscription that resolves after unmount', async () => {
+    let finishRegistration: (value: () => void) => void = () => {};
+    const stop = vi.fn();
+    eventMocks.onModsSnapshotUpdated.mockReturnValueOnce(new Promise(resolve => { finishRegistration = resolve; }));
+    const { unmount } = render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+    unmount();
+    finishRegistration(stop);
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(apiMocks.getMods).not.toHaveBeenCalled();
+  });
+
   it('uses one installed-mod snapshot projection for a watcher batch', async () => {
     render(
       <ModsOverlay
@@ -379,7 +441,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+    await chooseInspectorMenuItem('Security Report');
 
     expect(await screen.findByText('Security Report - Trusted Mod')).toBeTruthy();
   });
@@ -434,7 +496,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+    await chooseInspectorMenuItem('Security Report');
 
     await waitFor(() => {
       expect(onOpenSecurityReport).toHaveBeenCalledWith(
@@ -469,8 +531,8 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByText('UnityExplorer.ML.Mono'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Scan Security' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details for UnityExplorer.ML.Mono' }));
+    await chooseInspectorMenuItem('Scan Security');
 
     await waitFor(() => {
       expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith(
@@ -523,7 +585,8 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Scan Local Mods' }));
+    await screen.findByRole('button', { name: 'Open details for Local One' });
+    await chooseToolbarMenuItem('Scan Local Mods');
 
     await waitFor(() => {
       expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledTimes(2);
@@ -786,7 +849,7 @@ describe('ModsOverlay', () => {
     );
 
     fireEvent.click(await screen.findByRole('button', { name: 'Open details for Nexus Update Mod' }));
-    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    const inspector = getInspector();
     fireEvent.click(within(inspector).getByRole('button', { name: 'Update' }));
 
     await waitFor(() => {
@@ -845,7 +908,7 @@ describe('ModsOverlay', () => {
     render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Open details for Security Update Mod' }));
-    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    const inspector = getInspector();
     fireEvent.click(within(inspector).getByRole('button', { name: 'Update' }));
 
     expect(await screen.findByText('Security Findings - Security Update Mod')).toBeTruthy();
@@ -866,9 +929,9 @@ describe('ModsOverlay', () => {
       />
     );
 
-    await screen.findByRole('button', { name: 'Installed' });
+    await screen.findByRole('button', { name: /^Installed/ });
 
-    expect(document.querySelector('.workspace-collection-shell')).not.toBeNull();
+    expect(document.querySelector('.env-assets')).not.toBeNull();
     expect(document.querySelector('.mods-env-layout--grid')).toBeNull();
   });
 
@@ -920,15 +983,15 @@ describe('ModsOverlay', () => {
       />,
     );
 
-    expect(await screen.findByRole('heading', { name: 'Link Mod Source' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Link mod source' })).toBeTruthy();
     await waitFor(() => {
       expect(apiMocks.searchNexusMods).toHaveBeenCalledWith('schedule1', 'PackRat');
       expect(apiMocks.searchThunderstoreByRuntime).toHaveBeenCalledWith('schedule-i', 'PackRat');
     });
-    expect(document.querySelector('.workspace-inspector-link-panel__summary strong')?.textContent).toBe('PackRat');
-    expect(document.querySelector('.workspace-inspector-link-panel__summary span')?.textContent).toBe('PackRat-IL2CPP.dll');
+    expect(document.querySelector('.mods-tab-link__subject strong')?.textContent).toBe('PackRat');
+    expect(document.querySelector('.mods-tab-link__subject span')?.textContent).toBe('PackRat-IL2CPP.dll');
     expect(await screen.findByText('Pack Rat')).toBeTruthy();
-    expect(screen.getByText('NexusMods')).toBeTruthy();
+    expect(screen.getByText('Nexus Mods')).toBeTruthy();
     expect(screen.getByText('Name + author match')).toBeTruthy();
     expect(screen.getByText('Installed version found')).toBeTruthy();
   });
@@ -1098,9 +1161,10 @@ describe('ModsOverlay', () => {
     await waitFor(() => {
       expect(screen.queryByText('Select an installed mod to review details and actions.')).toBeNull();
     });
-    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    const inspector = getInspector();
     expect(within(inspector).getByRole('button', { name: 'Uninstall' })).toBeTruthy();
-    expect(within(inspector).getByRole('button', { name: 'Open Folder' })).toBeTruthy();
+    fireEvent.click(within(inspector).getByRole('button', { name: 'More actions' }));
+    expect(await screen.findByRole('menuitem', { name: /Open Folder/ })).toBeTruthy();
   });
 
   it('shows installed version as latest for managed remote mods without cached updates', async () => {
@@ -1132,7 +1196,7 @@ describe('ModsOverlay', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Open details for Current Mod' }));
 
-    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    const inspector = getInspector();
     await waitFor(() => {
       expect(within(inspector).getByText('Latest').nextElementSibling?.textContent).toBe('3.3.0');
     });
@@ -1165,8 +1229,7 @@ describe('ModsOverlay', () => {
     );
 
     fireEvent.click(await screen.findByRole('button', { name: 'Open details for Source Linked Mod' }));
-    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
-    fireEvent.click(within(inspector).getByRole('button', { name: 'Open Source Page' }));
+    await chooseInspectorMenuItem(/Open Source Page/);
 
     expect(apiMocks.openExternalUrl).toHaveBeenCalledWith('https://www.nexusmods.com/schedule1/mods/123');
   });
@@ -1180,7 +1243,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Share Profile' }));
+    await chooseToolbarMenuItem(/Share Profile/);
 
     await waitFor(() => {
       expect(apiMocks.exportEnvironmentProfile).toHaveBeenCalledWith('env-1');
@@ -1203,6 +1266,223 @@ describe('ModsOverlay', () => {
         'C:\\Profiles\\test-env.json',
       );
     });
+  });
+
+  it('updates every auto-updatable mod from the Updates view', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Alpha Mod', fileName: 'Alpha.dll', path: 'C:/env/Mods/Alpha.dll', source: 'thunderstore', managed: true, disabled: false, version: '1.0.0' },
+        { name: 'Bravo Mod', fileName: 'Bravo.dll', path: 'C:/env/Mods/Bravo.dll', source: 'nexusmods', managed: true, disabled: false, version: '2.0.0' },
+        { name: 'Local Mod', fileName: 'Local.dll', path: 'C:/env/Mods/Local.dll', source: 'local', managed: false, disabled: false, version: '0.1.0' },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 3,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 3,
+      updates: [
+        { modFileName: 'Alpha.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+        { modFileName: 'Bravo.dll', currentVersion: '2.0.0', latestVersion: '2.1.0' },
+        { modFileName: 'Local.dll', currentVersion: '0.1.0', latestVersion: '0.2.0' },
+      ],
+    });
+    apiMocks.updateMod.mockResolvedValue({ success: true });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        navigationState={{ modsTab: 'updates' }}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Update All (2)' }));
+
+    await waitFor(() => {
+      expect(apiMocks.updateMod).toHaveBeenCalledTimes(2);
+      expect(apiMocks.updateMod).toHaveBeenCalledWith('env-1', 'Alpha.dll', false);
+      expect(apiMocks.updateMod).toHaveBeenCalledWith('env-1', 'Bravo.dll', false);
+    });
+  });
+
+  it.each([
+    'security confirmation',
+    'security block',
+    'Nexus login',
+    'Nexus manual session',
+    'Nexus recovery page',
+  ])('stops Update All at a pending %s instead of updating the next mod', async (pending) => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Alpha Mod', fileName: 'Alpha.dll', path: 'C:/env/Mods/Alpha.dll', source: 'nexusmods', managed: true, disabled: false, version: '1.0.0' },
+        { name: 'Bravo Mod', fileName: 'Bravo.dll', path: 'C:/env/Mods/Bravo.dll', source: 'thunderstore', managed: true, disabled: false, version: '1.0.0' },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 2,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 2,
+      updates: [
+        { modFileName: 'Alpha.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+        { modFileName: 'Bravo.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+      ],
+    });
+    const securityScan = {
+      summary: { state: 'review', verified: false, totalFindings: 1, threatFamilyCount: 0 },
+      policy: { enabled: true, requiresConfirmation: true, blocked: pending === 'security block', promptOnHighFindings: false, blockCriticalFindings: false },
+      files: [],
+    };
+    const result = pending.startsWith('security')
+      ? { success: false, securityScan, securityScanConfirmationRequired: pending === 'security confirmation', securityScanBlocked: pending === 'security block' }
+      : pending === 'Nexus login'
+        ? { success: false, errorCode: 'nexus_auth_required', error: 'Sign in before updating.' }
+        : { success: false, requiresManualDownload: true, recoveryUrl: 'https://www.nexusmods.com/schedule1/mods/1777?tab=files',
+            ...(pending === 'Nexus manual session' ? { modId: 1777, fileId: 42, gameId: 'schedule1', runtime: 'IL2CPP' } : {}) };
+    apiMocks.updateMod.mockResolvedValueOnce(result).mockResolvedValue({ success: true });
+    const onOpenSecurityReport = vi.fn();
+    render(<ModsOverlay isOpen onClose={() => {}} environmentId="env-1" navigationState={{ modsTab: 'updates' }}
+      onOpenSecurityReport={onOpenSecurityReport} onOpenAccounts={vi.fn()} />);
+
+    const updateAll = await screen.findByRole('button', { name: 'Update All (2)' });
+    await act(async () => { fireEvent.click(updateAll); });
+    await waitFor(() => expect(updateAll).toHaveTextContent('Update All (2)'));
+
+    expect(apiMocks.updateMod.mock.calls).toEqual([['env-1', 'Alpha.dll', false]]);
+    if (pending.startsWith('security')) {
+      expect(onOpenSecurityReport).toHaveBeenCalledOnce();
+      const request = onOpenSecurityReport.mock.calls[0][0];
+      expect(request.title).toBe('Security Findings - Alpha Mod');
+      if (pending === 'security confirmation') {
+        await act(async () => { await request.onConfirm(); });
+        expect(apiMocks.updateMod.mock.calls).toEqual([
+          ['env-1', 'Alpha.dll', false], ['env-1', 'Alpha.dll', true],
+        ]);
+      } else {
+        expect(request.onConfirm).toBeNull();
+      }
+    } else if (pending === 'Nexus manual session') {
+      expect(apiMocks.beginNexusManualDownloadSession).toHaveBeenCalledWith(expect.objectContaining({ environmentId: 'env-1', modId: 1777, fileId: 42 }));
+    } else {
+      expect(screen.getByText(pending === 'Nexus login' ? 'Nexus Login Required' : 'Manual Download Required')).toBeInTheDocument();
+    }
+  });
+
+  it('leaves mods with a security exception out of Update All', async () => {
+    const suspiciousScan = {
+      state: 'review',
+      verified: false,
+      disposition: {
+        classification: 'Suspicious',
+        headline: 'Potentially malicious',
+        summary: 'Suspicious behaviour was found.',
+        blockingRecommended: false,
+        relatedFindingIds: [],
+      },
+      totalFindings: 1,
+      threatFamilyCount: 0,
+    };
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Alpha Mod', fileName: 'Alpha.dll', path: 'C:/env/Mods/Alpha.dll', source: 'thunderstore', managed: true, disabled: false, version: '1.0.0', securityScan: { state: 'verified', verified: true, totalFindings: 0, threatFamilyCount: 0 } },
+        { name: 'Risky Mod', fileName: 'Risky.dll', path: 'C:/env/Mods/Risky.dll', source: 'thunderstore', managed: true, disabled: false, version: '1.0.0', securityScan: suspiciousScan },
+        { name: 'Unscanned Mod', fileName: 'Unscanned.dll', path: 'C:/env/Mods/Unscanned.dll', source: 'nexusmods', managed: true, disabled: false, version: '1.0.0', securityScan: { state: 'unavailable', verified: false, totalFindings: 0, threatFamilyCount: 0 } },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 3,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 3,
+      updates: [
+        { modFileName: 'Alpha.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+        { modFileName: 'Risky.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+        { modFileName: 'Unscanned.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' },
+      ],
+    });
+    apiMocks.updateMod.mockResolvedValue({ success: true });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        navigationState={{ modsTab: 'updates' }}
+      />
+    );
+
+    const updateAll = await screen.findByRole('button', { name: 'Update All (1)' });
+    expect(screen.getByText('2 need review')).toBeInTheDocument();
+    expect(updateAll.getAttribute('title')).toMatch(/2 updates need a security review/);
+
+    fireEvent.click(updateAll);
+    await waitFor(() => {
+      expect(apiMocks.updateMod).toHaveBeenCalledWith('env-1', 'Alpha.dll', false);
+    });
+    expect(apiMocks.updateMod).toHaveBeenCalledTimes(1);
+
+    // The flagged mod keeps its own Update action, which still goes through the security gate.
+    fireEvent.click(screen.getByRole('button', { name: 'Open details for Risky Mod' }));
+    fireEvent.click(within(getInspector()).getByRole('button', { name: 'Update' }));
+    await waitFor(() => {
+      expect(apiMocks.updateMod).toHaveBeenLastCalledWith('env-1', 'Risky.dll', false);
+    });
+  });
+
+  it('disables Update All when every update needs a security review', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Risky Mod', fileName: 'Risky.dll', path: 'C:/env/Mods/Risky.dll', source: 'thunderstore', managed: true, disabled: false, version: '1.0.0', securityScan: { state: 'review', verified: false, highestSeverity: 'High', totalFindings: 2, threatFamilyCount: 0 } },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 1,
+      updates: [{ modFileName: 'Risky.dll', currentVersion: '1.0.0', latestVersion: '1.1.0' }],
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        navigationState={{ modsTab: 'updates' }}
+      />
+    );
+
+    const updateAll = await screen.findByRole('button', { name: 'Update All (0)' });
+    expect(updateAll).toBeDisabled();
+    expect(updateAll.getAttribute('title')).toMatch(/Every available update needs a security review/);
+    expect(screen.getByText('1 needs review')).toBeInTheDocument();
+  });
+
+  it('disables a mod from its row switch without changing the selection', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        { name: 'Alpha Mod', fileName: 'Alpha.dll', path: 'C:/env/Mods/Alpha.dll', source: 'thunderstore', managed: true, disabled: false },
+        { name: 'Bravo Mod', fileName: 'Bravo.dll', path: 'C:/env/Mods/Bravo.dll', source: 'thunderstore', managed: true, disabled: false },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 2,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    const alpha = await screen.findByRole('button', { name: 'Open details for Alpha Mod' });
+    await waitFor(() => expect(alpha.getAttribute('aria-pressed')).toBe('true'));
+    fireEvent.click(screen.getByRole('switch', { name: 'Bravo Mod enabled' }));
+
+    await waitFor(() => {
+      expect(apiMocks.disableMod).toHaveBeenCalledWith('env-1', 'Bravo.dll');
+    });
+    expect(alpha.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Open details for Bravo Mod' }).getAttribute('aria-pressed')).toBe('false');
   });
 
   it('opens installed mod details via keyboard activation', async () => {
@@ -1238,9 +1518,10 @@ describe('ModsOverlay', () => {
     await waitFor(() => {
       expect(screen.queryByText('Select an installed mod to review details and actions.')).toBeNull();
     });
-    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
-    expect(within(inspector).getByRole('button', { name: 'Open in Mod Library' })).toBeTruthy();
+    const inspector = getInspector();
     expect(within(inspector).getByRole('button', { name: 'Uninstall' })).toBeTruthy();
+    fireEvent.click(within(inspector).getByRole('button', { name: 'More actions' }));
+    expect(await screen.findByRole('menuitem', { name: /Show in Mod Library/ })).toBeTruthy();
   });
 });
 

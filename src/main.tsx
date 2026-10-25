@@ -12,6 +12,7 @@ import {
 } from './utils/theme'
 import '@fortawesome/fontawesome-svg-core/styles.css'
 import './style.css'
+import './native-console.css'
 
 declare global {
   interface Window {

@@ -7,7 +7,6 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 
 import {
@@ -224,13 +223,6 @@ describe("Settings", () => {
     });
     expect(channelControl.textContent).toContain("Stable");
     expect(channelControl.textContent).not.toContain("Beta");
-
-    const status = screen.getByText("App Update Channel").closest(
-      ".settings-inline-status",
-    );
-    expect(status).not.toBeNull();
-    expect(within(status as HTMLElement).getByText("Stable")).toBeTruthy();
-    expect(within(status as HTMLElement).queryByText("Beta")).toBeNull();
   });
 
   it("opens the directory picker from the sidebar and browses the current path", async () => {
@@ -351,9 +343,7 @@ describe("Settings", () => {
 
     expect(updateSettingsSpy).toHaveBeenCalledTimes(1);
 
-    expect(
-      screen.getByText("Adjust appearance, downloads, updates, and tooling."),
-    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1500);
@@ -535,7 +525,7 @@ describe("Settings", () => {
 
     render(<Settings isOpen={true} onClose={vi.fn()} />);
 
-    expect(await screen.findByText("Linux Readiness")).toBeTruthy();
+    expect(await screen.findByText("Linux readiness")).toBeTruthy();
     expect(await screen.findByText("Protontricks")).toBeTruthy();
     expect(await screen.findByText("nxm:// handler")).toBeTruthy();
 

@@ -21,9 +21,11 @@ interface FooterProps {
   onOpenModUpdates?: () => void;
   appUpdateAvailable?: boolean;
   onOpenAppUpdate?: () => void;
+  /** Background work entry point (the downloads dock) shown first in the status bar. */
+  downloads?: React.ReactNode;
 }
 
-export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenAppUpdate }: FooterProps) {
+export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenAppUpdate, downloads }: FooterProps) {
   const { environments, checkAllUpdates } = useEnvironmentStore();
   const { library, ensureLibrary } = useModLibraryStore();
   const [checkingAll, setCheckingAll] = useState(false);
@@ -235,6 +237,7 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
   return (
     <footer className="app-statusbar">
       <div className="statusbar-left">
+        {downloads}
         {completedEnvs.length > 0 && (
           <span className="statusbar-stat">
             {completedEnvs.length} install{completedEnvs.length !== 1 ? 's' : ''}

@@ -10,6 +10,7 @@ import {
 import type { ModLibraryResult } from "../types";
 import { ApiService } from "../services/api";
 import {
+  onModLibraryChanged,
   onModMetadataRefreshStatus,
   onModUpdatesChecked,
   onModsChanged,
@@ -143,6 +144,7 @@ export function ModLibraryStoreProvider({ children }: { children: ReactNode }) {
     // also settle the store's stale marker. refreshLibrary coalesces an
     // overlapping snapshot-complete event and retains one follow-up request
     // when that event invalidates an in-flight response.
+    void register(() => onModLibraryChanged(refreshAfterInvalidation));
     void register(() => onModsChanged(refreshAfterInvalidation));
     void register(() => onModsSnapshotUpdated(refreshAfterInvalidation));
     void register(() => onPluginsChanged(refreshAfterInvalidation));

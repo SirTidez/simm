@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   revealPath: vi.fn(),
 }));
 
+vi.mock('./useLibraryArtwork', () => ({ useLibraryArtwork: () => () => null }));
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
 }));
@@ -318,6 +319,45 @@ describe('ConfigurationOverlay', () => {
         'env-1',
         'C:/Games/Schedule I/MelonLoader/Loader.cfg',
         [{ kind: 'setValue', section: 'General', key: 'foo', value: 'baz' }]
+      );
+    });
+  });
+
+  it('edits boolean values with a switch and saves them as setValue operations', async () => {
+    apiMocks.getConfigCatalog.mockResolvedValue([
+      makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
+    ]);
+    apiMocks.getConfigDocument.mockResolvedValue(
+      makeDocument({
+        summary: makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
+        rawContent: '[General]\nenabled = true',
+        sections: [{ name: 'General', entries: [{ key: 'enabled', value: 'true', comment: 'Turns the loader on' }] }],
+      })
+    );
+    apiMocks.applyConfigEdits.mockResolvedValue(undefined);
+
+    render(
+      <ConfigurationOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    const toggle = await screen.findByRole('switch', { name: 'Value for enabled' });
+    expect(screen.getByText('Turns the loader on')).toBeTruthy();
+    expect(screen.getByText('No unsaved changes')).toBeTruthy();
+
+    fireEvent.click(toggle);
+    expect(await screen.findByText('Unsaved changes')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(apiMocks.applyConfigEdits).toHaveBeenCalledWith(
+        'env-1',
+        'C:/Games/Schedule I/MelonLoader/Loader.cfg',
+        [{ kind: 'setValue', section: 'General', key: 'enabled', value: 'false' }]
       );
     });
   });

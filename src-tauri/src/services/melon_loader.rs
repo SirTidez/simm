@@ -1,10 +1,13 @@
 use crate::types::Environment;
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use zip::ZipArchive;
 
@@ -17,6 +20,22 @@ const LINUX_REQUIRED_WINETRICKS_VERBS: &[&str] = &["dotnet6", "vcrun2015"];
 const DEFAULT_LAUNCH_VERIFY_TIMEOUT_MS: u64 = 20_000;
 const MAX_LAUNCH_VERIFY_TIMEOUT_MS: u64 = 60_000;
 const LAUNCH_LOG_TIMESTAMP_TOLERANCE_MS: u64 = 1_500;
+
+pub(crate) struct LaunchLoaderObservation {
+    pub loader_state: String,
+    pub log_path: String,
+    pub modified_at: Option<u64>,
+    pub diagnostic: Option<String>,
+}
+
+struct CachedLaunchLog {
+    modified: SystemTime,
+    length: u64,
+    confirmed: bool,
+}
+
+static LAUNCH_LOG_CACHE: Lazy<tokio::sync::Mutex<HashMap<PathBuf, CachedLaunchLog>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 struct LinuxPrerequisiteInspection {
@@ -57,6 +76,52 @@ impl MelonLoaderService {
 
     pub fn linux_melonloader_launch_options() -> &'static str {
         LINUX_MELONLOADER_LAUNCH_OPTIONS
+    }
+
+    pub(crate) async fn inspect_launch_after(
+        &self,
+        game_dir: &str,
+        launch_started_at_ms: u64,
+    ) -> LaunchLoaderObservation {
+        let path = Path::new(game_dir).join("MelonLoader").join("Latest.log");
+        let result = async {
+            let game = Path::new(game_dir);
+            let has_version = fs::try_exists(game.join("version.dll")).await?
+                || fs::try_exists(game.join("Version.dll")).await?;
+            let loader = match fs::metadata(game.join("MelonLoader")).await {
+                Ok(metadata) => metadata.is_dir(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            };
+            if !has_version || !loader {
+                return Ok(("notInstalled", None));
+            }
+            let fresh_after =
+                launch_started_at_ms.saturating_sub(LAUNCH_LOG_TIMESTAMP_TOLERANCE_MS);
+            Ok::<_, anyhow::Error>(match Self::inspect_launch_log(&path, fresh_after).await? {
+                LaunchLogInspection::Confirmed { modified_at } => ("confirmed", Some(modified_at)),
+                LaunchLogInspection::Stale { modified_at } => ("staleLog", Some(modified_at)),
+                LaunchLogInspection::Missing => ("noLog", None),
+                LaunchLogInspection::NoMarker { modified_at } => {
+                    ("noConfirmation", Some(modified_at))
+                }
+            })
+        }
+        .await;
+        let (loader_state, modified_at, diagnostic) = match result {
+            Ok((state, modified)) => (state, modified, None),
+            Err(error) => (
+                "unavailable",
+                None,
+                Some(format!("Could not inspect MelonLoader startup: {error:#}")),
+            ),
+        };
+        LaunchLoaderObservation {
+            loader_state: loader_state.into(),
+            log_path: path.to_string_lossy().into_owned(),
+            modified_at,
+            diagnostic,
+        }
     }
 
     pub async fn verify_launch_after(
@@ -287,11 +352,13 @@ impl MelonLoaderService {
             )
         } else {
             let filesystem = crate::services::filesystem::FileSystemService::new();
-            let shortcut = filesystem
+            let mut shortcut = filesystem
                 .ensure_schedule_i_steam_shortcut(&env.output_dir)
                 .await?;
             let reload_note = if shortcut.requires_client_reload {
-                filesystem.restart_steam_client().await?;
+                shortcut = filesystem
+                    .ensure_schedule_i_steam_shortcut_after_restart(&env.output_dir)
+                    .await?;
                 Some(
                     "SIMM restarted Steam so the managed shortcut prefix is available.".to_string(),
                 )
@@ -470,29 +537,80 @@ impl MelonLoaderService {
             Err(error) => return Err(error.into()),
         };
 
-        let modified_at = Self::system_time_to_millis(metadata.modified().unwrap_or(UNIX_EPOCH));
+        anyhow::ensure!(metadata.is_file(), "Latest.log is not a regular file");
+        let modified = metadata
+            .modified()
+            .context("Could not inspect Latest.log timestamp")?;
+        let modified_at = Self::system_time_to_millis(modified);
         if modified_at < fresh_after_ms {
             return Ok(LaunchLogInspection::Stale { modified_at });
         }
 
-        let bytes = fs::read(path).await.context("Failed to read Latest.log")?;
-        let content = String::from_utf8_lossy(&bytes);
-        if Self::content_confirms_melonloader_launch(&content) {
+        let mut cache = LAUNCH_LOG_CACHE.lock().await;
+        let confirmed = if let Some(entry) = cache
+            .get(path)
+            .filter(|entry| entry.modified == modified && entry.length == metadata.len())
+        {
+            entry.confirmed
+        } else {
+            // Scan a stable-size snapshot in chunks. Unchanged logs are not reread on each poll.
+            let mut file = fs::File::open(path)
+                .await
+                .context("Failed to read Latest.log")?
+                .take(metadata.len());
+            let mut buffer = vec![0u8; 65_536];
+            let mut carry = String::new();
+            let mut loader = false;
+            let mut marker = false;
+            loop {
+                let count = file
+                    .read(&mut buffer)
+                    .await
+                    .context("Failed to read Latest.log")?;
+                if count == 0 {
+                    break;
+                }
+                let content =
+                    carry + &String::from_utf8_lossy(&buffer[..count]).to_ascii_lowercase();
+                loader |= content.contains("melonloader");
+                marker |= Self::content_has_startup_marker(&content);
+                // All matching strings are ASCII and shorter than this byte carry.
+                carry = String::from_utf8_lossy(
+                    &content.as_bytes()[content.len().saturating_sub(64)..],
+                )
+                .into_owned();
+                if loader && marker {
+                    break;
+                }
+            }
+            let confirmed = loader && marker;
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(
+                path.to_path_buf(),
+                CachedLaunchLog {
+                    modified,
+                    length: metadata.len(),
+                    confirmed,
+                },
+            );
+            confirmed
+        };
+        if confirmed {
             Ok(LaunchLogInspection::Confirmed { modified_at })
         } else {
             Ok(LaunchLogInspection::NoMarker { modified_at })
         }
     }
 
-    fn content_confirms_melonloader_launch(content: &str) -> bool {
-        let lower = content.to_ascii_lowercase();
-        lower.contains("melonloader")
-            && (lower.contains("game name:")
-                || lower.contains("loading mods")
-                || lower.contains("loading plugins")
-                || lower.contains("melon assembly loaded")
-                || lower.contains("support module loaded")
-                || lower.contains("scene loaded"))
+    fn content_has_startup_marker(lower: &str) -> bool {
+        lower.contains("game name:")
+            || lower.contains("loading mods")
+            || lower.contains("loading plugins")
+            || lower.contains("melon assembly loaded")
+            || lower.contains("support module loaded")
+            || lower.contains("scene loaded")
     }
 
     fn system_time_to_millis(time: SystemTime) -> u64 {
@@ -993,7 +1111,7 @@ impl Default for MelonLoaderService {
 
 #[cfg(test)]
 mod tests {
-    use super::MelonLoaderService;
+    use super::{LaunchLogInspection, MelonLoaderService};
     #[cfg(target_os = "linux")]
     use crate::services::filesystem::FileSystemService;
     #[cfg(target_os = "linux")]
@@ -1234,6 +1352,74 @@ mod tests {
 
         assert_eq!(status["status"], "notInstalled");
         assert_eq!(status["confirmed"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn single_launch_inspection_reports_missing_partial_fresh_and_unavailable_logs(
+    ) -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let dir = temp.path().to_str().unwrap();
+        let service = MelonLoaderService::new();
+        assert_eq!(
+            service.inspect_launch_after(dir, 0).await.loader_state,
+            "notInstalled"
+        );
+        std::fs::create_dir_all(temp.path().join("MelonLoader/net6"))?;
+        std::fs::write(temp.path().join("version.dll"), b"fixture")?;
+        assert_eq!(
+            service.inspect_launch_after(dir, 0).await.loader_state,
+            "noLog"
+        );
+        let log = temp.path().join("MelonLoader/Latest.log");
+        std::fs::write(&log, b"MelonLoader loading")?;
+        assert_eq!(
+            service.inspect_launch_after(dir, 0).await.loader_state,
+            "noConfirmation"
+        );
+        std::fs::write(&log, b"MelonLoader Game Name: Schedule I")?;
+        assert_eq!(
+            service.inspect_launch_after(dir, 0).await.loader_state,
+            "confirmed"
+        );
+        assert_eq!(
+            service
+                .inspect_launch_after(dir, u64::MAX)
+                .await
+                .loader_state,
+            "staleLog"
+        );
+        std::fs::remove_file(&log)?;
+        std::fs::create_dir(&log)?;
+        let unavailable = service.inspect_launch_after(dir, 0).await;
+        assert_eq!(unavailable.loader_state, "unavailable");
+        assert!(unavailable.diagnostic.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn launch_log_stream_finds_split_markers_in_large_logs_and_invalidates_cache(
+    ) -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let log = temp.path().join("Latest.log");
+        let mut bytes = vec![b' '; 65_533];
+        bytes.extend_from_slice(b"MelonLoader");
+        bytes.extend(vec![b' '; 2_000_000]);
+        bytes.extend_from_slice(b"Loading Mods");
+        std::fs::write(&log, bytes)?;
+        assert!(matches!(
+            MelonLoaderService::inspect_launch_log(&log, 0).await?,
+            LaunchLogInspection::Confirmed { .. }
+        ));
+        assert!(matches!(
+            MelonLoaderService::inspect_launch_log(&log, 0).await?,
+            LaunchLogInspection::Confirmed { .. }
+        ));
+        std::fs::write(&log, b"partial replacement")?;
+        assert!(matches!(
+            MelonLoaderService::inspect_launch_log(&log, 0).await?,
+            LaunchLogInspection::NoMarker { .. }
+        ));
         Ok(())
     }
 

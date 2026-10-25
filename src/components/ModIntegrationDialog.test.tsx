@@ -74,7 +74,7 @@ describe('ModIntegrationDialog', () => {
 
     expect(await screen.findByRole('heading', { name: 'Mod Integration' })).toBeTruthy();
     expect(screen.getByText('Beta - Mono')).toBeTruthy();
-    expect(screen.getByText('Port 43871 · managed automatically')).toBeTruthy();
+    expect(await screen.findByText('Port 43871 · managed automatically')).toBeTruthy();
     expect(screen.queryByText('127.0.0.1:43871')).toBeNull();
     expect(screen.getAllByText('Example Mod')).toHaveLength(2);
     expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy();
@@ -94,7 +94,7 @@ describe('ModIntegrationDialog', () => {
     await screen.findAllByText('Example Mod');
 
     fireEvent.click(screen.getByText('Queue automatically'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Policy' }));
     await waitFor(() => {
       expect(apiMocks.setModIntegrationPolicy).toHaveBeenCalledWith('env-1', 'automatic');
     });

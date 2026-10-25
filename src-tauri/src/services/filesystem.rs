@@ -13,6 +13,8 @@ const STEAM_SHORTCUT_TAG: &str = "SIMM";
 static ACTIVE_DIRECT_LAUNCHES: Lazy<Mutex<HashMap<PathBuf, u64>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static STEAM_SHORTCUT_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static STEAM_SHORTCUT_CLIENT_LOCK: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
 static NEXT_DIRECT_LAUNCH_TOKEN: AtomicU64 = AtomicU64::new(1);
 const STEAM_SHORTCUT_MANAGED_KEYS: &[&str] = &[
     "appid",
@@ -90,6 +92,60 @@ pub struct SteamShortcutSetup {
     pub shortcuts_file: String,
     pub status: String,
     pub requires_client_reload: bool,
+}
+
+// Keep the restart transaction injectable so shutdown persistence can be tested without Steam.
+async fn register_shortcut_with_steam_restart<
+    T,
+    Stop,
+    StopFuture,
+    Register,
+    RegisterFuture,
+    Start,
+    StartFuture,
+>(
+    stop: Stop,
+    register: Register,
+    start: Start,
+) -> Result<T>
+where
+    Stop: FnOnce() -> StopFuture,
+    StopFuture: std::future::Future<Output = Result<()>>,
+    Register: FnOnce() -> RegisterFuture,
+    RegisterFuture: std::future::Future<Output = Result<T>>,
+    Start: FnOnce(T) -> StartFuture,
+    StartFuture: std::future::Future<Output = Result<T>>,
+{
+    let _client_guard = STEAM_SHORTCUT_CLIENT_LOCK.lock().await;
+    stop().await?;
+    let registration = register().await?;
+    start(registration).await
+}
+
+#[cfg(any(target_os = "windows", test))]
+async fn wait_for_active_steam_account<Inspect>(
+    expected_account: u32,
+    timeout: Duration,
+    poll_interval: Duration,
+    mut inspect: Inspect,
+) -> Result<()>
+where
+    Inspect: FnMut() -> Result<Option<u32>>,
+{
+    anyhow::ensure!(
+        expected_account != 0,
+        "The intended Steam account is invalid"
+    );
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(active) = inspect()?.filter(|account| *account != 0) {
+            anyhow::ensure!(active == expected_account, "Steam restarted with a different account. Select the intended Steam account and launch again.");
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        anyhow::ensure!(!remaining.is_zero(), "Steam has not confirmed a signed-in account. Finish signing in to the intended Steam account, then launch again. SIMM did not send a launch request.");
+        tokio::time::sleep(poll_interval.min(remaining)).await;
+    }
 }
 
 #[derive(Clone)]
@@ -283,13 +339,14 @@ impl FileSystemService {
         app_id: &str,
         game_dir: &str,
     ) -> Result<String> {
+        let _client_guard = STEAM_SHORTCUT_CLIENT_LOCK.lock().await;
         let registration = self
             .prepare_steam_shortcut_registration(app_id, game_dir)
             .await?;
 
         if registration.status != SteamShortcutStatus::Unchanged {
             warn_with_location(format!(
-                "Registered Steam shortcut for {} at {}",
+                "Prepared Steam shortcut for {} at {} (changes are deferred while Steam is running)",
                 crate::services::logger::LoggerService::sanitize_log_text(game_dir),
                 crate::services::logger::LoggerService::sanitize_log_text(
                     &registration.shortcuts_file.to_string_lossy()
@@ -326,41 +383,127 @@ impl FileSystemService {
         &self,
         game_dir: &str,
     ) -> Result<String> {
+        let setup = self.restart_steam_shortcut(game_dir, true).await?;
+        Ok(setup.shortcut_url)
+    }
+
+    pub async fn ensure_schedule_i_steam_shortcut_after_restart(
+        &self,
+        game_dir: &str,
+    ) -> Result<SteamShortcutSetup> {
+        self.restart_steam_shortcut(game_dir, false).await
+    }
+
+    async fn restart_steam_shortcut(
+        &self,
+        game_dir: &str,
+        launch: bool,
+    ) -> Result<SteamShortcutSetup> {
+        // Freeze the intended account before shutdown changes ActiveUser/login metadata.
+        let shortcuts_file = Self::steam_shortcuts_file_path()?;
         let app_id = crate::services::steam::SteamService::get_steam_app_id();
-        let registration = self
-            .prepare_steam_shortcut_registration(&app_id, game_dir)
-            .await?;
+        self.resolve_game_executable(game_dir)?;
+        self.ensure_steam_appid_file(game_dir, &app_id).await?;
+        let registration = register_shortcut_with_steam_restart(
+            || self.stop_steam_client(),
+            || async {
+                let registration = self.prepare_steam_shortcut_registration_at_path(&app_id, game_dir, &shortcuts_file).await?;
+                if Self::steam_shortcut_requires_client_reload(registration.shortcut_app_id)? {
+                    anyhow::bail!("Steam started again before SIMM could safely register the shortcut. Fully exit Steam and retry the launch.");
+                }
+                Ok(registration)
+            },
+            |registration| async {
+                self.start_steam_client().await?;
+                Self::verify_restarted_steam_account(&shortcuts_file).await?;
+                self.verify_steam_shortcut_registration(game_dir, &registration)?;
+                Self::clear_steam_shortcut_reload_marker(registration.shortcut_app_id)?;
+                if launch {
+                    if let Err(error) = self.launch_via_steam_url(&registration.shortcut_url).await {
+                        warn_with_location(format!("Steam shortcut protocol dispatch failed after restart: {}", error));
+                        self.launch_via_steam_executable_url(&registration.shortcut_url).await?;
+                    }
+                }
+                Ok(registration)
+            },
+        ).await?;
+        Ok(Self::shortcut_setup(registration, false))
+    }
 
-        warn_with_location(format!(
-            "Restarting Steam before launching custom install {} through shortcut",
-            crate::services::logger::LoggerService::sanitize_log_text(game_dir)
-        ));
-        self.restart_steam_client().await?;
-        Self::clear_steam_shortcut_reload_marker(registration.shortcut_app_id)?;
-
-        if let Err(error) = self.launch_via_steam_url(&registration.shortcut_url).await {
-            warn_with_location(format!(
-                "Steam shortcut protocol launch failed after Steam restart for {}. Falling back to Steam executable URL launch: {}",
-                crate::services::logger::LoggerService::sanitize_log_text(game_dir),
-                error
-            ));
-            self.launch_via_steam_executable_url(&registration.shortcut_url)
-                .await?;
-        }
-
-        Ok(format!(
-            "{} ({})",
-            registration.shortcut_url,
-            crate::services::logger::LoggerService::sanitize_log_text(
-                &registration.shortcuts_file.to_string_lossy()
+    async fn verify_restarted_steam_account(shortcuts_file: &Path) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            let expected_account = shortcuts_file
+                .ancestors()
+                .nth(2)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .and_then(|account| account.parse::<u32>().ok())
+                .context("Could not identify the intended Steam shortcut account")?;
+            // Last-used metadata is useful for stopped-client preparation, never login proof.
+            wait_for_active_steam_account(
+                expected_account,
+                Duration::from_secs(45),
+                Duration::from_millis(500),
+                Self::active_steam_account,
             )
-        ))
+            .await
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Linux has no ActiveUser registry signal; retain its existing path consistency guard.
+            anyhow::ensure!(Self::steam_shortcuts_file_path()? == shortcuts_file, "Steam restarted with a different account. Select the intended Steam account and launch again.");
+            Ok(())
+        }
+    }
+
+    fn verify_steam_shortcut_registration(
+        &self,
+        game_dir: &str,
+        registration: &SteamShortcutRegistration,
+    ) -> Result<()> {
+        let data = std::fs::read(&registration.shortcuts_file)
+            .context("Steam shortcut registration disappeared during startup")?;
+        let root = parse_binary_vdf(&data)?;
+        let shortcut = SteamShortcut::new(
+            Self::steam_shortcut_name_for_dir(game_dir),
+            self.resolve_game_executable(game_dir)?,
+            PathBuf::from(game_dir),
+            Self::steam_shortcut_launch_options(),
+        );
+        let valid = get_vdf_value(&root, "shortcuts").is_some_and(|value| {
+            let BinaryVdfValue::Object(entries) = value else {
+                return false;
+            };
+            entries.iter().any(|(_, value)| {
+                let BinaryVdfValue::Object(entry) = value else {
+                    return false;
+                };
+                get_vdf_value(entry, "appid")
+                    == Some(&BinaryVdfValue::Int32(registration.shortcut_app_id as i32))
+                    && get_vdf_string(entry, "exe") == Some(shortcut.exe.as_str())
+                    && get_vdf_string(entry, "StartDir") == Some(shortcut.start_dir.as_str())
+            })
+        });
+        anyhow::ensure!(valid, "Steam did not retain the shortcut for this installation. SIMM did not send a launch request; retry after fully exiting Steam.");
+        Ok(())
     }
 
     async fn prepare_steam_shortcut_registration(
         &self,
         app_id: &str,
         game_dir: &str,
+    ) -> Result<SteamShortcutRegistration> {
+        let shortcuts_file = Self::steam_shortcuts_file_path()?;
+        self.prepare_steam_shortcut_registration_at_path(app_id, game_dir, &shortcuts_file)
+            .await
+    }
+
+    async fn prepare_steam_shortcut_registration_at_path(
+        &self,
+        app_id: &str,
+        game_dir: &str,
+        shortcuts_file: &Path,
     ) -> Result<SteamShortcutRegistration> {
         let executable_path = self.resolve_game_executable(game_dir)?;
         self.ensure_steam_appid_file(game_dir, app_id).await?;
@@ -378,13 +521,15 @@ impl FileSystemService {
             Self::steam_shortcut_long_id(shortcut_app_id)
         );
 
-        let (shortcuts_file, status) = self.upsert_steam_shortcut(&shortcut)?;
-        Self::sync_steam_shortcut_reload_marker(shortcut_app_id, status)?;
+        let steam_running = Self::steam_process_started_at()?.is_some();
+        let status =
+            Self::upsert_steam_shortcut_at_path(shortcuts_file, &shortcut, !steam_running)?;
+        Self::sync_steam_shortcut_reload_marker(shortcut_app_id, status, steam_running)?;
 
         Ok(SteamShortcutRegistration {
             shortcut_url,
             shortcut_app_id,
-            shortcuts_file,
+            shortcuts_file: shortcuts_file.to_path_buf(),
             status,
         })
     }
@@ -393,25 +538,37 @@ impl FileSystemService {
         &self,
         game_dir: &str,
     ) -> Result<SteamShortcutSetup> {
+        let _client_guard = STEAM_SHORTCUT_CLIENT_LOCK.lock().await;
         let app_id = crate::services::steam::SteamService::get_steam_app_id();
         let registration = self
             .prepare_steam_shortcut_registration(&app_id, game_dir)
             .await?;
 
-        Ok(SteamShortcutSetup {
+        let requires_reload =
+            Self::steam_shortcut_requires_client_reload(registration.shortcut_app_id)?;
+        Ok(Self::shortcut_setup(registration, requires_reload))
+    }
+
+    fn shortcut_setup(
+        registration: SteamShortcutRegistration,
+        requires_reload: bool,
+    ) -> SteamShortcutSetup {
+        SteamShortcutSetup {
             shortcut_url: registration.shortcut_url,
             shortcut_app_id: registration.shortcut_app_id,
             shortcuts_file: registration.shortcuts_file.to_string_lossy().to_string(),
-            status: match registration.status {
-                SteamShortcutStatus::Inserted => "inserted",
-                SteamShortcutStatus::Updated => "updated",
-                SteamShortcutStatus::Unchanged => "unchanged",
+            status: if requires_reload {
+                "pendingReload"
+            } else {
+                match registration.status {
+                    SteamShortcutStatus::Inserted => "inserted",
+                    SteamShortcutStatus::Updated => "updated",
+                    SteamShortcutStatus::Unchanged => "unchanged",
+                }
             }
             .to_string(),
-            requires_client_reload: Self::steam_shortcut_requires_client_reload(
-                registration.shortcut_app_id,
-            )?,
-        })
+            requires_client_reload: requires_reload,
+        }
     }
 
     pub(crate) fn schedule_i_shortcut_app_id_for_dir(&self, game_dir: &str) -> Result<u32> {
@@ -550,7 +707,10 @@ impl FileSystemService {
                     existing.trim(),
                     app_id
                 ));
-                Ok(())
+                anyhow::bail!("The environment's steam_appid.txt contains a different Steam app ID. Expected {}. Review that file before launching; SIMM left it unchanged.", app_id)
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).context("Failed to inspect steam_appid.txt")
             }
             _ => tokio::fs::write(&appid_path, app_id)
                 .await
@@ -693,15 +853,15 @@ impl FileSystemService {
             .find(|candidate| candidate.is_file())
     }
 
-    fn upsert_steam_shortcut(
-        &self,
+    fn upsert_steam_shortcut_at_path(
+        shortcuts_file: &Path,
         shortcut: &SteamShortcut,
-    ) -> Result<(PathBuf, SteamShortcutStatus)> {
+        allow_updates: bool,
+    ) -> Result<SteamShortcutStatus> {
         let _write_guard = STEAM_SHORTCUT_WRITE_LOCK
             .lock()
             .map_err(|_| anyhow::anyhow!("Steam shortcut update lock is unavailable"))?;
-        let shortcuts_file = Self::steam_shortcuts_file_path()?;
-        if let Some(parent) = shortcuts_file.parent() {
+        if let Some(parent) = shortcuts_file.parent().filter(|_| allow_updates) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
@@ -723,12 +883,12 @@ impl FileSystemService {
 
         let shortcuts = ensure_object(&mut root, "shortcuts");
         let status = upsert_shortcut_entry(shortcuts, shortcut);
-        if status != SteamShortcutStatus::Unchanged {
+        if status != SteamShortcutStatus::Unchanged && allow_updates {
             let bytes = write_binary_vdf(&root);
             Self::write_steam_shortcuts_atomically(&shortcuts_file, original.as_deref(), &bytes)?;
         }
 
-        Ok((shortcuts_file, status))
+        Ok(status)
     }
 
     fn write_steam_shortcuts_atomically(
@@ -840,8 +1000,42 @@ impl FileSystemService {
     fn steam_shortcuts_file_path() -> Result<PathBuf> {
         let steam_path = crate::services::steam::SteamService::get_steam_path()
             .ok_or_else(|| anyhow::anyhow!("Steam installation not found"))?;
+        #[cfg(target_os = "windows")]
+        let active_account = Self::active_steam_account()?;
+        #[cfg(not(target_os = "windows"))]
+        let active_account = None;
+        Self::steam_shortcuts_file_path_for_account(&steam_path, active_account)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn active_steam_account() -> Result<Option<u32>> {
+        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+        let key = match RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(r"Software\Valve\Steam\ActiveProcess")
+        {
+            Ok(key) => key,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("Could not inspect the active Steam account"),
+        };
+        match key.get_value::<u32, _>("ActiveUser") {
+            Ok(0) => Ok(None),
+            Ok(account) => Ok(Some(account)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("Could not read the active Steam account"),
+        }
+    }
+
+    fn steam_shortcuts_file_path_for_account(
+        steam_path: &Path,
+        active_account: Option<u32>,
+    ) -> Result<PathBuf> {
         let userdata_dir = steam_path.join("userdata");
-        let account_id = Self::most_recent_steam_account_id(&steam_path)
+        if let Some(account) = active_account.filter(|account| *account != 0) {
+            let account_dir = userdata_dir.join(account.to_string());
+            anyhow::ensure!(account_dir.is_dir(), "The active Steam account has no local userdata directory yet. Finish signing in to Steam and retry.");
+            return Ok(account_dir.join("config").join("shortcuts.vdf"));
+        }
+        let account_id = Self::most_recent_steam_account_id(steam_path)
             .or_else(|| Self::first_steam_userdata_account_id(&userdata_dir))
             .ok_or_else(|| anyhow::anyhow!("No Steam userdata account found"))?;
 
@@ -906,12 +1100,13 @@ impl FileSystemService {
     fn sync_steam_shortcut_reload_marker(
         shortcut_app_id: u32,
         status: SteamShortcutStatus,
+        steam_running: bool,
     ) -> Result<()> {
         if status == SteamShortcutStatus::Unchanged {
             return Ok(());
         }
 
-        if Self::steam_process_started_at().is_some() {
+        if steam_running {
             Self::mark_steam_shortcut_reload_pending(shortcut_app_id)
         } else {
             Self::clear_steam_shortcut_reload_marker(shortcut_app_id)
@@ -933,7 +1128,7 @@ impl FileSystemService {
 
         if Self::steam_shortcut_marker_requires_client_reload_for_times(
             marker_modified_at,
-            Self::steam_process_started_at(),
+            Self::steam_process_started_at()?,
         ) {
             return Ok(true);
         }
@@ -980,75 +1175,65 @@ impl FileSystemService {
     }
 
     #[cfg(target_os = "windows")]
-    fn steam_process_started_at() -> Option<SystemTime> {
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "$proc = Get-CimInstance Win32_Process -Filter \"Name = 'steam.exe'\" | Sort-Object CreationDate | Select-Object -First 1; if ($proc) { $proc.CreationDate.ToUniversalTime().ToString('o') }",
-            ])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
+    fn steam_process_started_at() -> Result<Option<SystemTime>> {
+        use std::os::windows::process::CommandExt;
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $proc = Get-CimInstance Win32_Process -Filter \"Name = 'steam.exe'\" | Sort-Object CreationDate | Select-Object -First 1; if ($proc) { $proc.CreationDate.ToUniversalTime().ToString('o') }"])
+            .creation_flags(0x08000000)
+            .output().context("Could not inspect Steam process state; SIMM did not modify Steam shortcuts")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Could not inspect Steam process state; fully exit Steam and retry"
+        );
+        let stdout = String::from_utf8(output.stdout)
+            .context("Steam process inspection returned invalid text")?;
+        if stdout.trim().is_empty() {
+            return Ok(None);
         }
-
-        let stdout = String::from_utf8(output.stdout).ok()?;
-        let timestamp = stdout.trim();
-        if timestamp.is_empty() {
-            return None;
-        }
-
-        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
-        let millis = parsed.timestamp_millis();
-        if millis < 0 {
-            return None;
-        }
-
-        Some(SystemTime::UNIX_EPOCH + Duration::from_millis(millis as u64))
+        let parsed = chrono::DateTime::parse_from_rfc3339(stdout.trim())
+            .context("Could not determine when Steam started")?;
+        let millis = u64::try_from(parsed.timestamp_millis())
+            .context("Steam process timestamp is invalid")?;
+        Ok(Some(SystemTime::UNIX_EPOCH + Duration::from_millis(millis)))
     }
 
     #[cfg(target_os = "linux")]
-    fn steam_process_started_at() -> Option<SystemTime> {
-        let pid = Self::linux_steam_process_id()?;
+    fn steam_process_started_at() -> Result<Option<SystemTime>> {
+        let Some(pid) = Self::linux_steam_process_id()? else {
+            return Ok(None);
+        };
         let output = std::process::Command::new("ps")
             .args(["-o", "etimes=", "-p", &pid])
             .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8(output.stdout).ok()?;
+            .context("Could not inspect Steam process age")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Could not inspect Steam process age; retry after Steam has finished starting"
+        );
+        let stdout = String::from_utf8(output.stdout)?;
         Self::linux_process_started_at_from_etimes(&stdout, SystemTime::now())
+            .map(Some)
+            .context("Steam process age is invalid")
     }
 
     #[cfg(target_os = "linux")]
-    fn linux_steam_process_id() -> Option<String> {
-        let candidates: &[&[&str]] = &[
-            &["-xo", "steam"],
-            &["-fo", r"(^|/)steam( |$)"],
-            &["-fo", "steam"],
-        ];
-
-        candidates.iter().find_map(|args| {
-            let output = std::process::Command::new("pgrep")
-                .args(*args)
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-
-            String::from_utf8(output.stdout)
-                .ok()?
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && line.chars().all(|ch| ch.is_ascii_digit()))
-                .map(ToOwned::to_owned)
-        })
+    fn linux_steam_process_id() -> Result<Option<String>> {
+        // Match the actual client, not steamwebhelper, crash handlers, or this lookup command.
+        let output = Command::new("pgrep")
+            .args(["-xo", "steam"])
+            .output()
+            .context("Could not inspect Steam processes")?;
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        anyhow::ensure!(output.status.success(), "Steam process inspection failed");
+        let stdout = String::from_utf8(output.stdout)?;
+        let pid = stdout.trim();
+        anyhow::ensure!(
+            !pid.is_empty() && pid.chars().all(|ch| ch.is_ascii_digit()),
+            "Steam process lookup returned an invalid PID"
+        );
+        Ok(Some(pid.to_string()))
     }
 
     #[cfg(target_os = "linux")]
@@ -1064,8 +1249,8 @@ impl FileSystemService {
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    fn steam_process_started_at() -> Option<SystemTime> {
-        None
+    fn steam_process_started_at() -> Result<Option<SystemTime>> {
+        anyhow::bail!("Steam shortcut process inspection is unsupported on this platform")
     }
 
     async fn launch_via_steam_executable(
@@ -1223,10 +1408,10 @@ impl FileSystemService {
         Ok(())
     }
 
-    pub(crate) async fn restart_steam_client(&self) -> Result<()> {
+    async fn stop_steam_client(&self) -> Result<()> {
         let steam_command = Self::steam_launch_command()?;
 
-        if Self::is_steam_running(&steam_command.program) {
+        if Self::steam_process_started_at()?.is_some() {
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
@@ -1247,7 +1432,7 @@ impl FileSystemService {
             }
 
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while Self::is_steam_running(&steam_command.program) {
+            while Self::steam_process_started_at()?.is_some() {
                 if std::time::Instant::now() >= deadline {
                     return Err(anyhow::anyhow!(
                         "Steam did not exit after SIMM requested shutdown. Close Steam manually, then click Launch again."
@@ -1257,6 +1442,11 @@ impl FileSystemService {
             }
         }
 
+        Ok(())
+    }
+
+    async fn start_steam_client(&self) -> Result<()> {
+        let steam_command = Self::steam_launch_command()?;
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
@@ -1274,7 +1464,7 @@ impl FileSystemService {
         }
 
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
-        while !Self::is_steam_running(&steam_command.program) {
+        while Self::steam_process_started_at()?.is_none() {
             if std::time::Instant::now() >= deadline {
                 return Err(anyhow::anyhow!(
                     "Steam did not start after SIMM requested restart. Start Steam manually, then click Launch again."
@@ -1557,10 +1747,9 @@ fn upsert_shortcut_entry(
             continue;
         };
 
-        let app_name =
-            get_vdf_string(entry, "appname").or_else(|| get_vdf_string(entry, "AppName"));
+        // Display names are not installation identities: two roots can have the same leaf name.
         let exe = get_vdf_string(entry, "exe");
-        if app_name == Some(shortcut.app_name.as_str()) || exe == Some(shortcut.exe.as_str()) {
+        if exe == Some(shortcut.exe.as_str()) {
             if steam_shortcut_entry_matches(entry, shortcut) {
                 return SteamShortcutStatus::Unchanged;
             }
@@ -2263,5 +2452,273 @@ mod tests {
             steam_account_id_from_steam_id64("76561198000000000"),
             Some("39734272".to_string())
         );
+    }
+    #[tokio::test]
+    async fn shortcut_registration_survives_steam_shutdown_rewrite() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("shortcuts.vdf");
+        std::fs::write(&path, b"Steam cached shortcuts")?;
+        let loaded = std::cell::RefCell::new(Vec::new());
+        register_shortcut_with_steam_restart(
+            || async {
+                std::fs::write(&path, b"Steam cached shortcuts")?;
+                Ok(())
+            },
+            || async {
+                std::fs::write(&path, b"SIMM registered shortcut")?;
+                Ok(())
+            },
+            |()| async {
+                *loaded.borrow_mut() = std::fs::read(&path)?;
+                Ok(())
+            },
+        )
+        .await?;
+        assert_eq!(
+            &*loaded.borrow(),
+            b"SIMM registered shortcut",
+            "Steam must load the registration written after its shutdown flush"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shortcuts_with_same_name_keep_distinct_installations() {
+        let first = SteamShortcut::new(
+            "SIMM - alternate".into(),
+            PathBuf::from("C:/Games/alternate/Schedule I.exe"),
+            PathBuf::from("C:/Games/alternate"),
+            String::new(),
+        );
+        let second = SteamShortcut::new(
+            "SIMM - alternate".into(),
+            PathBuf::from("D:/Games/alternate/Schedule I.exe"),
+            PathBuf::from("D:/Games/alternate"),
+            String::new(),
+        );
+        let mut shortcuts = vec![("0".into(), BinaryVdfValue::Object(first.to_vdf_entry()))];
+        assert_eq!(
+            upsert_shortcut_entry(&mut shortcuts, &second),
+            SteamShortcutStatus::Inserted
+        );
+        assert_eq!(shortcuts.len(), 2);
+        let BinaryVdfValue::Object(original) = &shortcuts[0].1 else {
+            panic!("original shortcut")
+        };
+        assert_eq!(get_vdf_string(original, "exe"), Some(first.exe.as_str()));
+    }
+
+    #[test]
+    fn shortcut_registration_defers_disk_changes_while_steam_is_running() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("shortcuts.vdf");
+        let original =
+            write_binary_vdf(&[("shortcuts".into(), BinaryVdfValue::Object(Vec::new()))]);
+        std::fs::write(&path, &original)?;
+        let shortcut = SteamShortcut::new(
+            "SIMM - alternate".into(),
+            temp.path().join("Schedule I.exe"),
+            temp.path().to_path_buf(),
+            String::new(),
+        );
+        assert_eq!(
+            FileSystemService::upsert_steam_shortcut_at_path(&path, &shortcut, false)?,
+            SteamShortcutStatus::Inserted
+        );
+        assert_eq!(
+            std::fs::read(&path)?,
+            original,
+            "a live Steam client must not overwrite or be given an unloaded shortcut"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shortcut_registration_rejects_conflicting_appid_without_overwriting() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("steam_appid.txt");
+        std::fs::write(&path, b"480")?;
+        let result = FileSystemService::new()
+            .ensure_steam_appid_file(temp.path().to_str().unwrap(), "3164500")
+            .await;
+        assert!(
+            result.is_err(),
+            "an unrelated app ID must not be reported as launch-ready"
+        );
+        assert_eq!(std::fs::read_to_string(path)?, "480");
+        Ok(())
+    }
+    #[test]
+    fn shortcut_registration_uses_active_account_instead_of_stale_most_recent() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir_all(temp.path().join("config"))?;
+        std::fs::create_dir_all(temp.path().join("userdata/10"))?;
+        std::fs::create_dir_all(temp.path().join("userdata/20"))?;
+        std::fs::write(
+            temp.path().join("config/loginusers.vdf"),
+            "\"users\"\n{\n\"76561197960265748\"\n{\n\"MostRecent\" \"1\"\n}\n}\n",
+        )?;
+        let path = FileSystemService::steam_shortcuts_file_path_for_account(temp.path(), Some(10))?;
+        assert_eq!(path, temp.path().join("userdata/10/config/shortcuts.vdf"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shortcut_restart_does_not_register_or_start_after_shutdown_failure() {
+        let registered = std::cell::Cell::new(false);
+        let started = std::cell::Cell::new(false);
+        let result: Result<()> = register_shortcut_with_steam_restart(
+            || async { anyhow::bail!("shutdown refused") },
+            || async {
+                registered.set(true);
+                Ok(())
+            },
+            |()| async {
+                started.set(true);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!registered.get());
+        assert!(!started.get());
+    }
+
+    #[test]
+    fn shortcut_account_selection_does_not_fall_back_from_unknown_active_account() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir_all(temp.path().join("userdata/20"))?;
+        assert!(
+            FileSystemService::steam_shortcuts_file_path_for_account(temp.path(), Some(10))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shortcut_post_start_verification_rejects_missing_registration() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("Schedule I.exe"), b"fixture")?;
+        let shortcut = SteamShortcut::new(
+            FileSystemService::steam_shortcut_name_for_dir(temp.path().to_str().unwrap()),
+            temp.path().join("Schedule I.exe"),
+            temp.path().to_path_buf(),
+            String::new(),
+        );
+        let path = temp.path().join("shortcuts.vdf");
+        FileSystemService::upsert_steam_shortcut_at_path(&path, &shortcut, true)?;
+        let registration = SteamShortcutRegistration {
+            shortcut_url: String::new(),
+            shortcut_app_id: shortcut.app_id(),
+            shortcuts_file: path.clone(),
+            status: SteamShortcutStatus::Inserted,
+        };
+        let fs = FileSystemService::new();
+        fs.verify_steam_shortcut_registration(temp.path().to_str().unwrap(), &registration)?;
+        std::fs::write(
+            path,
+            write_binary_vdf(&[("shortcuts".into(), BinaryVdfValue::Object(Vec::new()))]),
+        )?;
+        assert!(fs
+            .verify_steam_shortcut_registration(temp.path().to_str().unwrap(), &registration)
+            .is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn shortcut_restart_transactions_do_not_interleave() -> Result<()> {
+        let active = std::cell::Cell::new(0);
+        let interleaved = std::cell::Cell::new(false);
+        let run = |id| {
+            let active = &active;
+            let interleaved = &interleaved;
+            register_shortcut_with_steam_restart(
+                move || async move {
+                    if active.replace(id) != 0 {
+                        interleaved.set(true);
+                    }
+                    tokio::task::yield_now().await;
+                    Ok(())
+                },
+                || async { Ok(()) },
+                move |()| async move {
+                    if active.get() != id {
+                        interleaved.set(true);
+                    }
+                    active.set(0);
+                    Ok(())
+                },
+            )
+        };
+        let (first, second) = tokio::join!(run(1), run(2));
+        first?;
+        second?;
+        assert!(
+            !interleaved.get(),
+            "two launch entry points must not restart Steam at the same time"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shortcut_account_wait_keeps_pending_launch_until_positive_identification() -> Result<()>
+    {
+        let pending = std::cell::Cell::new(true);
+        let dispatched = std::cell::Cell::new(false);
+        let mut observations = [None, Some(0), Some(10)].into_iter();
+        let queries = std::cell::Cell::new(0);
+        wait_for_active_steam_account(10, Duration::from_secs(1), Duration::ZERO, || {
+            assert!(
+                pending.get(),
+                "pending marker must survive account uncertainty"
+            );
+            assert!(
+                !dispatched.get(),
+                "a launch must not dispatch before account verification"
+            );
+            queries.set(queries.get() + 1);
+            Ok(observations.next().expect("account should become active"))
+        })
+        .await?;
+        pending.set(false);
+        dispatched.set(true);
+        assert_eq!(queries.get(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shortcut_account_wait_rejects_absent_or_zero_account_without_dispatch() {
+        for unknown in [None, Some(0)] {
+            let pending = std::cell::Cell::new(true);
+            let dispatched = std::cell::Cell::new(false);
+            let result = async {
+                wait_for_active_steam_account(10, Duration::ZERO, Duration::ZERO, || Ok(unknown))
+                    .await?;
+                pending.set(false);
+                dispatched.set(true);
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            assert!(
+                result.is_err(),
+                "unknown account must not count as a confirmed login"
+            );
+            assert!(pending.get());
+            assert!(!dispatched.get());
+        }
+    }
+
+    #[tokio::test]
+    async fn shortcut_account_wait_rejects_different_account_and_inspection_failure() {
+        assert!(
+            wait_for_active_steam_account(10, Duration::ZERO, Duration::ZERO, || Ok(Some(20)))
+                .await
+                .is_err()
+        );
+        let error = wait_for_active_steam_account(10, Duration::ZERO, Duration::ZERO, || {
+            anyhow::bail!("registry denied")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("registry denied"));
     }
 }

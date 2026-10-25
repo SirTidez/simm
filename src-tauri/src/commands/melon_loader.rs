@@ -456,6 +456,29 @@ pub async fn repair_melonloader_launch_options(
 }
 
 #[tauri::command]
+pub async fn inspect_game_launch(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    launch_started_at: u64,
+) -> Result<crate::types::GameLaunchInspection, String> {
+    let env = EnvironmentService::new(db.inner().clone())
+        .map_err(|error| error.to_string())?
+        .get_environment(&environment_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+    if env.output_dir.trim().is_empty() {
+        return Err("Output directory not set".into());
+    }
+    Ok(crate::services::game_launch::inspect_game_launch(
+        &environment_id,
+        &env.output_dir,
+        launch_started_at,
+    )
+    .await)
+}
+
+#[tauri::command]
 pub async fn verify_melonloader_launch(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,

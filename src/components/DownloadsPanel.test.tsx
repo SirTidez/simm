@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { DownloadsPanel } from './DownloadsPanel';
 
@@ -7,8 +7,16 @@ const downloadStatusStoreMocks = vi.hoisted(() => ({
   useDownloadStatusStore: vi.fn(),
 }));
 
+const environmentStoreMocks = vi.hoisted(() => ({
+  cancelDownload: vi.fn(),
+}));
+
 vi.mock('../stores/downloadStatusStore', () => ({
   useDownloadStatusStore: downloadStatusStoreMocks.useDownloadStatusStore,
+}));
+
+vi.mock('../stores/environmentStore', () => ({
+  useEnvironmentStore: () => ({ cancelDownload: environmentStoreMocks.cancelDownload }),
 }));
 
 describe('DownloadsPanel', () => {
@@ -57,8 +65,8 @@ describe('DownloadsPanel', () => {
     expect(screen.getAllByText('Recent').length).toBeGreaterThan(0);
     expect(screen.getByText('Main Branch')).toBeTruthy();
     expect(screen.getByText('ExampleMod.zip')).toBeTruthy();
-    expect(document.querySelector('.downloads-panel__icon-image')).not.toBeNull();
-    expect(screen.getByText('25% - 512 MB / 2.00 GB')).toBeTruthy();
+    expect(document.querySelector('.downloads-panel__thumb img')).not.toBeNull();
+    expect(screen.getByText('25% · 512 MB of 2.00 GB')).toBeTruthy();
   });
 
   it('keeps a game download visibly active until byte totals are known', () => {
@@ -77,6 +85,49 @@ describe('DownloadsPanel', () => {
     render(<DownloadsPanel />);
 
     expect(document.querySelector('.downloads-panel__progress-bar--indeterminate')).not.toBeNull();
+    expect(screen.getByText('Calculating total…')).toBeTruthy();
+  });
+
+  it('shows measured bytes without a stale percentage after an estimate is invalidated', () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [{
+        id: 'game-new-branch',
+        kind: 'game',
+        label: 'New Branch',
+        contextLabel: 'Game download',
+        status: 'downloading',
+        progress: 0,
+        downloadedBytes: 1024 * 1024,
+        message: 'C:\\Games\\Schedule I_Data\\resources.assets',
+        startedAt: Date.now(),
+      }],
+    });
+
+    render(<DownloadsPanel />);
+
+    expect(screen.getByText('1.00 MB downloaded')).toBeTruthy();
+    expect(screen.getByText('C:\\Games\\Schedule I_Data\\resources.assets')).toBeTruthy();
+    expect(document.querySelector('.downloads-panel__progress-bar--indeterminate')).not.toBeNull();
+  });
+
+  it('does not round an active game download up to 100 percent', () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [{
+        id: 'game-finalizing',
+        kind: 'game',
+        label: 'Alternate Branch',
+        contextLabel: 'Game download',
+        status: 'downloading',
+        progress: 99.5,
+        downloadedBytes: 999,
+        totalBytes: 1000,
+        startedAt: Date.now(),
+      }],
+    });
+
+    render(<DownloadsPanel />);
+
+    expect(screen.getByText('99% · 999 B of 1000 B')).toBeTruthy();
   });
 
   it('renders an indeterminate bar for active non-game downloads', () => {
@@ -134,7 +185,7 @@ describe('DownloadsPanel', () => {
 
     render(<DownloadsPanel />);
 
-    expect(screen.getByText('Active and recent downloads will appear here while SIMM is working.')).toBeTruthy();
+    expect(screen.getByText('No downloads right now.')).toBeTruthy();
     expect(screen.queryByText('0')).toBeNull();
   });
 
@@ -160,5 +211,39 @@ describe('DownloadsPanel', () => {
     render(<DownloadsPanel onOpenProfile={onOpenProfile} />);
     fireEvent.click(screen.getByRole('button', { name: /Example Collection/i }));
     expect(onOpenProfile).toHaveBeenCalledWith('profile-collection');
+  });
+
+  it('cancels an active game download through the environment store', async () => {
+    environmentStoreMocks.cancelDownload.mockResolvedValue(undefined);
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'game:env-main',
+          kind: 'game',
+          label: 'Main Branch',
+          contextLabel: 'Game download',
+          status: 'downloading',
+          progress: 10,
+          downloadedBytes: 100,
+          totalBytes: 1000,
+          startedAt: Date.now(),
+        },
+        {
+          id: 'mod-active',
+          kind: 'mod',
+          label: 'ActiveMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'downloading',
+          progress: 0,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<DownloadsPanel />);
+
+    expect(screen.queryByRole('button', { name: /Cancel ActiveMod.zip/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel Main Branch download' }));
+    await waitFor(() => expect(environmentStoreMocks.cancelDownload).toHaveBeenCalledWith('env-main'));
   });
 });

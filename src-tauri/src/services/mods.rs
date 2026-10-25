@@ -2472,12 +2472,57 @@ impl ModsService {
         storage_path: &Path,
         metadata: &ModMetadata,
     ) -> Result<()> {
+        let mut metadata = metadata.clone();
+        self.enrich_local_storage_metadata(storage_path, &mut metadata)
+            .await?;
         let metadata_file = self.storage_metadata_path(storage_path);
         let serialized =
-            serde_json::to_string(metadata).context("Failed to serialize storage metadata")?;
+            serde_json::to_string(&metadata).context("Failed to serialize storage metadata")?;
         fs::write(&metadata_file, serialized)
             .await
             .context("Failed to write storage metadata file")?;
+        Ok(())
+    }
+
+    fn uses_local_assembly_metadata(metadata: Option<&ModMetadata>) -> bool {
+        !matches!(
+            metadata.and_then(|meta| meta.source.as_ref()),
+            Some(ModSource::Thunderstore | ModSource::Nexusmods | ModSource::Github)
+        )
+    }
+
+    async fn enrich_local_storage_metadata(
+        &self,
+        storage_path: &Path,
+        metadata: &mut ModMetadata,
+    ) -> Result<()> {
+        if !Self::uses_local_assembly_metadata(Some(metadata)) {
+            return Ok(());
+        }
+        let mut paths = Vec::new();
+        for bucket in ["Mods", "Plugins"] {
+            let root = storage_path.join(bucket);
+            if root.exists() {
+                paths.extend(
+                    self.collect_mod_dll_entries_recursive(&root)
+                        .await?
+                        .into_iter()
+                        .map(|(path, _)| PathBuf::from(path)),
+                );
+            }
+        }
+        let candidate_count = paths.len();
+        let infos = crate::services::melon_metadata::read_files(paths).await?;
+        if let Some(info) = crate::services::melon_metadata::package_info(infos.into_values())
+            .filter(|info| info.source == "melonInfo" || candidate_count == 1)
+        {
+            metadata.mod_name = info.name.or(metadata.mod_name.take());
+            metadata.author = info.author.or(metadata.author.take());
+            // Local versions describe these bytes. Remote package versions are
+            // deliberately left to their source metadata above.
+            metadata.source_version = Some(info.version.clone());
+            metadata.installed_version = Some(info.version);
+        }
         Ok(())
     }
 
@@ -4788,11 +4833,24 @@ impl ModsService {
     }
 
     async fn extract_version_from_binary(&self, dll_path: &Path) -> Result<String> {
-        let content = fs::read(dll_path)
-            .await
-            .context("Failed to read DLL file")?;
-
-        Self::extract_version_from_binary_content(&content)
+        let path = dll_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(info) = crate::services::melon_metadata::read(&path) {
+                return Ok(info.version);
+            }
+            // Retain explicit text import fixtures without reading asset-heavy
+            // DLLs in full when CLR metadata is unavailable.
+            let file = File::open(path).context("Failed to read DLL file")?;
+            let mut content = Vec::new();
+            file.take(1024 * 1024).read_to_end(&mut content)?;
+            anyhow::ensure!(
+                !content.starts_with(b"MZ"),
+                "No readable CLR assembly metadata"
+            );
+            Self::extract_version_from_binary_content(&content)
+        })
+        .await
+        .context("Local version scan stopped")?
     }
 
     fn extract_version_from_binary_content(content: &[u8]) -> Result<String> {
@@ -4850,6 +4908,14 @@ impl ModsService {
             .collect_mod_dll_entries_recursive(&mods_directory)
             .await?;
 
+        let assembly_infos = crate::services::melon_metadata::read_files(
+            dll_files
+                .iter()
+                .map(|(path, _)| PathBuf::from(path))
+                .collect(),
+        )
+        .await?;
+
         // Load metadata
         let metadata = self
             .load_mod_metadata(&mods_directory)
@@ -4875,7 +4941,7 @@ impl ModsService {
                 .unwrap_or(&relative_path)
                 .to_string();
 
-            let mod_name = original_file_name.replace(".dll", "").replace(".DLL", "");
+            let mut mod_name = original_file_name.replace(".dll", "").replace(".DLL", "");
 
             // Get metadata
             let file_metadata = metadata
@@ -4910,7 +4976,7 @@ impl ModsService {
             };
 
             // Prefer source_version (from package metadata) over installed_version (extracted from DLL).
-            let version = display_metadata.as_ref().and_then(|meta| {
+            let mut version = display_metadata.as_ref().and_then(|meta| {
                 meta.source_version
                     .clone()
                     .or(meta.installed_version.clone())
@@ -4942,6 +5008,17 @@ impl ModsService {
                         .as_ref()
                         .and_then(|meta| meta.author.clone())
                 });
+            let mut author = author;
+            if let Some(info) = assembly_infos.get(Path::new(&file_path)) {
+                if Self::uses_local_assembly_metadata(display_metadata.as_ref()) {
+                    mod_name = info.name.clone().unwrap_or(mod_name);
+                    author = info.author.clone().or(author);
+                    version = Some(info.version.clone());
+                } else {
+                    author = author.or(info.author.clone());
+                    version = version.or(Some(info.version.clone()));
+                }
+            }
             let author = canonical_mod_author(
                 display_metadata
                     .as_ref()
@@ -5521,6 +5598,9 @@ impl ModsService {
             if let Some(storage_meta_file) = self.load_storage_metadata(&entry_path).await? {
                 template_meta = Self::merge_metadata(storage_meta_file, template_meta);
             }
+
+            self.enrich_local_storage_metadata(&entry_path, &mut template_meta)
+                .await?;
 
             let mut display_name = template_meta.mod_name.clone().unwrap_or_else(|| {
                 payload_summary
@@ -9591,9 +9671,36 @@ exit 1
             }));
         }
 
-        let detected_source_version = self.extract_mod_version(source_path).await;
-        let effective_metadata =
+        let assembly_info =
+            crate::services::melon_metadata::read_files(vec![source_path.to_path_buf()])
+                .await?
+                .remove(source_path);
+        let detected_source_version = if let Some(info) = &assembly_info {
+            Some(info.version.clone())
+        } else {
+            self.extract_mod_version(source_path).await
+        };
+        let mut effective_metadata =
             Self::metadata_with_source_version(metadata, detected_source_version.as_deref());
+        if let Some(info) = assembly_info {
+            if let Some(object) = effective_metadata
+                .as_mut()
+                .and_then(|value| value.as_object_mut())
+            {
+                if !matches!(
+                    object.get("source").and_then(|value| value.as_str()),
+                    Some("thunderstore" | "nexusmods" | "github")
+                ) {
+                    object.insert("sourceVersion".into(), serde_json::json!(info.version));
+                    if let Some(name) = info.name {
+                        object.insert("modName".into(), serde_json::json!(name));
+                    }
+                    if let Some(author) = info.author {
+                        object.insert("author".into(), serde_json::json!(author));
+                    }
+                }
+            }
+        }
 
         // Extract source_id and source_version for duplicate detection
         let source_id = effective_metadata.as_ref().and_then(|m| {
@@ -10476,6 +10583,203 @@ mod tests {
             managed_paths: None,
             security_scan: None,
         }
+    }
+
+    fn melon_metadata_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/melon-metadata")
+            .join(format!("{name}.dll"))
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_mods_reads_local_identity_and_replacements_without_changing_ownership(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let output = temp.path().join("env");
+        EnvironmentService::new(pool)?
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".into(),
+                output.to_string_lossy().into(),
+                None,
+                None,
+            )
+            .await?;
+        let mods_dir = output.join("Mods");
+        fs::create_dir_all(mods_dir.join("nested")).await?;
+        let local_path = mods_dir.join("nested/Local.dll.disabled");
+        fs::copy(melon_metadata_fixture("Modern"), &local_path).await?;
+        fs::copy(
+            melon_metadata_fixture("Modern"),
+            mods_dir.join("Remote.dll"),
+        )
+        .await?;
+        fs::copy(
+            melon_metadata_fixture("Fallback"),
+            mods_dir.join("Fallback.dll"),
+        )
+        .await?;
+        fs::write(mods_dir.join("Broken.dll"), b"not a managed assembly").await?;
+        let mut metadata = HashMap::new();
+        let mut remote = sample_metadata(None, Some("123"), Some("release-10"));
+        remote.source = Some(ModSource::Nexusmods);
+        remote.author = Some("Package author".into());
+        metadata.insert("Remote.dll".into(), remote);
+        let mut broken = sample_metadata(None, None, Some("1.0-custom"));
+        broken.author = Some("Saved author".into());
+        metadata.insert("Broken.dll".into(), broken);
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+        let result = service.list_mods(output.to_str().unwrap()).await?;
+        let entries = result["mods"].as_array().unwrap();
+        let local = entries
+            .iter()
+            .find(|entry| entry["fileName"] == "nested/Local.dll")
+            .unwrap();
+        assert_eq!(local["name"], "Fixture Ω");
+        assert_eq!(local["version"], "2.7.1-beta.4+local");
+        assert_eq!(local["author"], "Author Ω");
+        assert_eq!(local["disabled"], true);
+        assert_eq!(local["managed"], false);
+        assert!(local["modStorageId"].is_null());
+        let remote = entries
+            .iter()
+            .find(|entry| entry["fileName"] == "Remote.dll")
+            .unwrap();
+        assert_eq!(remote["version"], "release-10");
+        assert_eq!(remote["author"], "Package author");
+        let fallback = entries
+            .iter()
+            .find(|entry| entry["fileName"] == "Fallback.dll")
+            .unwrap();
+        assert_eq!(fallback["version"], "3.4.5.6");
+        assert!(fallback["author"].is_null());
+        let broken = entries
+            .iter()
+            .find(|entry| entry["fileName"] == "Broken.dll")
+            .unwrap();
+        assert_eq!(broken["version"], "1.0-custom");
+        assert_eq!(broken["author"], "Saved author");
+        fs::copy(melon_metadata_fixture("Numeric"), &local_path).await?;
+        let result = service.list_mods(output.to_str().unwrap()).await?;
+        let local = result["mods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["fileName"] == "nested/Local.dll")
+            .unwrap();
+        assert_eq!(local["version"], "2.3.4-rc.2");
+        assert_eq!(local["author"], "Numeric author");
+        assert_eq!(
+            service.load_mod_metadata(&mods_dir).await?.len(),
+            2,
+            "listing must not adopt unmanaged files"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn local_import_persists_declared_metadata_for_library_and_environment() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        SettingsService::new(pool.clone())?
+            .save_settings(serde_json::json!({"defaultDownloadDir": download_dir}))
+            .await?;
+        let output = temp.path().join("env");
+        EnvironmentService::new(pool)?
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".into(),
+                output.to_string_lossy().into(),
+                None,
+                None,
+            )
+            .await?;
+        service
+            .install_dll_mod(
+                output.to_str().unwrap(),
+                melon_metadata_fixture("Modern").to_str().unwrap(),
+                "Mono",
+                Some(serde_json::json!({"source":"local", "modName":"Filename label"})),
+            )
+            .await?;
+        let environment_meta = service.load_mod_metadata(&output.join("Mods")).await?;
+        let meta = environment_meta.values().next().unwrap();
+        assert_eq!(meta.mod_name.as_deref(), Some("Fixture Ω"));
+        assert_eq!(meta.author.as_deref(), Some("Author Ω"));
+        assert_eq!(meta.source_version.as_deref(), Some("2.7.1-beta.4+local"));
+        let library = service.get_mod_library().await?;
+        let entry = library
+            .downloaded
+            .iter()
+            .find(|entry| entry.storage_id == *meta.mod_storage_id.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(entry.display_name, "Fixture Ω");
+        assert_eq!(entry.author.as_deref(), Some("Author Ω"));
+        assert_eq!(
+            entry.installed_version.as_deref(),
+            Some("2.7.1-beta.4+local")
+        );
+
+        // Older local imports also gain details without rewriting storage IDs.
+        let old_storage = download_dir.join("Mods/old-local-import");
+        fs::create_dir_all(old_storage.join("Plugins")).await?;
+        fs::copy(
+            melon_metadata_fixture("Legacy"),
+            old_storage.join("Plugins/Plugin.dll"),
+        )
+        .await?;
+        let old = sample_metadata(Some("old-local-import"), None, None);
+        fs::write(
+            service.storage_metadata_path(&old_storage),
+            serde_json::to_vec(&old)?,
+        )
+        .await?;
+        let library = service.get_mod_library().await?;
+        let entry = library
+            .downloaded
+            .iter()
+            .find(|entry| entry.storage_id == "old-local-import")
+            .unwrap();
+        assert_eq!(entry.display_name, "Legacy plugin");
+        assert_eq!(entry.author.as_deref(), Some("Plugin author"));
+        assert_eq!(entry.installed_version.as_deref(), Some("1.8.2"));
+
+        // Archive imports use the same persisted storage metadata path.
+        let archive = temp.path().join("plugin.zip");
+        write_zip_fixture(
+            &archive,
+            &[(
+                "Plugins/Plugin.dll",
+                &std::fs::read(melon_metadata_fixture("Legacy"))?,
+            )],
+        )?;
+        let result = service
+            .store_mod_archive(
+                archive.to_str().unwrap(),
+                "plugin.zip",
+                Some(crate::types::Runtime::Mono),
+                Some(serde_json::json!({"source":"local", "modName":"plugin"})),
+                None,
+            )
+            .await?;
+        let storage = download_dir
+            .join("Mods")
+            .join(result["storageId"].as_str().unwrap());
+        let stored = service.load_storage_metadata(&storage).await?.unwrap();
+        assert_eq!(stored.mod_name.as_deref(), Some("Legacy plugin"));
+        assert_eq!(stored.author.as_deref(), Some("Plugin author"));
+        assert_eq!(stored.source_version.as_deref(), Some("1.8.2"));
+        Ok(())
     }
 
     fn write_zip_fixture(zip_path: &Path, files: &[(&str, &[u8])]) -> Result<()> {

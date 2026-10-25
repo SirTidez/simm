@@ -15,6 +15,7 @@ const telemetryEvents = vi.hoisted(() => ({
   eventHandler: null as (() => void) | null,
 }));
 
+vi.mock('./useLibraryArtwork', () => ({ useLibraryArtwork: () => () => null }));
 vi.mock('../services/api', () => ({ ApiService: telemetryApi }));
 vi.mock('../services/events', () => ({
   createAsyncListenerScope: (onError?: (error: unknown) => void) => {

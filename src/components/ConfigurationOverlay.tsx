@@ -1,13 +1,35 @@
-import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type WheelEvent as ReactWheelEvent } from 'react';
+import {
+  Suspense,
+  lazy,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 
+import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
-import { SimmBadge, SimmButton } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
+import { SimmButton } from './primitives';
+import { ModThumbnail } from './media/ModThumbnail';
+import { useLibraryArtwork } from './useLibraryArtwork';
 import type {
   ConfigDocument,
   ConfigEditOperation,
@@ -26,28 +48,9 @@ interface Props {
 type EditorMode = 'structured' | 'raw';
 type ConfigValueKind = 'boolean' | 'number' | 'text' | 'empty';
 const ALL_SECTIONS_TAB = '__all__';
-const SECTION_TAB_OVERFLOW_NONE = { left: false, right: false };
 const ConfigRawEditor = lazy(() => import('./ConfigRawEditor').then((module) => ({ default: module.ConfigRawEditor })));
 
-function resolveSectionTabOverflow(element: HTMLDivElement | null) {
-  if (!element) {
-    return SECTION_TAB_OVERFLOW_NONE;
-  }
-
-  const { scrollLeft, scrollWidth, clientWidth } = element;
-  const maxScrollLeft = Math.max(0, scrollWidth - clientWidth);
-  return {
-    left: scrollLeft > 2,
-    right: scrollLeft < maxScrollLeft - 2,
-  };
-}
-
-function sectionTabOverflowEquals(
-  current: typeof SECTION_TAB_OVERFLOW_NONE,
-  next: typeof SECTION_TAB_OVERFLOW_NONE,
-) {
-  return current.left === next.left && current.right === next.right;
-}
+type OpenMenuHandler = (id: string, event: ReactMouseEvent<HTMLElement>, items: AnchoredContextMenuItem[]) => void;
 
 interface EditableEntry {
   id: string;
@@ -127,13 +130,26 @@ function toConfigSections(sections: EditableSection[]): ConfigSection[] {
   }));
 }
 
+const DATE_TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
 function formatRelativeTimestamp(timestamp?: number) {
   if (!timestamp) return 'Unknown';
-  return new Date(timestamp).toLocaleString();
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? 'Unknown' : DATE_TIME_FORMAT.format(date);
 }
 
 function formatSettingCount(count: number) {
-  return `${count} ${count === 1 ? 'Setting' : 'Settings'}`;
+  return `${count} ${count === 1 ? 'setting' : 'settings'}`;
+}
+
+function formatSectionCount(count: number) {
+  return `${count} ${count === 1 ? 'section' : 'sections'}`;
 }
 
 function getConfigValueKind(value: string): ConfigValueKind {
@@ -142,20 +158,6 @@ function getConfigValueKind(value: string): ConfigValueKind {
   if (/^(true|false)$/i.test(trimmedValue)) return 'boolean';
   if (/^-?\d+(\.\d+)?$/.test(trimmedValue)) return 'number';
   return 'text';
-}
-
-function formatValueKind(kind: ConfigValueKind) {
-  switch (kind) {
-    case 'boolean':
-      return 'Boolean';
-    case 'number':
-      return 'Number';
-    case 'empty':
-      return 'Empty';
-    case 'text':
-    default:
-      return 'Text';
-  }
 }
 
 function getBooleanValue(value: string) {
@@ -350,59 +352,34 @@ interface ConfigEntryValueEditorProps {
 const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId, entry, onChange }: ConfigEntryValueEditorProps) {
   const valueKind = getConfigValueKind(entry.value);
   const booleanValue = getBooleanValue(entry.value);
+  const valueLabel = `Value for ${entry.key || 'new entry'}`;
 
   if (valueKind === 'boolean') {
     return (
-      <div className="config-entry-row__value-control">
-        <div className="config-entry-row__value-heading">
-          <span>Value</span>
-          <span className="config-entry-row__value-kind">{formatValueKind(valueKind)}</span>
-        </div>
-        <div className="config-entry-row__boolean-group" role="group" aria-label={`Value for ${entry.key || 'new entry'}`}>
-          <SimmButton
-            type="button"
-            variant="ghost"
-            className={`config-entry-row__boolean-option h-auto ${booleanValue === true ? 'config-entry-row__boolean-option--active' : ''}`}
-            aria-pressed={booleanValue === true}
-            onClick={() => onChange(sectionId, entry.id, 'value', 'true')}
-          >
-            True
-          </SimmButton>
-          <SimmButton
-            type="button"
-            variant="ghost"
-            className={`config-entry-row__boolean-option h-auto ${booleanValue === false ? 'config-entry-row__boolean-option--active' : ''}`}
-            aria-pressed={booleanValue === false}
-            onClick={() => onChange(sectionId, entry.id, 'value', 'false')}
-          >
-            False
-          </SimmButton>
-        </div>
+      <div className="config-prop__bool">
+        <Switch
+          checked={booleanValue === true}
+          onCheckedChange={(checked) => onChange(sectionId, entry.id, 'value', checked ? 'true' : 'false')}
+          aria-label={valueLabel}
+        />
+        <span className="config-prop__bool-text" aria-hidden="true">{booleanValue ? 'True' : 'False'}</span>
       </div>
     );
   }
 
   return (
-    <div className="config-entry-row__value-control">
-      <div className="config-entry-row__value-heading">
-        <label htmlFor={`config-value-${sectionId}-${entry.id}`}>Value</label>
-        <span className="config-entry-row__value-kind">{formatValueKind(valueKind)}</span>
-      </div>
-      <Input
-        id={`config-value-${sectionId}-${entry.id}`}
-        type="text"
-        inputMode={valueKind === 'number' ? 'decimal' : 'text'}
-        aria-label={`Value for ${entry.key || 'new entry'}`}
-        value={entry.value}
-        onChange={(event) => onChange(sectionId, entry.id, 'value', event.target.value)}
-        placeholder={valueKind === 'empty' ? 'Enter value' : undefined}
-      />
-    </div>
+    <Input
+      id={`config-value-${sectionId}-${entry.id}`}
+      type="text"
+      className={`config-prop__input ${valueKind === 'number' ? 'config-prop__input--number' : ''}`}
+      inputMode={valueKind === 'number' ? 'decimal' : 'text'}
+      aria-label={valueLabel}
+      value={entry.value}
+      onChange={(event) => onChange(sectionId, entry.id, 'value', event.target.value)}
+      placeholder={valueKind === 'empty' ? 'Empty' : undefined}
+      spellCheck={false}
+    />
   );
-});
-
-const ConfigTrashIcon = memo(function ConfigTrashIcon() {
-  return <Icon name="fas fa-trash" />;
 });
 
 interface ConfigEntryRowProps {
@@ -410,83 +387,120 @@ interface ConfigEntryRowProps {
   entry: EditableEntry;
   onChange: ConfigEntryValueEditorProps['onChange'];
   onDelete: (sectionId: string, entryId: string) => void;
+  onOpenMenu: OpenMenuHandler;
 }
 
-const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange, onDelete }: ConfigEntryRowProps) {
+const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange, onDelete, onOpenMenu }: ConfigEntryRowProps) {
+  const [editingComment, setEditingComment] = useState(false);
   const keyInputId = `config-key-${sectionId}-${entry.id}`;
   const commentInputId = `config-comment-${sectionId}-${entry.id}`;
   const entryLabel = entry.key || 'entry';
+
+  useEffect(() => {
+    if (!editingComment) return;
+    // Wait for the menu that opened the editor to hand focus back first.
+    const timeoutId = window.setTimeout(() => document.getElementById(commentInputId)?.focus(), 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [commentInputId, editingComment]);
 
   const handleKeyChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     onChange(sectionId, entry.id, 'key', event.target.value);
   }, [entry.id, onChange, sectionId]);
 
-  const handleCommentChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
+  const handleCommentChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     onChange(sectionId, entry.id, 'comment', event.target.value);
   }, [entry.id, onChange, sectionId]);
 
-  const handleDeleteClick = useCallback(() => {
-    onDelete(sectionId, entry.id);
-  }, [entry.id, onDelete, sectionId]);
+  const handleCommentKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter' || event.key === 'Escape') {
+      event.preventDefault();
+      setEditingComment(false);
+    }
+  }, []);
+
+  const handleOpenMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    onOpenMenu(`config-entry-${entry.id}`, event, [
+      {
+        key: 'comment',
+        label: entry.comment ? 'Edit Comment' : 'Add Comment',
+        icon: 'fas fa-pen-to-square',
+        onSelect: () => setEditingComment(true),
+      },
+      {
+        key: 'delete',
+        label: 'Delete Entry',
+        icon: 'fas fa-trash',
+        danger: true,
+        separatorBefore: true,
+        onSelect: () => onDelete(sectionId, entry.id),
+      },
+    ]);
+  };
 
   return (
-    <div className="config-entry-row">
-      <div className="config-entry-row__header">
-        <div className="config-entry-row__key">
-          {entry.isNew ? (
-            <>
-              <label htmlFor={keyInputId}>Key</label>
-              <Input
-                id={keyInputId}
-                type="text"
-                value={entry.key}
-                onChange={handleKeyChange}
-                placeholder="settingName"
-              />
-            </>
-          ) : (
-            <div className="config-entry-row__key-label" title={entry.key}>
-              {entry.key}
-            </div>
-          )}
-        </div>
-
-        <SimmButton
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="config-entry-row__delete"
-          aria-label={`Delete ${entryLabel}`}
-          onClick={handleDeleteClick}
-        >
-          <ConfigTrashIcon />
-        </SimmButton>
+    <div className={`config-prop ${entry.isNew ? 'config-prop--new' : ''}`}>
+      <div className="config-prop__key">
+        {entry.isNew ? (
+          <Input
+            id={keyInputId}
+            type="text"
+            className="config-prop__key-input"
+            aria-label="Key"
+            value={entry.key}
+            onChange={handleKeyChange}
+            placeholder="settingName"
+            spellCheck={false}
+          />
+        ) : (
+          <span className="config-prop__key-text" title={entry.key}>
+            {entry.key}
+          </span>
+        )}
+        {editingComment ? (
+          <Input
+            id={commentInputId}
+            type="text"
+            className="config-prop__comment-input"
+            aria-label={`Comment for ${entryLabel}`}
+            value={entry.comment}
+            onChange={handleCommentChange}
+            onBlur={() => setEditingComment(false)}
+            onKeyDown={handleCommentKeyDown}
+            placeholder="Comment written above this setting"
+          />
+        ) : entry.comment ? (
+          <button
+            type="button"
+            className="config-prop__comment"
+            title="Edit comment"
+            onClick={() => setEditingComment(true)}
+          >
+            {entry.comment}
+          </button>
+        ) : null}
       </div>
 
-      <div className="config-entry-row__value">
-        <ConfigEntryValueEditor
-          sectionId={sectionId}
-          entry={entry}
-          onChange={onChange}
-        />
+      <div className="config-prop__value">
+        <ConfigEntryValueEditor sectionId={sectionId} entry={entry} onChange={onChange} />
       </div>
 
-      <div className="config-entry-row__comment">
-        <label htmlFor={commentInputId}>Comment</label>
-        <Textarea
-          id={commentInputId}
-          aria-label={`Comment for ${entryLabel}`}
-          value={entry.comment}
-          onChange={handleCommentChange}
-          rows={2}
-          placeholder="Optional inline comment"
-        />
-      </div>
+      <SimmButton
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="config-prop__more"
+        aria-label={`More actions for ${entryLabel}`}
+        aria-haspopup="menu"
+        onClick={handleOpenMenu}
+      >
+        <Icon name="fas fa-ellipsis-h" />
+      </SimmButton>
     </div>
   );
 });
 
-export function ConfigurationOverlay({ isOpen, environmentId, environment }: Props) {
+export function ConfigurationOverlay({ isOpen, environmentId }: Props) {
+  const getModArtwork = useLibraryArtwork();
   const [catalog, setCatalog] = useState<ConfigFileSummary[]>([]);
   const [documentCache, setDocumentCache] = useState<Record<string, ConfigDocument>>({});
   const [drafts, setDrafts] = useState<Record<string, FileDraft>>({});
@@ -503,8 +517,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const selectedFilePathRef = useRef<string | null>(null);
   const draftRevisionRef = useRef<Map<string, number>>(new Map());
-  const sectionTabsRef = useRef<HTMLDivElement | null>(null);
-  const [sectionTabOverflow, setSectionTabOverflow] = useState(SECTION_TAB_OVERFLOW_NONE);
+  const [actionMenu, setActionMenu] = useState<{ id: string; x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
 
   const activeDocument = selectedFilePath ? documentCache[selectedFilePath] ?? null : null;
   const activeDraft = selectedFilePath ? drafts[selectedFilePath] ?? null : null;
@@ -696,13 +709,6 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   }, [catalogGroups.other]);
 
   const sectionTabs = useMemo(() => activeDraft?.sections ?? [], [activeDraft]);
-  const activeSection = useMemo(
-    () =>
-      activeSectionId && activeSectionId !== ALL_SECTIONS_TAB
-        ? sectionTabs.find((section) => section.id === activeSectionId) ?? null
-        : null,
-    [activeSectionId, sectionTabs]
-  );
   const visibleSections = useMemo(() => {
     if (!activeDraft) return [];
 
@@ -742,40 +748,11 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   }, [activeDraft, activeSectionId, sectionFilter]);
 
   const dirtyCount = useMemo(() => Object.values(drafts).filter((draft) => draft.dirty).length, [drafts]);
-  const visibleEntryCount = useMemo(
-    () => visibleSections.reduce((total, section) => total + section.entries.length, 0),
-    [visibleSections]
-  );
   const structuredAvailable = activeDocument?.summary.supportsStructuredEdit ?? false;
 
-  const updateSectionTabOverflow = useCallback(() => {
-    const nextOverflow = resolveSectionTabOverflow(sectionTabsRef.current);
-    setSectionTabOverflow((currentOverflow) =>
-      sectionTabOverflowEquals(currentOverflow, nextOverflow) ? currentOverflow : nextOverflow
-    );
-  }, []);
-
-  const scrollSectionTabs = useCallback((delta: number) => {
-    const element = sectionTabsRef.current;
-    if (!element) return;
-    element.scrollBy({ left: delta, behavior: 'smooth' });
-  }, []);
-
-  const handleSectionTabsWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    const element = sectionTabsRef.current;
-    if (!element) return;
-
-    const horizontalDelta = Math.abs(event.deltaX);
-    const verticalDelta = Math.abs(event.deltaY);
-    if (verticalDelta === 0 && horizontalDelta === 0) return;
-
-    if (horizontalDelta > 0 || verticalDelta > 0) {
-      event.preventDefault();
-      element.scrollBy({
-        left: horizontalDelta > verticalDelta ? event.deltaX : event.deltaY,
-        behavior: 'auto',
-      });
-    }
+  const openActionMenu = useCallback<OpenMenuHandler>((id, event, items) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setActionMenu((current) => (current?.id === id ? null : { id, x: rect.left, y: rect.bottom + 4, items }));
   }, []);
 
   const updateActiveDraft = useCallback((updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
@@ -819,46 +796,6 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
       setActiveSectionId(ALL_SECTIONS_TAB);
     }
   }, [activeDraft, activeSectionId, selectedFilePath]);
-
-  useEffect(() => {
-    const element = sectionTabsRef.current;
-    if (!element || editorMode !== 'structured') {
-      setSectionTabOverflow((currentOverflow) =>
-        sectionTabOverflowEquals(currentOverflow, SECTION_TAB_OVERFLOW_NONE)
-          ? currentOverflow
-          : SECTION_TAB_OVERFLOW_NONE
-      );
-      return;
-    }
-
-    let overflowFrameId: number | null = null;
-    const syncOverflow = () => {
-      overflowFrameId = null;
-      updateSectionTabOverflow();
-    };
-    const scheduleOverflowSync = () => {
-      if (overflowFrameId !== null) return;
-      overflowFrameId = window.requestAnimationFrame(syncOverflow);
-    };
-
-    scheduleOverflowSync();
-    element.addEventListener('scroll', scheduleOverflowSync, { passive: true });
-    window.addEventListener('resize', scheduleOverflowSync);
-
-    const resizeObserver = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(scheduleOverflowSync)
-      : null;
-    resizeObserver?.observe(element);
-
-    return () => {
-      if (overflowFrameId !== null) {
-        window.cancelAnimationFrame(overflowFrameId);
-      }
-      element.removeEventListener('scroll', scheduleOverflowSync);
-      window.removeEventListener('resize', scheduleOverflowSync);
-      resizeObserver?.disconnect();
-    };
-  }, [editorMode, sectionTabs, updateSectionTabOverflow]);
 
   const applyFileSelection = (file: ConfigFileSummary, preferredMode: EditorMode = 'structured') => {
     const nextMode = file.supportsStructuredEdit && preferredMode === 'structured' ? 'structured' : 'raw';
@@ -1126,65 +1063,58 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
     const showMatchTree = fileSearchQuery.length > 0 && matches.length > 0;
 
     return (
-      <div key={file.path} className={`config-explorer__file-stack ${showMatchTree ? 'config-explorer__file-stack--tree' : ''}`}>
-        <SimmButton
+      <div key={file.path} className="config-explorer__item">
+        <button
           type="button"
-          variant="ghost"
-          className={`config-explorer__file h-auto ${selected ? 'config-explorer__file--active' : ''}`}
+          className="config-explorer__file"
+          aria-current={selected ? 'true' : undefined}
+          title={`${file.relativePath} · ${formatSectionCount(file.sectionCount)} · ${formatSettingCount(file.entryCount)}`}
           onClick={() => handleSelectFile(file)}
         >
-          <div className="config-explorer__file-head">
-            <strong>{file.name}</strong>
-            {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
-          </div>
-          <div className="config-explorer__file-meta">
-            <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
-            <span>{formatSettingCount(file.entryCount)}</span>
-          </div>
-          <div className="config-explorer__file-path" title={file.relativePath}>
-            {file.relativePath}
-          </div>
-        </SimmButton>
+          <span className="config-explorer__file-name">
+            <span className="config-explorer__file-label">{file.name}</span>
+            {draft?.dirty && (
+              <>
+                <span className="config-explorer__dirty" aria-hidden="true" />
+                <span className="sr-only">, unsaved changes</span>
+              </>
+            )}
+          </span>
+          <span className="config-explorer__file-path">{file.relativePath}</span>
+        </button>
 
         {showMatchTree && (
-          <div className="config-explorer__match-tree" aria-label={`Matches in ${file.name}`}>
+          <div className="config-explorer__matches" aria-label={`Matches in ${file.name}`}>
             {matches.map((section) => (
               <div key={section.id} className="config-explorer__match-section">
-                <SimmButton
+                <button
                   type="button"
-                  variant="ghost"
-                  className="config-explorer__match-section-button h-auto"
+                  className="config-explorer__match config-explorer__match--section"
                   onClick={() => handleSelectExplorerMatch(file, section.id)}
                 >
-                  <Icon name="fas fa-folder-tree" />
+                  <Icon name="fas fa-folder-tree" aria-hidden="true" />
                   <span>{section.name}</span>
-                </SimmButton>
-                {section.entries.length > 0 && (
-                  <div className="config-explorer__match-entries">
-                    {section.entries.slice(0, 8).map((entry) => (
-                      <SimmButton
-                        key={entry.id}
-                        type="button"
-                        variant="ghost"
-                        className="config-explorer__match-entry h-auto"
-                        onClick={() => handleSelectExplorerMatch(file, section.id)}
-                        title={`${entry.key} = ${entry.value}`}
-                      >
-                        <span className="config-explorer__match-entry-key">{entry.key}</span>
-                        <span className="config-explorer__match-entry-value">{entry.value}</span>
-                      </SimmButton>
-                    ))}
-                    {section.entries.length > 8 && (
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className="config-explorer__match-more h-auto"
-                        onClick={() => handleSelectExplorerMatch(file, section.id)}
-                      >
-                        {section.entries.length - 8} more
-                      </SimmButton>
-                    )}
-                  </div>
+                </button>
+                {section.entries.slice(0, 8).map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className="config-explorer__match"
+                    onClick={() => handleSelectExplorerMatch(file, section.id)}
+                    title={`${entry.key} = ${entry.value}`}
+                  >
+                    <span className="config-explorer__match-key">{entry.key}</span>
+                    <span className="config-explorer__match-value">{entry.value}</span>
+                  </button>
+                ))}
+                {section.entries.length > 8 && (
+                  <button
+                    type="button"
+                    className="config-explorer__match config-explorer__match--more"
+                    onClick={() => handleSelectExplorerMatch(file, section.id)}
+                  >
+                    {section.entries.length - 8} more
+                  </button>
                 )}
               </div>
             ))}
@@ -1194,10 +1124,49 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
     );
   };
 
+  const fileMenuItems = (document: ConfigDocument): AnchoredContextMenuItem[] => [
+    {
+      key: 'open-file',
+      label: 'Open File',
+      icon: 'fas fa-file-lines',
+      onSelect: () => void ApiService.openPath(document.summary.path),
+    },
+    {
+      key: 'open-folder',
+      label: 'Open Folder',
+      icon: 'fas fa-folder-open',
+      onSelect: () => void ApiService.revealPath(document.summary.path),
+    },
+    {
+      key: 'reload',
+      label: 'Reload from Disk',
+      icon: 'fas fa-rotate',
+      disabled: loadingDocument || saving,
+      separatorBefore: true,
+      onSelect: () => void handleReload(),
+    },
+  ];
+
+  const sectionMenuItems = (section: EditableSection): AnchoredContextMenuItem[] => [
+    {
+      key: 'remove-section',
+      label: 'Remove Section',
+      icon: 'fas fa-trash',
+      danger: true,
+      onSelect: () => handleDeleteSection(section.id),
+    },
+  ];
+
+  const otherDraftCount = dirtyCount - (activeDraft?.dirty ? 1 : 0);
+  const sectionSelectLabel = (value: string | null) => {
+    if (!value || value === ALL_SECTIONS_TAB) return 'All sections';
+    return sectionTabs.find((section) => section.id === value)?.name ?? 'All sections';
+  };
+
   if (!isOpen) return null;
 
   return (
-    <div className="modal-content workspace-panel config-editor config-editor--workspace">
+    <div className="workspace-panel config-editor">
       <ConfirmOverlay
         isOpen={Boolean(pendingConfirm)}
         onClose={() => setPendingConfirm(null)}
@@ -1212,41 +1181,29 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
         isNested
       />
 
-      <WorkspacePageHeader
-        eyebrow={environment.name}
-        title="Configuration"
-        description={`Browse files, edit structured settings, and keep raw config fallbacks available for ${environment.name}.`}
-      />
-
-      {error && <div className="settings-error-banner">{error}</div>}
-
       <div className="config-editor__shell">
-        <aside className="config-explorer">
-          <div className="config-explorer__overview">
-            <div className="config-explorer__overview-head">
-              <span className="settings-eyebrow">Files</span>
-              <div className="config-explorer__overview-stats">
-                <span>{catalog.length} file{catalog.length === 1 ? '' : 's'}</span>
-                <span>{dirtyCount} draft{dirtyCount === 1 ? '' : 's'}</span>
-              </div>
-            </div>
-          </div>
-
+        <aside className="config-explorer" aria-label="Config files">
           <div className="config-explorer__search">
-            <Icon name="fas fa-search" />
+            <Icon name="fas fa-search" aria-hidden="true" />
             <Input
-              type="text"
+              type="search"
               value={fileFilter}
               onChange={(e) => setFileFilter(e.target.value)}
               placeholder="Search config files"
+              aria-label="Search config files"
             />
           </div>
 
           <div className="config-explorer__list">
             {loadingCatalog ? (
-              <div className="config-editor__empty">
-                <Icon name="fas fa-spinner fa-spin" />
-                <strong>Loading configuration catalog</strong>
+              <div className="config-explorer__skeleton" role="status">
+                <span className="sr-only">Loading configuration catalog</span>
+                {Array.from({ length: 5 }, (_, index) => (
+                  <div key={index} className="config-explorer__skeleton-row" aria-hidden="true">
+                    <span className="config-skeleton-bar" style={{ width: `${55 + ((index * 13) % 35)}%` }} />
+                    <span className="config-skeleton-bar config-skeleton-bar--thin" />
+                  </div>
+                ))}
               </div>
             ) : (
               <>
@@ -1256,7 +1213,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                 ].map((group) =>
                   group.files.length > 0 ? (
                     <section key={group.label} className="config-explorer__group">
-                      <div className="config-explorer__group-label">{group.label}</div>
+                      <h3 className="ui-section-title config-explorer__group-title">{group.label}</h3>
                       {group.files.map((file) => renderExplorerFile(file))}
                     </section>
                   ) : null
@@ -1264,21 +1221,34 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
                 {otherCatalogGroups.length > 0 && (
                   <section className="config-explorer__group">
-                    <div className="config-explorer__group-label">Other Config Files</div>
+                    <h3 className="ui-section-title config-explorer__group-title">Mod configs</h3>
                     {otherCatalogGroups.map(([groupName, files]) => (
-                      <div key={groupName} className="config-explorer__nested-group">
-                        <div className="config-explorer__nested-label">{groupName}</div>
+                      <div key={groupName} className="config-explorer__subgroup">
+                        <p className="config-explorer__subgroup-label">
+                          <ModThumbnail {...getModArtwork(groupName)} name={groupName} size={20} />
+                          <span className="ui-truncate">{groupName}</span>
+                        </p>
                         {files.map((file) => renderExplorerFile(file))}
                       </div>
                     ))}
                   </section>
                 )}
 
-                {!loadingCatalog && filteredCatalog.length === 0 && (
-                  <div className="config-editor__empty">
-                    <Icon name={loadingFileSearchContents ? 'fas fa-spinner fa-spin' : 'fas fa-file-circle-question'} />
-                    <strong>{loadingFileSearchContents ? 'Searching file contents' : 'No config files found'}</strong>
-                    <p>{loadingFileSearchContents ? 'Checking entries, values, comments, and raw config text.' : 'Try a different search term or verify that this environment has generated config files.'}</p>
+                {filteredCatalog.length === 0 && (
+                  <div className="ui-empty config-explorer__empty" role={loadingFileSearchContents ? 'status' : undefined}>
+                    <span className="ui-empty__emblem" aria-hidden="true">
+                      <Icon name={loadingFileSearchContents || catalog.length > 0 ? 'search' : 'sliders'} />
+                    </span>
+                    <p className="ui-empty__title">
+                      {loadingFileSearchContents ? 'Searching file contents' : catalog.length === 0 ? 'No config files yet' : 'No matching files'}
+                    </p>
+                    <p className="ui-empty__copy">
+                      {loadingFileSearchContents
+                        ? 'Checking keys, values, comments, and raw text.'
+                        : catalog.length === 0
+                          ? 'MelonLoader and mods create their config files the first time the game runs. Play once, then return here.'
+                          : 'Try a different search term.'}
+                    </p>
                   </div>
                 )}
               </>
@@ -1286,280 +1256,248 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           </div>
         </aside>
 
-        <section className={`config-workspace ${activeDocument?.parseWarnings.length ? 'config-workspace--with-warning' : ''} ${editorMode === 'raw' ? 'config-workspace--raw' : ''}`}>
+        <section className={`config-workspace ${editorMode === 'raw' ? 'config-workspace--raw' : ''}`} aria-label="Config editor">
+          {error && (
+            <div className="ui-callout ui-callout--danger config-workspace__error" role="alert">
+              <Icon name="fas fa-triangle-exclamation" aria-hidden="true" />
+              <span>{error}</span>
+            </div>
+          )}
+
           {!selectedFilePath ? (
-            <div className="config-editor__empty config-editor__empty--workspace">
-              <Icon name="fas fa-sliders" />
-              <strong>Select a configuration file</strong>
-              <p>Choose a file from the explorer to inspect and edit its current settings.</p>
+            <div className="ui-empty config-workspace__empty">
+              <span className="ui-empty__emblem" aria-hidden="true"><Icon name="fileCode" /></span>
+              <p className="ui-empty__title">Select a config file</p>
+              <p className="ui-empty__copy">Choose a file on the left to see and edit its settings.</p>
             </div>
           ) : loadingDocument && !activeDocument ? (
-            <div className="config-editor__empty config-editor__empty--workspace">
-              <Icon name="fas fa-spinner fa-spin" />
-              <strong>Loading configuration file</strong>
+            <div className="config-workspace__skeleton" role="status">
+              <span className="sr-only">Loading configuration file</span>
+              {Array.from({ length: 6 }, (_, index) => (
+                <div key={index} className="config-workspace__skeleton-row" aria-hidden="true">
+                  <span className="config-skeleton-bar" style={{ width: `${30 + ((index * 11) % 25)}%` }} />
+                  <span className="config-skeleton-bar config-skeleton-bar--field" />
+                </div>
+              ))}
             </div>
           ) : activeDocument && activeDraft ? (
             <>
               <header className="config-workspace__header">
-                <div className="config-workspace__identity">
-                  <div className="config-workspace__title-row">
-                    <h3 title={activeDocument.summary.path}>{activeDocument.summary.name}</h3>
-                    <div className="config-workspace__mode-switch" role="group" aria-label="Editor mode">
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className={`config-workspace__mode-button h-auto ${editorMode === 'structured' ? 'config-workspace__mode-button--active' : ''}`}
-                        onClick={() => handleModeChange('structured')}
-                        disabled={!structuredAvailable}
-                      >
-                        Structured
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className={`config-workspace__mode-button h-auto ${editorMode === 'raw' ? 'config-workspace__mode-button--active' : ''}`}
-                        onClick={() => handleModeChange('raw')}
-                      >
-                        Raw
-                      </SimmButton>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="config-workspace__actions">
-                  <div className="config-workspace__state">
-                    <span>{activeDocument.summary.entryCount} values</span>
-                    <span>{activeDocument.summary.sectionCount} sections</span>
+                <div className="config-workspace__titles">
+                  <h3 className="config-workspace__title" title={activeDocument.summary.path}>{activeDocument.summary.name}</h3>
+                  <p className="ui-meta config-workspace__meta">
+                    <span className="ui-mono config-workspace__path" title={activeDocument.summary.path}>{activeDocument.summary.relativePath}</span>
+                    <span>{formatSettingCount(activeDocument.summary.entryCount)}</span>
+                    <span>{formatSectionCount(activeDocument.summary.sectionCount)}</span>
                     <span>Modified {formatRelativeTimestamp(activeDocument.summary.lastModified)}</span>
-                  </div>
-                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void ApiService.openPath(activeDocument.summary.path)}>
-                    <Icon name="fas fa-file-lines" />
-                    Open File
+                  </p>
+                </div>
+                <div className="config-workspace__mode-switch" role="group" aria-label="Editor mode">
+                  <SimmButton
+                    type="button"
+                    variant="ghost"
+                    className="config-workspace__mode-button"
+                    aria-pressed={editorMode === 'structured'}
+                    onClick={() => handleModeChange('structured')}
+                    disabled={!structuredAvailable}
+                  >
+                    Structured
                   </SimmButton>
-                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void ApiService.revealPath(activeDocument.summary.path)}>
-                    <Icon name="fas fa-folder-open" />
-                    Open Folder
-                  </SimmButton>
-                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void handleReload()} disabled={loadingDocument || saving}>
-                    <Icon name={loadingDocument ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
-                    Reload
+                  <SimmButton
+                    type="button"
+                    variant="ghost"
+                    className="config-workspace__mode-button"
+                    aria-pressed={editorMode === 'raw'}
+                    onClick={() => handleModeChange('raw')}
+                  >
+                    Raw
                   </SimmButton>
                 </div>
+                <SimmButton
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="More file actions"
+                  aria-haspopup="menu"
+                  aria-expanded={actionMenu?.id === 'config-file-actions'}
+                  onClick={(event) => openActionMenu('config-file-actions', event, fileMenuItems(activeDocument))}
+                >
+                  <Icon name={loadingDocument ? 'fas fa-spinner fa-spin' : 'fas fa-ellipsis-h'} />
+                </SimmButton>
               </header>
 
-              {editorMode === 'structured' ? (
-                <div className="config-workspace__toolbar">
-                  <div className="config-workspace__toolbar-main">
-                    <div className={`config-workspace__section-tabs-shell ${sectionTabOverflow.left ? 'config-workspace__section-tabs-shell--left' : ''} ${sectionTabOverflow.right ? 'config-workspace__section-tabs-shell--right' : ''}`}>
-                      {sectionTabOverflow.left && (
-                        <SimmButton
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          className="config-workspace__section-tabs-shift config-workspace__section-tabs-shift--left"
-                          aria-label="Show earlier sections"
-                          onClick={() => scrollSectionTabs(-240)}
-                        >
-                          <Icon name="fas fa-chevron-left" />
-                        </SimmButton>
-                      )}
-                      <div
-                        ref={sectionTabsRef}
-                        className="config-workspace__section-tabs"
-                        onWheel={handleSectionTabsWheel}
-                      >
-                        {sectionTabs.length > 1 && (
-                          <SimmButton
-                            type="button"
-                            variant="ghost"
-                            className={`config-workspace__section-tab h-auto ${activeSectionId === ALL_SECTIONS_TAB ? 'config-workspace__section-tab--active' : ''}`}
-                            onClick={() => setActiveSectionId(ALL_SECTIONS_TAB)}
-                          >
-                            All Sections
-                          </SimmButton>
-                        )}
-                        {sectionTabs.map((section) => (
-                          <SimmButton
-                            key={section.id}
-                            type="button"
-                            variant="ghost"
-                            className={`config-workspace__section-tab h-auto ${activeSectionId === section.id ? 'config-workspace__section-tab--active' : ''}`}
-                            onClick={() => setActiveSectionId(section.id)}
-                          >
-                            {section.name}
-                          </SimmButton>
-                        ))}
-                      </div>
-                      {sectionTabOverflow.right && (
-                        <SimmButton
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          className="config-workspace__section-tabs-shift config-workspace__section-tabs-shift--right"
-                          aria-label="Show later sections"
-                          onClick={() => scrollSectionTabs(240)}
-                        >
-                          <Icon name="fas fa-chevron-right" />
-                        </SimmButton>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="config-workspace__toolbar-actions">
-                    <div className="config-editor__search config-editor__search--workspace">
-                      <Icon name="fas fa-search" />
-                      <Input
-                        type="text"
-                        value={sectionFilter}
-                        onChange={(e) => setSectionFilter(e.target.value)}
-                        placeholder="Filter settings"
-                      />
-                    </div>
-                    {activeSectionId && activeSectionId !== ALL_SECTIONS_TAB && (
-                      <SimmButton
-                        type="button"
-                        className="btn btn-secondary btn-small"
-                        onClick={() => handleAddEntry(activeSectionId)}
-                      >
-                        <Icon name="fas fa-plus" />
-                        Add Entry
-                      </SimmButton>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-
               {activeDocument.parseWarnings.length > 0 && (
-                <div className="config-editor__warning">
-                  <Icon name="fas fa-triangle-exclamation" />
-                  <SimmBadge variant="outline" className="settings-chip">
-                    Raw Fallback
-                  </SimmBadge>
+                <div className="ui-callout ui-callout--warn config-workspace__warning">
+                  <Icon name="fas fa-triangle-exclamation" aria-hidden="true" />
                   <div>
                     <strong>Structured editing is unavailable for part of this file.</strong>
-                    <p>{activeDocument.parseWarnings[0]}</p>
+                    <p>{activeDocument.parseWarnings[0]} Edit it in Raw mode instead.</p>
+                  </div>
+                </div>
+              )}
+
+              {editorMode === 'structured' && (
+                <div className="ui-toolbar config-workspace__toolbar">
+                  {sectionTabs.length > 1 && (
+                    <Select
+                      value={activeSectionId ?? ALL_SECTIONS_TAB}
+                      onValueChange={(nextValue) => {
+                        if (typeof nextValue === 'string') setActiveSectionId(nextValue);
+                      }}
+                    >
+                      <SelectTrigger className="config-workspace__section-select" aria-label="Section">
+                        <SelectValue>{(value) => sectionSelectLabel(typeof value === 'string' ? value : activeSectionId)}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent align="start">
+                        <SelectGroup>
+                          <SelectItem value={ALL_SECTIONS_TAB}>All sections</SelectItem>
+                          {sectionTabs.map((section) => (
+                            <SelectItem key={section.id} value={section.id}>
+                              {section.name}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <div className="config-workspace__filter">
+                    <Icon name="fas fa-search" aria-hidden="true" />
+                    <Input
+                      type="search"
+                      value={sectionFilter}
+                      onChange={(e) => setSectionFilter(e.target.value)}
+                      placeholder="Filter settings"
+                      aria-label="Filter settings"
+                    />
                   </div>
                 </div>
               )}
 
               <div className={`config-workspace__body ${editorMode === 'raw' ? 'config-workspace__body--raw' : 'config-workspace__body--structured'}`}>
                 {editorMode === 'structured' ? (
-                  <div className="config-structured">
-                    <div className="config-structured__sheet">
-                      {activeSection && (
-                        <div className="config-structured__header">
-                          <div className="config-structured__heading">
-                            <h4>{activeSection.name}</h4>
-                            <p>{formatSettingCount(visibleEntryCount)}</p>
-                          </div>
-                          <div className="config-structured__header-actions">
-                            <SimmButton
-                              type="button"
-                              variant="destructive"
-                              className="btn btn-danger btn-small"
-                              onClick={() => handleDeleteSection(activeSection.id)}
-                            >
-                              <Icon name="fas fa-trash" />
-                              Remove Section
-                            </SimmButton>
-                          </div>
+                  visibleSections.length === 0 ? (
+                    <div className="ui-empty">
+                      <span className="ui-empty__emblem" aria-hidden="true">
+                        <Icon name={activeDraft.sections.length === 0 ? 'sliders' : 'filter'} />
+                      </span>
+                      <p className="ui-empty__title">{activeDraft.sections.length === 0 ? 'This file has no settings yet' : 'No matching settings'}</p>
+                      <p className="ui-empty__copy">
+                        {activeDraft.sections.length === 0
+                          ? 'Switch to Raw to write the file by hand.'
+                          : 'Clear the filter or pick another section.'}
+                      </p>
+                    </div>
+                  ) : (
+                    visibleSections.map((section) => (
+                      <section key={section.id} className="config-section" aria-labelledby={`config-section-${section.id}`}>
+                        <header className="config-section__head">
+                          {(() => {
+                            const artwork = getModArtwork(section.name);
+                            return artwork ? <ModThumbnail {...artwork} name={section.name} size={20} /> : null;
+                          })()}
+                          <h4 id={`config-section-${section.id}`} className="config-section__title">{section.name}</h4>
+                          <span className="config-section__count">{formatSettingCount(section.entries.length)}</span>
+                          <span className="ui-toolbar__spacer" />
+                          <SimmButton
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="config-section__action"
+                            onClick={() => handleAddEntry(section.id)}
+                          >
+                            <Icon name="fas fa-plus" data-icon="inline-start" />
+                            Add Entry
+                          </SimmButton>
+                          <SimmButton
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="config-section__action"
+                            aria-label={`More actions for section ${section.name}`}
+                            aria-haspopup="menu"
+                            onClick={(event) => openActionMenu(`config-section-${section.id}`, event, sectionMenuItems(section))}
+                          >
+                            <Icon name="fas fa-ellipsis-h" />
+                          </SimmButton>
+                        </header>
+                        <div className="config-section__rows">
+                          {section.entries.length === 0 ? (
+                            <p className="config-section__empty">No settings in this section. Choose Add Entry to create one.</p>
+                          ) : (
+                            section.entries.map((entry) => (
+                              <ConfigEntryRow
+                                key={entry.id}
+                                sectionId={section.id}
+                                entry={entry}
+                                onChange={handleEntryChange}
+                                onDelete={handleDeleteEntry}
+                                onOpenMenu={openActionMenu}
+                              />
+                            ))
+                          )}
+                        </div>
+                      </section>
+                    ))
+                  )
+                ) : (
+                  <div className="config-raw__editor">
+                    <Suspense
+                      fallback={(
+                        <div className="config-workspace__skeleton" role="status">
+                          <span className="sr-only">Loading raw editor</span>
                         </div>
                       )}
-
-                      <div className="config-structured__sections">
-                        {visibleSections.length === 0 ? (
-                          <div className="config-editor__empty config-editor__empty--workspace">
-                            <Icon name="fas fa-sliders" />
-                            <strong>No matching settings</strong>
-                            <p>Adjust the search or switch sections to widen the result set.</p>
-                          </div>
-                        ) : (
-                          visibleSections.map((section) => (
-                            <article key={section.id} className={`config-section-card ${activeSection ? 'config-section-card--active-section' : ''}`}>
-                              {!activeSection && (
-                                <div className="config-section-card__header">
-                                  <div className="config-section-card__title">
-                                    <h4>{section.name}</h4>
-                                    <p>{formatSettingCount(section.entries.length)}</p>
-                                  </div>
-                                  <div className="config-section-card__header-actions">
-                                    <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => handleAddEntry(section.id)}>
-                                      <Icon name="fas fa-plus" />
-                                      Add Entry
-                                    </SimmButton>
-                                    <SimmButton type="button" variant="destructive" className="btn btn-danger btn-small" onClick={() => handleDeleteSection(section.id)}>
-                                      <Icon name="fas fa-trash" />
-                                      Remove Section
-                                    </SimmButton>
-                                  </div>
-                                </div>
-                              )}
-
-                              <div className="config-section-card__entries">
-                                {section.entries.map((entry) => (
-                                  <ConfigEntryRow
-                                    key={entry.id}
-                                    sectionId={section.id}
-                                    entry={entry}
-                                    onChange={handleEntryChange}
-                                    onDelete={handleDeleteEntry}
-                                  />
-                                ))}
-                              </div>
-                            </article>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="config-raw">
-                    <div className="config-raw__editor">
-                      <Suspense
-                        fallback={(
-                          <div className="config-editor__empty config-editor__empty--workspace">
-                            <Icon name="fas fa-spinner fa-spin" />
-                            <strong>Loading raw editor</strong>
-                          </div>
-                        )}
-                      >
-                        <ConfigRawEditor
-                          value={activeDraft.rawContent}
-                          onChange={handleRawChange}
-                        />
-                      </Suspense>
-                    </div>
+                    >
+                      <ConfigRawEditor
+                        value={activeDraft.rawContent}
+                        onChange={handleRawChange}
+                      />
+                    </Suspense>
                   </div>
                 )}
               </div>
+
               <footer className="config-workspace__draft-bar">
-                <div className="config-workspace__draft-state">
-                  <span className={`config-workspace__draft-indicator ${activeDraft.dirty ? 'config-workspace__draft-indicator--dirty' : ''}`} />
-                  <strong>{activeDraft.dirty ? 'Unsaved draft' : 'No unsaved changes'}</strong>
-                  <span>{dirtyCount} draft{dirtyCount === 1 ? '' : 's'}</span>
-                  <span>{visibleEntryCount} visible setting{visibleEntryCount === 1 ? '' : 's'}</span>
-                </div>
-                <div className="config-workspace__draft-actions">
-                  <SimmButton type="button" className="btn btn-secondary" onClick={handleDiscard} disabled={!activeDraft.dirty || saving}>
-                    <Icon name="fas fa-rotate-left" />
-                    Discard
-                  </SimmButton>
-                  <SimmButton
-                    type="button"
-                    className="btn btn-primary"
-                    aria-label="Save"
-                    onClick={() => void handleSave()}
-                    disabled={!activeDraft.dirty || saving}
-                  >
-                    <Icon name={saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'} />
-                    {saving ? 'Saving...' : 'Save Changes'}
-                  </SimmButton>
-                </div>
+                <p className="config-workspace__draft-state">
+                  <span
+                    className={`config-workspace__draft-dot ${activeDraft.dirty ? 'config-workspace__draft-dot--dirty' : ''}`}
+                    aria-hidden="true"
+                  />
+                  <span className="config-workspace__draft-label">{activeDraft.dirty ? 'Unsaved changes' : 'No unsaved changes'}</span>
+                  {otherDraftCount > 0 && (
+                    <span className="config-workspace__draft-other">
+                      {otherDraftCount} other {otherDraftCount === 1 ? 'file has' : 'files have'} unsaved drafts
+                    </span>
+                  )}
+                </p>
+                <SimmButton type="button" variant="secondary" onClick={handleDiscard} disabled={!activeDraft.dirty || saving}>
+                  Discard
+                </SimmButton>
+                <SimmButton
+                  type="button"
+                  variant="default"
+                  aria-label="Save"
+                  onClick={() => void handleSave()}
+                  disabled={!activeDraft.dirty || saving}
+                >
+                  <Icon name={saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'} data-icon="inline-start" />
+                  {saving ? 'Saving…' : 'Save Changes'}
+                </SimmButton>
               </footer>
             </>
           ) : null}
         </section>
       </div>
+
+      {actionMenu && (
+        <AnchoredContextMenu
+          id={actionMenu.id}
+          x={actionMenu.x}
+          y={actionMenu.y}
+          items={actionMenu.items}
+          onClose={() => setActionMenu(null)}
+        />
+      )}
     </div>
   );
 }

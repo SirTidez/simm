@@ -1,0 +1,336 @@
+/*
+ * Accounts workspace and the Steam authentication dialog.
+ */
+
+.accounts-page {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.accounts-list {
+  display: flex;
+  flex-direction: column;
+  max-width: 54rem;
+}
+
+/* One service per row: icon, name + status, purpose, actions. */
+.account-service {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--simm-space-4);
+  padding: var(--simm-space-4) 0;
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.account-service:first-child {
+  padding-top: 0;
+}
+
+.account-service__icon {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--simm-line-strong);
+  border-radius: var(--simm-radius);
+  background: var(--simm-raised);
+  color: var(--simm-text-2);
+}
+
+.account-service__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-1);
+  min-width: 0;
+}
+
+.account-service__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--simm-space-3);
+  min-height: 2rem;
+}
+
+.account-service__title h3 {
+  margin: 0;
+  color: var(--simm-text);
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+}
+
+.account-service__meta strong {
+  color: var(--simm-text);
+  font-weight: 500;
+}
+
+.account-service__purpose {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.account-service__error {
+  margin-top: var(--simm-space-2);
+}
+
+.account-service__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--simm-space-2);
+}
+
+.accounts-note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--simm-space-2);
+  margin: var(--simm-space-4) 0 0;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+}
+
+.accounts-note svg {
+  flex: none;
+}
+
+@media (max-width: 900px) {
+  .account-service {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .account-service__actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+}
+
+/* ------------------------------------------------------------------
+ * Steam authentication dialog
+ */
+
+.auth-modal.auth-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: min(36rem, calc(100vw - 2rem));
+  max-width: none;
+  max-height: calc(100vh - 2rem);
+  padding: 0;
+  overflow: hidden;
+}
+
+.auth-modal.auth-modal > [data-slot='dialog-header'].modal-header {
+  margin: 0;
+  padding: var(--simm-space-3) var(--simm-space-5);
+}
+
+.auth-modal__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--simm-space-3);
+}
+
+.auth-modal__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.auth-modal__heading [data-slot='dialog-title'] {
+  margin: 0;
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+}
+
+.auth-modal__heading [data-slot='dialog-description'] {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.auth-modal__form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.auth-modal__tabs.ui-tabs-line {
+  flex: none;
+}
+
+.auth-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-4);
+  min-height: 0;
+  padding: var(--simm-space-4) var(--simm-space-5);
+  overflow-y: auto;
+}
+
+.auth-modal__expect {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.auth-modal__error {
+  overflow-wrap: anywhere;
+}
+
+/* QR glyph art: the small size is what lets the code fit; it is not text. */
+.auth-modal__qr-output {
+  box-sizing: border-box;
+  min-height: 12.75rem;
+  max-height: 14.25rem;
+  margin: 0;
+  padding: var(--simm-space-2);
+  overflow: hidden;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+  color: var(--simm-text);
+  font-family: var(--simm-font-mono);
+  font-size: 0.58rem;
+  line-height: 0.96;
+  white-space: pre;
+}
+
+.auth-modal__qr-output--windows {
+  min-height: 11.75rem;
+  max-height: 12.8rem;
+  font-size: 0.48rem;
+  line-height: 0.9;
+}
+
+.auth-modal__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-3);
+}
+
+.auth-modal__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-1);
+}
+
+.auth-modal__field label {
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.auth-modal__field [data-slot='input'] {
+  height: var(--simm-control-h);
+  border-radius: var(--simm-radius);
+}
+
+.auth-modal__optional {
+  color: var(--simm-text-3);
+  font-weight: 400;
+}
+
+.auth-modal__note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--simm-space-2);
+  margin: 0;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+}
+
+.auth-modal__note svg {
+  flex: none;
+}
+
+.auth-modal__remember {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-3);
+  cursor: pointer;
+}
+
+.auth-modal__remember [data-slot='checkbox'] {
+  margin-top: 2px;
+}
+
+.auth-modal__remember-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.auth-modal__remember-copy small {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+  font-weight: 400;
+}
+
+.auth-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--simm-space-2);
+  padding: var(--simm-space-3) var(--simm-space-5);
+  border-top: 1px solid var(--simm-line);
+}
+
+.auth-modal__waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--simm-space-4);
+  padding: var(--simm-space-8) var(--simm-space-5) var(--simm-space-5);
+  text-align: center;
+}
+
+.auth-modal__waiting .auth-modal__actions {
+  align-self: stretch;
+  margin: 0 calc(var(--simm-space-5) * -1) calc(var(--simm-space-5) * -1);
+}
+
+.auth-modal__spinner {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 3px solid var(--simm-line-strong);
+  border-top-color: var(--simm-accent);
+  border-radius: 50%;
+  animation: auth-modal-spin 1s linear infinite;
+}
+
+@keyframes auth-modal-spin {
+  to { transform: rotate(360deg); }
+}
+
+.auth-modal__waiting-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-1);
+  max-width: 28rem;
+}
+
+.auth-modal__waiting-copy h3 {
+  margin: 0;
+  color: var(--simm-text);
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+}
+
+.auth-modal__waiting-copy p {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-base);
+}
+
+.auth-modal__muted.auth-modal__muted {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+}

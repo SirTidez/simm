@@ -105,7 +105,13 @@ impl WatcherRefreshDebouncer {
                 let event_count = generation.saturating_add(1);
                 let mut outcome = "event emitted";
 
+                // Invalidate before publishing the edge. Consumers may request
+                // a new library immediately, including on plugin-only changes
+                // for which no mods snapshot follows.
+                crate::commands::mods::invalidate_mod_library_cache("filesystem change").await;
+
                 let emit_result = match watch_type.as_str() {
+                    "library" => events::emit_mod_library_changed(&app),
                     "mods" => events::emit_mods_changed(&app, environment_id.clone()),
                     "plugins" => events::emit_plugins_changed(&app, environment_id.clone()),
                     "userlibs" => events::emit_userlibs_changed(&app, environment_id.clone()),
@@ -192,8 +198,13 @@ impl WatcherRefreshDebouncer {
     }
 }
 
+struct WatchedDirectory {
+    directory: PathBuf,
+    _watcher: RecommendedWatcher,
+}
+
 pub struct FileSystemWatcherService {
-    watchers: Arc<RwLock<std::collections::HashMap<String, RecommendedWatcher>>>,
+    watchers: Arc<RwLock<std::collections::HashMap<String, WatchedDirectory>>>,
     app_handle: Option<Arc<tauri::AppHandle>>,
     refresh_debouncer: Arc<WatcherRefreshDebouncer>,
 }
@@ -220,18 +231,33 @@ impl FileSystemWatcherService {
         let watch_key = format!("{}-{}", environment_id, watch_type);
         let dir_path = PathBuf::from(directory);
 
+        // Passive library reads must not repeatedly tear down and rearm the
+        // same watcher, leaving a gap in which a rebuild can be missed.
+        if self
+            .watchers
+            .read()
+            .await
+            .get(&watch_key)
+            .is_some_and(|watch| watch.directory == dir_path)
+        {
+            return Ok(());
+        }
+
         // Stop existing watcher if any
         self.stop_watching(environment_id, watch_type).await?;
 
         // A managed subdirectory commonly does not exist until a runtime or
         // mod loader creates it.  Watch the nearest existing ancestor
         // recursively so that creation *and* nested changes are observed.
-        let watch_target = nearest_existing_ancestor(&dir_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not find an existing ancestor for watcher target {}",
-                dir_path.display()
-            )
-        })?;
+        // Watch the parent so deleting/recreating the logical Mods directory
+        // does not detach the watch from its replacement.
+        let watch_target = nearest_existing_ancestor(dir_path.parent().unwrap_or(&dir_path))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not find an existing ancestor for watcher target {}",
+                    dir_path.display()
+                )
+            })?;
 
         // Capture Tokio runtime handle for spawning from notify's callback thread.
         // The notify callback runs in a separate OS thread (not in Tokio runtime), so we cannot
@@ -249,7 +275,10 @@ impl FileSystemWatcherService {
                     Ok(event) => {
                         // A missing logical directory makes us watch a broader
                         // ancestor. Ignore unrelated sibling activity there.
-                        if !event_targets_directory(&event, &logical_directory) {
+                        if !event_targets_directory(&event, &logical_directory)
+                            || (watch_type_clone == "library"
+                                && !library_event_is_relevant(&event, &logical_directory))
+                        {
                             return;
                         }
                         if let Some(app_arc) = app_handle_clone.as_ref() {
@@ -284,7 +313,13 @@ impl FileSystemWatcherService {
         })?;
 
         let mut watchers = self.watchers.write().await;
-        watchers.insert(watch_key, watcher);
+        watchers.insert(
+            watch_key,
+            WatchedDirectory {
+                directory: dir_path,
+                _watcher: watcher,
+            },
+        );
 
         Ok(())
     }
@@ -298,6 +333,15 @@ impl FileSystemWatcherService {
         }
 
         Ok(())
+    }
+
+    pub async fn watch_mod_library(&self, storage_directory: &Path) -> Result<()> {
+        self.start_watching(
+            "shared-library",
+            &storage_directory.to_string_lossy(),
+            "library",
+        )
+        .await
     }
 
     pub async fn stop_watching_environment(&self, environment_id: &str) -> Result<()> {
@@ -321,7 +365,49 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Keep unpublished staging trees and source-archive activity out of library
+/// refreshes. The final staging rename includes a visible destination path.
+fn library_event_is_relevant(event: &notify::Event, directory: &Path) -> bool {
+    event.paths.iter().any(|path| {
+        let Ok(relative) = path.strip_prefix(directory) else {
+            return false;
+        };
+        let parts: Vec<_> = relative.iter().map(|part| part.to_string_lossy()).collect();
+        !parts
+            .first()
+            .is_some_and(|part| part.starts_with(".staging-"))
+            && !parts
+                .get(1)
+                .is_some_and(|part| part.eq_ignore_ascii_case("Archive"))
+    })
+}
+
+pub async fn ensure_mod_library_watcher(
+    app: &tauri::AppHandle,
+    storage_directory: &Path,
+) -> Result<()> {
+    if let Some(watcher) = app.try_state::<Arc<Mutex<FileSystemWatcherService>>>() {
+        watcher
+            .lock()
+            .await
+            .watch_mod_library(storage_directory)
+            .await?;
+    }
+    Ok(())
+}
+
 fn event_targets_directory(event: &notify::Event, directory: &Path) -> bool {
+    // Reading version metadata must not invalidate the inventory that read it.
+    if event.kind.is_access()
+        || matches!(
+            event.kind,
+            notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::AccessTime
+            ))
+        )
+    {
+        return false;
+    }
     event.paths.iter().any(|path| path.starts_with(directory))
 }
 
@@ -337,14 +423,68 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
+    async fn library_watcher_follows_settings_directory_and_keeps_one_registration() -> Result<()> {
+        let service = FileSystemWatcherService::new();
+        let temp = tempdir()?;
+        let first = temp.path().join("first/Mods");
+        let second = temp.path().join("second/Mods");
+        service.watch_mod_library(&first).await?;
+        service.watch_mod_library(&first).await?;
+        assert_eq!(service.watchers.read().await.len(), 1);
+        service.watch_mod_library(&second).await?;
+        let watchers = service.watchers.read().await;
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(watchers["shared-library-library"].directory, second);
+        Ok(())
+    }
+
+    #[test]
+    fn library_filter_keeps_published_dll_changes_and_ignores_staging_and_archives() {
+        use notify::{Event, EventKind};
+        let root = Path::new("library/Mods");
+        for relative in [
+            "",
+            "local/Mods/Mod.dll",
+            "local/Plugins/Plugin.dll.disabled",
+            "local/.storage-metadata.json",
+            "local",
+        ] {
+            let event = Event::new(EventKind::Any).add_path(root.join(relative));
+            assert!(library_event_is_relevant(&event, root), "{relative}");
+        }
+        for relative in [".staging-id/Mods/Mod.dll", "local/Archive/Mod.dll"] {
+            let event = Event::new(EventKind::Any).add_path(root.join(relative));
+            assert!(!library_event_is_relevant(&event, root), "{relative}");
+        }
+        let publish = Event::new(EventKind::Any)
+            .add_path(root.join(".staging-id"))
+            .add_path(root.join("published"));
+        assert!(library_event_is_relevant(&publish, root));
+        assert!(!library_event_is_relevant(
+            &Event::new(EventKind::Any).add_path(PathBuf::from("elsewhere/Mod.dll")),
+            root
+        ));
+    }
+
+    #[tokio::test]
     async fn start_and_stop_watching_existing_dir() -> Result<()> {
         let service = FileSystemWatcherService::new();
         let temp = tempdir()?;
+        // The service watches the parent to survive directory recreation.
+        // Keep that parent inside the fixture instead of recursively watching /tmp.
+        let mods = temp.path().join("Mods");
+        std::fs::create_dir(&mods)?;
 
         service
-            .start_watching("env-1", temp.path().to_string_lossy().as_ref(), "mods")
+            .start_watching("env-1", mods.to_string_lossy().as_ref(), "mods")
             .await?;
+        {
+            let watchers = service.watchers.read().await;
+            assert_eq!(watchers.len(), 1);
+            assert_eq!(watchers["env-1-mods"].directory, mods);
+        }
         service.stop_watching("env-1", "mods").await?;
+        assert!(service.watchers.read().await.is_empty());
 
         Ok(())
     }
@@ -389,18 +529,74 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn inventory_watch_ignores_reads_but_keeps_version_writes_and_enable_renames() {
+        use notify::{
+            event::{AccessKind, AccessMode, DataChange, MetadataKind, ModifyKind, RenameMode},
+            Event, EventKind,
+        };
+        let root = Path::new("fixture/Mods");
+        let file = root.join("Example.dll");
+        for kind in [
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+        ] {
+            assert!(!event_targets_directory(
+                &Event::new(kind).add_path(file.clone()),
+                root
+            ));
+        }
+        for kind in [
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+        ] {
+            assert!(event_targets_directory(
+                &Event::new(kind).add_path(file.clone()),
+                root
+            ));
+        }
+        assert!(event_targets_directory(
+            &Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(PathBuf::from("fixture/Staging/New.dll"))
+                .add_path(file),
+            root
+        ));
+    }
+
     #[tokio::test]
     async fn stop_watching_environment_clears_watchers() -> Result<()> {
         let service = FileSystemWatcherService::new();
         let temp = tempdir()?;
 
-        service
-            .start_watching("env-1", temp.path().to_string_lossy().as_ref(), "mods")
-            .await?;
-        service
-            .start_watching("env-1", temp.path().to_string_lossy().as_ref(), "plugins")
-            .await?;
+        // Each recursively watched parent belongs to this fixture, even when
+        // the host's shared temporary directory contains unreadable siblings.
+        for (environment_id, watch_type) in [
+            ("env-1", "mods"),
+            ("env-1", "plugins"),
+            ("env-1", "userlibs"),
+            ("env-2", "mods"),
+        ] {
+            let directory = temp.path().join(environment_id).join(watch_type);
+            std::fs::create_dir_all(&directory)?;
+            service
+                .start_watching(
+                    environment_id,
+                    directory.to_string_lossy().as_ref(),
+                    watch_type,
+                )
+                .await?;
+        }
+        assert_eq!(service.watchers.read().await.len(), 4);
+
         service.stop_watching_environment("env-1").await?;
+        let watchers = service.watchers.read().await;
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(
+            watchers["env-2-mods"].directory,
+            temp.path().join("env-2/mods")
+        );
 
         Ok(())
     }

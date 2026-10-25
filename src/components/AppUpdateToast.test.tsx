@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AppUpdateToast } from './AppUpdateToast';
 
 describe('AppUpdateToast', () => {
-  it('renders versions and forwards actions', () => {
+  it('renders versions and forwards actions', async () => {
     const onUpdate = vi.fn();
     const onSkip = vi.fn();
     const onSnooze = vi.fn();
@@ -26,13 +26,12 @@ describe('AppUpdateToast', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Update' }));
     expect(onUpdate).toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText(/Snooze app update reminder/i), {
-      target: { value: '14' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Snooze' }));
+    fireEvent.click(screen.getByRole('button', { name: /Later/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remind Me in 2 Weeks' }));
     expect(onSnooze).toHaveBeenCalledWith(14);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Skip this version' }));
+    fireEvent.click(screen.getByRole('button', { name: /Later/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Skip This Version' }));
     expect(onSkip).toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: /Dismiss app update notice/i }));

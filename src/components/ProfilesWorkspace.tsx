@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { confirm, open, save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import { useAppDialogs } from './AppDialogProvider';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { ApiService } from '../services/api';
 import {
@@ -17,7 +20,6 @@ import type {
   Environment,
   ModProfileApplyResult,
   ModProfileImportPlan,
-  ModProfileImportPlanItem,
   ModProfileManifest,
   ModProfileCollectionItem,
   ModProfileItem,
@@ -25,9 +27,11 @@ import type {
   Runtime,
   StoredModProfile,
 } from '../types';
+import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { Icon } from './Icon';
 import { SimmButton } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
+import { ModThumbnail, ThumbnailStack, type ModArtwork } from './media/ModThumbnail';
+import { useLibraryArtwork } from './useLibraryArtwork';
 
 type RuntimeKey = 'IL2CPP' | 'MONO';
 
@@ -140,10 +144,6 @@ function isCompatibleEnvironment(environment: Environment, profile: StoredModPro
   return Boolean(profile) && runtimeKey(environment.runtime) === runtimeKey(profile?.runtime);
 }
 
-function planItemStatusClass(item: ModProfileImportPlanItem): string {
-  return item.status.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`);
-}
-
 function effectiveNexusDownloadAccess(
   status: Awaited<ReturnType<typeof ApiService.getNexusOAuthStatus>>,
 ): NexusDownloadAccess {
@@ -177,12 +177,81 @@ function collectionSourceLabel(
   const source = collectionItem.sourceChoice === 'library'
     ? profileItem.source
     : collectionItem.sourceChoice;
-  return source === 'thunderstore' ? 'Thunderstore' : 'Nexus';
+  return source === 'thunderstore' ? 'Thunderstore' : 'Nexus Mods';
+}
+
+function sourceLabel(source: string | null | undefined): string {
+  switch (source) {
+    case 'thunderstore': return 'Thunderstore';
+    case 'nexusmods': return 'Nexus Mods';
+    case 'github': return 'GitHub';
+    case null:
+    case undefined:
+    case '':
+    case 'local': return 'Local';
+    default: return source.charAt(0).toUpperCase() + source.slice(1);
+  }
+}
+
+function itemFileIdentity(item: ModProfileItem): string {
+  return item.fileName ?? item.sourceId ?? item.storageId ?? 'No file identity';
+}
+
+type ProfileFlow = 'apply' | 'create' | 'update' | null;
+
+type ProfilesSelectOption = { value: string; label: string; disabled?: boolean };
+
+/** Environment picker on the shared Select; an empty value shows "Choose environment". */
+function ProfilesEnvironmentSelect({ label, value, options, onValueChange, disabled }: {
+  label: string;
+  value: string;
+  options: ProfilesSelectOption[];
+  onValueChange: (value: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Select
+      items={options}
+      value={value || null}
+      disabled={disabled}
+      onValueChange={(next) => { if (typeof next === 'string') onValueChange(next); }}
+    >
+      <SelectTrigger className="profiles-field__select" aria-label={label}>
+        <SelectValue placeholder="Choose environment" />
+      </SelectTrigger>
+      <SelectContent align="start">
+        <SelectGroup>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value} disabled={option.disabled}>{option.label}</SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
 }
 
 export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: ProfilesWorkspaceProps) {
+  const { confirm } = useAppDialogs();
   const { environments, loading: environmentsLoading, refreshEnvironments } = useEnvironmentStore();
   const downloadStatusStore = useOptionalDownloadStatusStore();
+  const getModArtwork = useLibraryArtwork();
+  const itemArtwork = useCallback((item: ModProfileItem): ModArtwork | null => (
+    getModArtwork(item.name)
+    ?? getModArtwork(item.fileName)
+    ?? getModArtwork(item.sourceId?.split('/').pop())
+  ), [getModArtwork]);
+  /** The Nexus collection tile, which SIMM keeps on the collection's download record. */
+  const collectionArtwork = useCallback((profile: StoredModProfile): ModArtwork | null => {
+    const collection = profile.manifest.collection;
+    if (!collection) return null;
+    const aggregateId = `collection:${collection.slug}:${collection.revisionNumber}`;
+    const download = downloadStatusStore?.downloads.find((entry) =>
+      entry.kind === 'collection'
+      && (entry.id === aggregateId || entry.profileId === profile.id)
+      && (entry.iconUrl || entry.iconCachePath)
+    );
+    return download ? { iconUrl: download.iconUrl, iconCachePath: download.iconCachePath } : null;
+  }, [downloadStatusStore?.downloads]);
   const [profiles, setProfiles] = useState<StoredModProfile[]>([]);
   const [profilesLoading, setProfilesLoading] = useState(true);
   const [selectedRuntime, setSelectedRuntime] = useState<RuntimeKey>('IL2CPP');
@@ -193,17 +262,20 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [includeDisabledExport, setIncludeDisabledExport] = useState(false);
   const [renameValue, setRenameValue] = useState('');
-  const [createPanelOpen, setCreatePanelOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [flow, setFlow] = useState<ProfileFlow>(null);
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [createEnvironmentId, setCreateEnvironmentId] = useState<string>('');
   const [createProfileName, setCreateProfileName] = useState('');
   const [createDraftManifest, setCreateDraftManifest] = useState<ModProfileManifest | null>(null);
   const [createSelectedItemKeys, setCreateSelectedItemKeys] = useState<Set<string>>(() => new Set());
-  const [captureName, setCaptureName] = useState('');
   const [nexusDownloadAccess, setNexusDownloadAccess] = useState<NexusDownloadAccess | null>(null);
   const [collectionFileSizes, setCollectionFileSizes] = useState<Record<string, number>>({});
   const profilesLoadGenerationRef = useRef(0);
   const targetSelectionGenerationRef = useRef(0);
+  const createSelectionGenerationRef = useRef(0);
   const lastHandledInitialProfileIdRef = useRef<string | null | undefined>(undefined);
   const lastAppliedPreferredEnvironmentIdRef = useRef<string | null>(null);
   const preferredEnvironment = useMemo(
@@ -314,7 +386,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
       setSelectedRuntime(runtimeKey(selectedProfile.runtime));
     }
     setRenameValue(selectedProfile?.name ?? '');
-    setCaptureName('');
+    setRenaming(false);
     setPlan(null);
     setNotice(null);
   }, [selectedProfile, selectedRuntime]);
@@ -323,10 +395,12 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     targetSelectionGenerationRef.current += 1;
   }, [selectedProfileId, targetEnvironmentId]);
 
-  useEffect(() => {
+  const selectCreateEnvironment = useCallback((environmentId: string) => {
+    createSelectionGenerationRef.current += 1;
+    setCreateEnvironmentId(environmentId);
     setCreateDraftManifest(null);
     setCreateSelectedItemKeys(new Set());
-  }, [targetEnvironmentId]);
+  }, []);
 
   useEffect(() => {
     if (!selectedProfile || userChoseTarget) return;
@@ -364,15 +438,6 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
   const createSelectedCount = createDraftItems.filter((item, index) =>
     createSelectedItemKeys.has(profileItemKey(item, index))
   ).length;
-  const hasPreviewPlan = plan !== null;
-  const planRows = plan?.items ?? profileItems.map((item) => ({
-    item,
-    status: 'unsupported' as const,
-    resolvedStorageId: item.storageId,
-    message: item.enabled === false
-      ? 'Disabled in this profile.'
-      : 'Tracked by this profile. Preview against a target environment to resolve install status.',
-  }));
 
   const runAction = useCallback(async (actionName: string, action: () => Promise<string | null | void>) => {
     setBusyAction(actionName);
@@ -727,7 +792,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
       ).catch(() => undefined);
       throw err;
     }
-  }, [refreshNexusDownloadAccess, saveCollectionProfile, selectedProfile, setCollectionItemStatus]);
+  }, [refreshNexusDownloadAccess, saveCollectionProfile, selectedProfile, setCollectionItemStatus, confirm]);
 
   useEffect(() => {
     const handleManualDownloadResult = (event: Event) => {
@@ -790,7 +855,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
       kind: 'warning',
     });
     return confirmed ? nextPlan : null;
-  }, []);
+  }, [confirm]);
 
   const applyProfile = useCallback(async () => {
     const profile = requireSelection();
@@ -847,7 +912,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     return `Imported ${imported.name}.`;
   }, [loadProfiles]);
 
-  const exportProfile = useCallback(async () => {
+  const exportProfile = useCallback(async (includeDisabled: boolean) => {
     if (!selectedProfile) throw new Error('Choose a profile first.');
     const destination = await save({
       title: 'Save SIMM profile',
@@ -857,49 +922,61 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     if (!destination) return null;
     const manifest = await ApiService.exportModProfileFromLibrary({
       profileId: selectedProfile.id,
-      includeDisabled: includeDisabledExport,
+      includeDisabled,
     });
     await ApiService.saveModProfileFile(manifest, destination);
     return `Exported ${manifest.profile.name}.`;
-  }, [includeDisabledExport, selectedProfile]);
+  }, [selectedProfile]);
 
   const captureNewProfile = useCallback(async () => {
-    if (!targetEnvironmentId) throw new Error('Choose a compatible target environment first.');
-    const targetId = targetEnvironmentId;
-    const targetGeneration = targetSelectionGenerationRef.current;
-    const name = captureName.trim();
+    if (!createEnvironmentId) throw new Error('Choose a source environment first.');
+    const targetId = createEnvironmentId;
+    const targetGeneration = createSelectionGenerationRef.current;
+    const name = createProfileName.trim();
     if (!name) throw new Error('Name the captured profile first.');
     const captured = await ApiService.captureModProfile({
       environmentId: targetId,
       name,
       includeDisabled: true,
     });
-    if (targetGeneration !== targetSelectionGenerationRef.current) return null;
+    if (targetGeneration !== createSelectionGenerationRef.current) return null;
     await loadProfiles();
     setSelectedProfileId(captured.id);
     setSelectedRuntime(runtimeKey(captured.runtime));
+    setCreateDraftManifest(null);
+    setCreateSelectedItemKeys(new Set());
+    setCreateProfileName('');
+    setFlow(null);
     return `Captured ${captured.name}.`;
-  }, [captureName, loadProfiles, targetEnvironmentId]);
+  }, [createEnvironmentId, createProfileName, loadProfiles]);
 
-  const loadCreateDraft = useCallback(async () => {
-    if (!targetEnvironmentId) throw new Error('Choose a compatible target environment first.');
-    const targetId = targetEnvironmentId;
-    const targetGeneration = targetSelectionGenerationRef.current;
-    setCreatePanelOpen(true);
-    const manifest = await ApiService.exportEnvironmentProfile(targetId);
-    if (targetGeneration !== targetSelectionGenerationRef.current) return null;
+  const loadCreateDraft = useCallback(async (environmentId: string) => {
+    if (!environmentId) throw new Error('Choose a source environment first.');
+    const targetGeneration = createSelectionGenerationRef.current;
+    setFlow('create');
+    const manifest = await ApiService.exportEnvironmentProfile(environmentId);
+    if (targetGeneration !== createSelectionGenerationRef.current) return null;
     setCreateDraftManifest(manifest);
     setCreateSelectedItemKeys(new Set(manifest.items.map((item, index) => profileItemKey(item, index))));
     setCreateProfileName((current) => current.trim() || manifest.profile.name);
-    return `Loaded ${manifest.items.length} target items.`;
-  }, [targetEnvironmentId]);
+    return null;
+  }, []);
 
   const openCreateProfile = useCallback(async () => {
-    if (!targetEnvironmentId) throw new Error('Choose a compatible target environment first.');
-    setCreatePanelOpen(true);
-    if (createDraftManifest) return null;
-    return loadCreateDraft();
-  }, [createDraftManifest, loadCreateDraft, targetEnvironmentId]);
+    setFlow('create');
+    setMoreMenu(null);
+    const sourceId = createEnvironmentId
+      || targetEnvironmentId
+      || (environments.find((environment) => environment.status === 'completed') ?? environments[0])?.id
+      || '';
+    if (!sourceId) return null;
+    if (sourceId !== createEnvironmentId) {
+      selectCreateEnvironment(sourceId);
+    } else if (createDraftManifest) {
+      return null;
+    }
+    return loadCreateDraft(sourceId);
+  }, [createDraftManifest, createEnvironmentId, environments, loadCreateDraft, selectCreateEnvironment, targetEnvironmentId]);
 
   const createSelectedProfile = useCallback(async () => {
     if (!createDraftManifest) throw new Error('Load target items first.');
@@ -938,7 +1015,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     setCreateDraftManifest(null);
     setCreateSelectedItemKeys(new Set());
     setCreateProfileName('');
-    setCreatePanelOpen(false);
+    setFlow(null);
     return `Created ${saved.name}.`;
   }, [createDraftManifest, createProfileName, createSelectedItemKeys, loadProfiles]);
 
@@ -955,6 +1032,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     if (targetGeneration !== targetSelectionGenerationRef.current) return null;
     await loadProfiles();
     setSelectedProfileId(captured.id);
+    setFlow(null);
     return `Updated ${captured.name} from the selected environment.`;
   }, [loadProfiles, selectedProfile, targetEnvironmentId]);
 
@@ -976,8 +1054,34 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     });
     await loadProfiles();
     setSelectedProfileId(updated.id);
+    setRenaming(false);
     return `Renamed profile to ${updated.name}.`;
   }, [loadProfiles, renameValue, selectedProfile]);
+
+  const duplicateProfile = useCallback(async () => {
+    if (!selectedProfile) throw new Error('Choose a profile first.');
+    const name = `${selectedProfile.name} copy`;
+    const runtime = runtimeForSave(runtimeKey(selectedProfile.runtime));
+    const saved = await ApiService.saveModProfile({
+      name,
+      runtime,
+      manifest: {
+        ...selectedProfile.manifest,
+        profileId: null,
+        isDefault: false,
+        createdAt: null,
+        updatedAt: null,
+        profile: {
+          ...selectedProfile.manifest.profile,
+          name,
+          runtime,
+        },
+      },
+    });
+    await loadProfiles();
+    setSelectedProfileId(saved.id);
+    return `Created ${saved.name}.`;
+  }, [loadProfiles, selectedProfile]);
 
   const deleteProfile = useCallback(async () => {
     if (!selectedProfile) throw new Error('Choose a profile first.');
@@ -993,547 +1097,815 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     await ApiService.deleteModProfile(selectedProfile.id);
     await loadProfiles();
     return `Deleted ${selectedProfile.name}.`;
-  }, [loadProfiles, selectedProfile, selectedProfileActiveCount]);
+  }, [loadProfiles, selectedProfile, selectedProfileActiveCount, confirm]);
 
-  return (
-    <section className="profiles-workspace modal-content workspace-panel" aria-label="Profiles workspace">
-      <WorkspacePageHeader
-        eyebrow="Profiles"
-        title="Profiles"
-        description="Switch, capture, import, and export runtime-locked mod sets."
+
+  useEffect(() => {
+    if (flow !== 'apply' || !selectedProfile || !targetEnvironmentId) return;
+    const targetGeneration = targetSelectionGenerationRef.current;
+    let active = true;
+    setPreviewLoading(true);
+    ApiService.previewModProfileApply(selectedProfile.id, targetEnvironmentId)
+      .then((nextPlan) => {
+        if (active && targetGeneration === targetSelectionGenerationRef.current) setPlan(nextPlan);
+      })
+      .catch((err) => {
+        if (active) setError(getErrorMessage(err, 'Could not preview this profile.'));
+      })
+      .finally(() => {
+        if (active) setPreviewLoading(false);
+      });
+    return () => {
+      active = false;
+      setPreviewLoading(false);
+    };
+  }, [flow, selectedProfile, targetEnvironmentId]);
+
+  const busy = busyAction !== null;
+  const deleteBlocked = !selectedProfile || selectedProfile.isDefault || selectedProfileActiveCount > 0;
+  const targetEnvironment = environments.find((environment) => environment.id === targetEnvironmentId) ?? null;
+  const installRows = plan?.items.filter((row) => row.status === 'readyToInstall') ?? [];
+  const unchangedRows = plan?.items.filter((row) => row.status === 'alreadyInstalled') ?? [];
+  const unavailableRows = plan?.items.filter((row) => row.status !== 'readyToInstall' && row.status !== 'alreadyInstalled') ?? [];
+  const removalRows = plan?.removals ?? [];
+  const permanentRemovalCount = removalRows.filter((removal) => !removal.recoverable).length;
+
+  const moreMenuItems: AnchoredContextMenuItem[] = selectedProfile ? [
+    {
+      key: 'rename',
+      label: 'Rename…',
+      icon: 'penToSquare',
+      disabled: busy,
+      onSelect: () => {
+        setRenameValue(selectedProfile.name);
+        setRenaming(true);
+      },
+    },
+    {
+      key: 'duplicate',
+      label: 'Duplicate',
+      icon: 'copy',
+      disabled: busy,
+      onSelect: () => void runAction('duplicate', duplicateProfile),
+    },
+    {
+      key: 'update',
+      label: 'Update From Environment…',
+      icon: 'rotate',
+      disabled: busy,
+      onSelect: () => setFlow('update'),
+    },
+    {
+      key: 'export',
+      label: 'Export JSON…',
+      icon: 'download',
+      disabled: busy,
+      onSelect: () => void runAction('export', () => exportProfile(false)),
+    },
+    {
+      key: 'export-disabled',
+      label: 'Export JSON With Disabled Items…',
+      icon: 'download',
+      disabled: busy,
+      onSelect: () => void runAction('export', () => exportProfile(true)),
+    },
+    {
+      key: 'delete',
+      label: 'Delete…',
+      icon: 'trash',
+      danger: true,
+      disabled: busy || deleteBlocked,
+      onSelect: () => void runAction('delete', deleteProfile),
+    },
+  ] : [];
+
+  const renderTargetSelect = (label: string) => (
+    <div className="profiles-field">
+      <span aria-hidden="true">{label}</span>
+      <ProfilesEnvironmentSelect
+        label={label}
+        value={targetEnvironmentId}
+        onValueChange={(environmentId) => {
+          setTargetEnvironmentId(environmentId);
+          setUserChoseTarget(true);
+        }}
+        disabled={!selectedProfile || environmentsLoading || busy}
+        options={environments.map((environment) => {
+          const compatible = isCompatibleEnvironment(environment, selectedProfile);
+          return {
+            value: environment.id,
+            label: `${environment.name}${compatible ? '' : ` (${runtimeLabel(environment.runtime)}, not compatible)`}`,
+            disabled: !compatible,
+          };
+        })}
       />
+    </div>
+  );
 
-      {error && <div className="profiles-workspace__alert profiles-workspace__alert--error" role="alert">{error}</div>}
-      {notice && <div className="profiles-workspace__alert profiles-workspace__alert--success" role="status">{notice}</div>}
+  const renderDiffItem = (item: ModProfileItem, detail?: string) => (
+    <span className="profiles-diff__item">
+      <ModThumbnail {...itemArtwork(item)} name={item.name} size={20} />
+      <span className="profiles-diff__item-text">
+        <strong className="ui-truncate" title={item.name}>{item.name}</strong>
+        <small>{detail ?? `${itemTypeLabel(item)} · ${sourceLabel(item.source)}`}</small>
+      </span>
+    </span>
+  );
 
-      <div className="profiles-workspace__layout">
-        <aside className="profiles-workspace__rail" aria-label="Profile library">
-          <div className="profiles-workspace__library-header">
-            <span className="workspace-eyebrow">Profile Library</span>
-            <small>IL2CPP and Mono</small>
-          </div>
-          <div className="profiles-workspace__library-actions">
-            <SimmButton
-              type="button"
-              variant="secondary"
-              className="btn btn-secondary"
-              onClick={() => void runAction('import', importProfile)}
-              disabled={busyAction !== null}
-            >
-              <Icon name={busyAction === 'import' ? 'spinner' : 'upload'} />
-              Import JSON
-            </SimmButton>
-          </div>
-          <div className="profiles-workspace__profile-list" role="list" aria-label="Profiles">
-            {profilesLoading ? (
-              <div className="profiles-workspace__empty" role="status">Loading profiles...</div>
-            ) : profiles.length === 0 ? (
-              <div className="profiles-workspace__empty">No profiles yet.</div>
-            ) : groupedProfiles.map((group) => (
-              <div key={group.key} className="profiles-workspace__profile-section">
-                <div className="profiles-workspace__profile-section-title">
-                  <span>{group.label}</span>
-                  <small>{group.profiles.length}</small>
-                </div>
-                {group.profiles.length === 0 ? (
-                  <div className="profiles-workspace__empty profiles-workspace__empty--compact">No {group.label} profiles.</div>
-                ) : group.profiles.map((profile) => (
-                  <SimmButton
-                    key={profile.id}
-                    type="button"
-                    variant="ghost"
-                    className={`profiles-workspace__profile-row ${profile.id === selectedProfileId ? 'profiles-workspace__profile-row--active' : ''}`}
-                    onClick={() => {
-                      setSelectedProfileId(profile.id);
-                      setSelectedRuntime(runtimeKey(profile.runtime));
-                      setUserChoseTarget(false);
-                    }}
-                    disabled={busyAction !== null}
-                  >
-                    <span className="profiles-workspace__profile-copy">
-                      <strong>{profile.name}</strong>
-                      <small>{profile.manifest.items.length} tracked items</small>
-                    </span>
-                    <span className="profiles-workspace__profile-badges">
-                      <span className="profiles-workspace__runtime-badge">{runtimeLabel(profile.runtime)}</span>
-                      {profile.isDefault && <span className="profiles-workspace__default-badge">Default Profile</span>}
-                    </span>
-                  </SimmButton>
+  const renderApplyFlow = () => (
+    <section className="profiles-flow" aria-label="Apply preview">
+      <div className="profiles-flow__bar">
+        {renderTargetSelect('Target environment')}
+        <SimmButton
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => void runAction('preview', previewProfile)}
+          disabled={!selectedProfile || !targetEnvironmentId || busy}
+          aria-label="Refresh preview"
+          title="Refresh preview"
+        >
+          <Icon name="rotate" spin={busyAction === 'preview' || previewLoading} />
+        </SimmButton>
+        <span className="ui-toolbar__spacer" />
+        <SimmButton type="button" variant="ghost" onClick={() => setFlow(null)} disabled={busy}>
+          Cancel
+        </SimmButton>
+        <SimmButton
+          type="button"
+          variant="secondary"
+          onClick={() => void runAction('applyLaunch', applyAndLaunch)}
+          disabled={!selectedProfile || !targetEnvironmentId || busy}
+        >
+          <Icon name={busyAction === 'applyLaunch' ? 'spinner' : 'play'} spin={busyAction === 'applyLaunch'} />
+          Apply & Launch
+        </SimmButton>
+        <SimmButton
+          type="button"
+          onClick={() => void runAction('apply', applyProfile)}
+          disabled={!selectedProfile || !targetEnvironmentId || busy}
+        >
+          {busyAction === 'apply' && <Icon name="spinner" spin />}
+          Apply
+        </SimmButton>
+      </div>
+
+      {compatibleEnvironments.length === 0 && !environmentsLoading ? (
+        <div className="ui-empty">
+          <span className="ui-empty__emblem" aria-hidden="true"><Icon name="cubes" /></span>
+          <p className="ui-empty__title">No {selectedProfile ? runtimeLabel(selectedProfile.runtime) : ''} environment</p>
+          <p className="ui-empty__copy">Profiles only apply to environments with the same runtime. Add an environment with this runtime first.</p>
+        </div>
+      ) : !targetEnvironmentId ? (
+        <p className="profiles-flow__hint">Choose an environment to see what applying this profile changes.</p>
+      ) : !plan ? (
+        <p className="profiles-flow__hint" role="status">
+          <Icon name="spinner" spin /> Checking {targetEnvironment?.name ?? 'the environment'}…
+        </p>
+      ) : (
+        <>
+          <p className="profiles-flow__summary">
+            {installRows.length} to install · {removalRows.length} to remove
+            {permanentRemovalCount > 0 ? ` (${permanentRemovalCount} permanent)` : ''}
+            {' · '}{unavailableRows.length} unavailable · {unchangedRows.length} unchanged
+          </p>
+
+          {installRows.length > 0 && (
+            <div className="profiles-diff">
+              <h3 className="ui-section-title">Install</h3>
+              <ul className="profiles-diff__list">
+                {installRows.map((row, index) => (
+                  <li key={`${profileItemKey(row.item, index)}-install`} className="profiles-diff__row" title={row.message}>
+                    <Icon name="plus" className="profiles-diff__sign" />
+                    {renderDiffItem(row.item)}
+                    <span className="profiles-diff__note">From library</span>
+                  </li>
                 ))}
-              </div>
-            ))}
-          </div>
-        </aside>
+              </ul>
+            </div>
+          )}
 
-        <main className="profiles-workspace__main">
-          <div className="profiles-workspace__toolbar">
-            <label className="profiles-workspace__field">
-              <span>Target environment</span>
-              <select
-                value={targetEnvironmentId}
-                onChange={(event) => {
-                  setTargetEnvironmentId(event.target.value);
-                  setUserChoseTarget(true);
-                }}
-                disabled={!selectedProfile || environmentsLoading || busyAction !== null}
-              >
-                <option value="">Choose target</option>
-                {environments.map((environment) => {
-                  const compatible = isCompatibleEnvironment(environment, selectedProfile);
-                  return (
-                    <option key={environment.id} value={environment.id} disabled={!compatible}>
-                      {environment.name} - {runtimeLabel(environment.runtime)}{compatible ? '' : ' (incompatible)'}
-                    </option>
-                  );
-                })}
-              </select>
-            </label>
-            <SimmButton
-              type="button"
-              variant="secondary"
-              className="btn btn-secondary"
-              onClick={() => void runAction('preview', previewProfile)}
-              disabled={!selectedProfile || !targetEnvironmentId || busyAction !== null}
-            >
-              <Icon name={busyAction === 'preview' ? 'spinner' : 'search'} />
-              Preview
-            </SimmButton>
-            <SimmButton
-              type="button"
-              className="btn btn-primary"
-              onClick={() => void runAction('apply', applyProfile)}
-              disabled={!selectedProfile || !targetEnvironmentId || busyAction !== null}
-            >
-              <Icon name={busyAction === 'apply' ? 'spinner' : 'check'} />
-              Apply
-            </SimmButton>
-            <SimmButton
-              type="button"
-              variant="secondary"
-              className="btn btn-secondary"
-              onClick={() => void runAction('applyLaunch', applyAndLaunch)}
-              disabled={!selectedProfile || !targetEnvironmentId || busyAction !== null}
-            >
-              <Icon name={busyAction === 'applyLaunch' ? 'spinner' : 'play'} />
-              Apply & Launch
-            </SimmButton>
-            <SimmButton
-              type="button"
-              variant="secondary"
-              className="btn btn-secondary"
-              onClick={() => void runAction('createOpen', openCreateProfile)}
-              disabled={!targetEnvironmentId || busyAction !== null}
-            >
-              <Icon name={busyAction === 'createOpen' ? 'spinner' : 'plus'} />
-              Create Profile
-            </SimmButton>
-          </div>
+          {removalRows.length > 0 && (
+            <div className="profiles-diff">
+              <h3 className="ui-section-title">Remove</h3>
+              <ul className="profiles-diff__list">
+                {removalRows.map((removal, index) => (
+                  <li key={`${profileItemKey(removal.item, index)}-removal`} className="profiles-diff__row" title={removal.message}>
+                    <Icon name="minus" className="profiles-diff__sign" />
+                    {renderDiffItem(removal.item)}
+                    <span className={`profiles-diff__note${removal.recoverable ? '' : ' profiles-diff__note--danger'}`}>
+                      {removal.recoverable ? 'Library copy kept' : 'Deleted permanently'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-          {selectedCollection && (
-            <div className="profiles-workspace__collection-summary" aria-label="Collection profile status">
-              <div>
-                <span className="workspace-eyebrow">Nexus collection</span>
-                <strong>{selectedCollection.name} · Revision {selectedCollection.revisionNumber}</strong>
-                <small>
-                  {selectedCollectionReadyCount} / {selectedCollectionIncludedCount} ready
-                  {' · '}{selectedCollectionDisabledCount} disabled for install · Exact versions retained.
-                </small>
-                {selectedCollectionDownloadActive && selectedCollectionDownload && (
-                  <div className="profiles-workspace__collection-progress">
-                    <small>
-                      Downloading {selectedCollectionDownload.downloadedFiles ?? selectedCollectionReadyCount}
-                      {' / '}{selectedCollectionDownload.totalFiles ?? selectedCollectionIncludedCount}
-                      {' · '}{Math.round(selectedCollectionDownload.progress)}%
-                    </small>
-                    <div
-                      className="profiles-workspace__collection-progress-track"
-                      role="progressbar"
-                      aria-label={`${selectedCollection.name} download progress`}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={Math.round(selectedCollectionDownload.progress)}
-                    >
-                      <span style={{ width: `${Math.min(100, Math.max(0, selectedCollectionDownload.progress))}%` }} />
-                    </div>
-                  </div>
+          {unavailableRows.length > 0 && (
+            <div className="profiles-diff">
+              <h3 className="ui-section-title">Unavailable, will be skipped</h3>
+              <ul className="profiles-diff__list">
+                {unavailableRows.map((row, index) => (
+                  <li key={`${profileItemKey(row.item, index)}-unavailable`} className="profiles-diff__row">
+                    <Icon name="triangleExclamation" className="profiles-diff__sign profiles-diff__sign--warn" />
+                    {renderDiffItem(row.item, row.message)}
+                    <span className="profiles-diff__note profiles-diff__note--warn">{statusLabels[row.status] ?? row.status}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {unchangedRows.length > 0 && (
+            <details className="profiles-diff profiles-diff--unchanged">
+              <summary className="ui-section-title">
+                <Icon name="chevronRight" className="profiles-diff__chevron" />
+                Already installed ({unchangedRows.length})
+              </summary>
+              <ul className="profiles-diff__list">
+                {unchangedRows.map((row, index) => (
+                  <li key={`${profileItemKey(row.item, index)}-unchanged`} className="profiles-diff__row">
+                    <Icon name="check" className="profiles-diff__sign" />
+                    {renderDiffItem(row.item)}
+                    <span className="profiles-diff__note">Unchanged</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </>
+      )}
+    </section>
+  );
+
+  const renderUpdateFlow = () => (
+    <section className="profiles-flow" aria-label="Update profile from environment">
+      <div className="profiles-flow__bar">
+        {renderTargetSelect('Source environment')}
+        <span className="ui-toolbar__spacer" />
+        <SimmButton type="button" variant="ghost" onClick={() => setFlow(null)} disabled={busy}>
+          Cancel
+        </SimmButton>
+        <SimmButton
+          type="button"
+          onClick={() => void runAction('captureUpdate', updateSelectedFromTarget)}
+          disabled={!selectedProfile || !targetEnvironmentId || busy}
+        >
+          {busyAction === 'captureUpdate' && <Icon name="spinner" spin />}
+          Update Profile
+        </SimmButton>
+      </div>
+      <p className="profiles-flow__hint">
+        Replaces the items in {selectedProfile?.name ?? 'this profile'} with everything installed in
+        {' '}{targetEnvironment?.name ?? 'the chosen environment'}, including disabled items.
+      </p>
+    </section>
+  );
+
+  const renderItemsTable = () => {
+    if (profileItems.length === 0) {
+      return (
+        <div className="ui-empty">
+          <span className="ui-empty__emblem" aria-hidden="true"><Icon name="boxOpen" /></span>
+          <p className="ui-empty__title">This profile has no items</p>
+          <p className="ui-empty__copy">Update it from an environment to capture the mods, plugins, and UserLibs installed there.</p>
+          <SimmButton type="button" variant="secondary" onClick={() => setFlow('update')} disabled={busy}>
+            Update From Environment…
+          </SimmButton>
+        </div>
+      );
+    }
+
+    return (
+      <table className="ui-table profiles-items" aria-label="Profile items">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col" className="profiles-items__col-type">Type</th>
+            <th scope="col" className="profiles-items__col-source">Source</th>
+            <th scope="col" className="profiles-items__col-state">State</th>
+            {selectedCollection && <th scope="col" className="profiles-items__col-action"><span className="sr-only">Actions</span></th>}
+          </tr>
+        </thead>
+        <tbody>
+          {profileItems.map((item, index) => {
+            const collectionItem = selectedCollectionItems.find((entry) => collectionProfileItemMatches(entry, item));
+            const collectionActionBusy = collectionItem ? busyAction === `collection-${collectionItem.key}` : false;
+            const collectionEnableBusy = collectionItem ? busyAction === `collection-enable-${collectionItem.key}` : false;
+            const isNexusCollectionItem = collectionItem?.sourceChoice === 'nexusmods';
+            const nexusAccessChecking = Boolean(isNexusCollectionItem && nexusDownloadAccess === null);
+            const canDownloadNexusDirectly = Boolean(isNexusCollectionItem && nexusDownloadAccess?.canDirectDownload);
+            const nexusLoginRequired = Boolean(isNexusCollectionItem && nexusDownloadAccess && !nexusDownloadAccess.connected);
+            const collectionReady = collectionItem?.status === 'ready';
+            const collectionSize = collectionItem
+              ? formatFileSize(collectionItem.requestedSizeInBytes ?? collectionFileSizes[collectionItem.nexusFileId])
+              : null;
+            const collectionMeta = collectionItem
+              ? [collectionSize, collectionSourceLabel(collectionItem, item)].filter(Boolean).join(' · ')
+              : null;
+            const collectionState = collectionItem
+              ? collectionReady
+                ? { label: 'Ready', tone: 'ok' }
+                : collectionItem.status === 'downloading'
+                  ? { label: 'Downloading', tone: 'info' }
+                  : collectionItem.status === 'error'
+                    ? { label: 'Download failed', tone: 'danger' }
+                    : !collectionItem.selected
+                      ? { label: 'Not selected', tone: 'muted' }
+                      : nexusLoginRequired
+                        ? { label: 'Login required', tone: 'warn' }
+                        : { label: 'Download available', tone: 'muted' }
+              : null;
+            return (
+              <tr key={`${itemIdentity(item)}-${index}`} className="ui-row">
+                <td className="profiles-items__name">
+                  <span className="profiles-items__name-cell">
+                    <ModThumbnail {...itemArtwork(item)} name={item.name} size={24} />
+                    <span className="profiles-items__name-text">
+                      <strong className="ui-truncate" title={item.name}>{item.name}</strong>
+                      <small className="ui-truncate">
+                        {collectionItem
+                          ? `${collectionItem.requestedVersion} · Nexus file ${collectionItem.nexusFileId}${collectionItem.requestedAuthor ? ` · ${collectionItem.requestedAuthor}` : ''}`
+                          : itemFileIdentity(item)}
+                      </small>
+                    </span>
+                  </span>
+                </td>
+                <td>{itemTypeLabel(item)}</td>
+                <td>{collectionMeta ?? sourceLabel(item.source)}</td>
+                <td title={collectionItem?.statusMessage ?? undefined}>
+                  {collectionState ? (
+                    <span className={`ui-status ui-status--${collectionState.tone}`}>{collectionState.label}</span>
+                  ) : item.enabled === false ? (
+                    <span className="ui-tag">Disabled</span>
+                  ) : null}
+                </td>
+                {selectedCollection && (
+                  <td className="profiles-items__action">
+                    {collectionItem && collectionItem.selected && collectionReady && (
+                      <div
+                        className="profiles-items__toggle"
+                        title="Choose whether this downloaded mod is installed when the profile is applied."
+                      >
+                        <Switch
+                          size="sm"
+                          checked={item.enabled !== false}
+                          disabled={busy}
+                          aria-label={`Install ${collectionItem.requestedName} with this profile`}
+                          onCheckedChange={(checked) => void runAction(
+                            `collection-enable-${collectionItem.key}`,
+                            () => setCollectionProfileItemEnabled(collectionItem, Boolean(checked)),
+                          )}
+                        />
+                        <span>{collectionEnableBusy ? 'Saving…' : item.enabled === false ? 'Skipped' : 'Install'}</span>
+                      </div>
+                    )}
+                    {collectionItem && collectionItem.selected && collectionItem.status !== 'ready' && (
+                      <SimmButton
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={busy || nexusAccessChecking || nexusLoginRequired}
+                        title={nexusLoginRequired ? 'Sign in to Nexus Mods from Accounts first.' : undefined}
+                        onClick={() => void runAction(`collection-${collectionItem.key}`, () => downloadCollectionProfileItem(collectionItem))}
+                      >
+                        <Icon
+                          name={collectionActionBusy || nexusAccessChecking ? 'spinner' : isNexusCollectionItem && !canDownloadNexusDirectly ? 'arrowUpRightFromSquare' : 'download'}
+                          spin={collectionActionBusy || nexusAccessChecking}
+                        />
+                        {collectionActionBusy
+                          ? 'Downloading…'
+                          : nexusAccessChecking
+                            ? 'Checking Nexus…'
+                            : isNexusCollectionItem && !canDownloadNexusDirectly
+                              ? nexusLoginRequired ? 'Sign In Required' : 'Open Nexus'
+                              : collectionItem.runtimeMismatch
+                                ? 'Download Anyway'
+                                : collectionItem.status === 'error'
+                                  ? 'Retry'
+                                  : 'Download'}
+                      </SimmButton>
+                    )}
+                  </td>
                 )}
-              </div>
-              <a href={selectedCollection.sourceUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">
-                <Icon name="arrowUpRightFromSquare" />
-                Open collection
-              </a>
-            </div>
-          )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  };
 
-          {plan && (
-            <div className="profiles-workspace__summary" aria-label="Apply preview summary">
-              <span>Total <strong>{plan.summary.total}</strong></span>
-              <span>Ready <strong>{plan.summary.readyToInstall}</strong></span>
-              <span>Installed <strong>{plan.summary.alreadyInstalled}</strong></span>
-              <span>Unavailable <strong>{unavailableProfileItemCount(plan)}</strong></span>
-              <span>Remove <strong>{plan.removals.length}</strong></span>
-            </div>
-          )}
+  const renderCreateFlow = () => (
+    <section className="profiles-detail" aria-label="Create profile">
+      <header className="profiles-detail__header">
+        <div className="profiles-detail__titles">
+          <h2 className="profiles-detail__title">New profile</h2>
+          <p className="profiles-detail__hint">Start from what is installed in an environment, then keep only the items you want.</p>
+        </div>
+        <div className="profiles-detail__actions">
+          <SimmButton
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              setFlow(null);
+              setCreateDraftManifest(null);
+              setCreateSelectedItemKeys(new Set());
+            }}
+            disabled={busy}
+          >
+            Cancel
+          </SimmButton>
+          <SimmButton
+            type="button"
+            variant="secondary"
+            onClick={() => void runAction('captureNew', captureNewProfile)}
+            disabled={!createEnvironmentId || !createProfileName.trim() || busy}
+            title="Capture every item in the environment, including disabled ones"
+          >
+            {busyAction === 'captureNew' && <Icon name="spinner" spin />}
+            Capture Full Snapshot
+          </SimmButton>
+          <SimmButton
+            type="button"
+            onClick={() => void runAction('createSelected', createSelectedProfile)}
+            disabled={!createDraftManifest || createSelectedCount === 0 || !createProfileName.trim() || busy}
+          >
+            {busyAction === 'createSelected' && <Icon name="spinner" spin />}
+            Create Profile
+          </SimmButton>
+        </div>
+      </header>
 
-          {createPanelOpen && (
-            <div className="profiles-workspace__create-panel" aria-label="Create profile">
-              <div className="profiles-workspace__create-panel-header">
-                <div>
-                  <span className="workspace-eyebrow">Create profile</span>
-                  <h3>Choose target items</h3>
-                </div>
-                <SimmButton
-                  type="button"
-                  variant="secondary"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    setCreatePanelOpen(false);
-                    setCreateDraftManifest(null);
-                    setCreateSelectedItemKeys(new Set());
-                  }}
-                  disabled={busyAction !== null}
-                >
-                  <Icon name="times" />
-                  Close
-                </SimmButton>
-              </div>
+      <div className="profiles-form">
+        <div className="profiles-field">
+          <span aria-hidden="true">Source environment</span>
+          <ProfilesEnvironmentSelect
+            label="Source environment"
+            value={createEnvironmentId}
+            onValueChange={(environmentId) => {
+              selectCreateEnvironment(environmentId);
+              if (environmentId) void runAction('createLoad', () => loadCreateDraft(environmentId));
+            }}
+            disabled={environmentsLoading || busy}
+            options={environments.map((environment) => ({
+              value: environment.id,
+              label: environment.name.toLowerCase().includes(runtimeLabel(environment.runtime).toLowerCase())
+                ? environment.name
+                : `${environment.name} (${runtimeLabel(environment.runtime)})`,
+            }))}
+          />
+        </div>
+        <label className="profiles-field profiles-field--grow">
+          <span>Profile name</span>
+          <Input
+            value={createProfileName}
+            onChange={(event) => setCreateProfileName(event.target.value)}
+            placeholder="New profile name"
+            disabled={!createEnvironmentId || busy}
+          />
+        </label>
+      </div>
 
-              <div className="profiles-workspace__create-grid">
-                <label className="profiles-workspace__field">
-                  <span>Profile name</span>
-                  <Input
-                    value={createProfileName}
-                    onChange={(event) => setCreateProfileName(event.target.value)}
-                    placeholder="New profile name"
-                    disabled={!targetEnvironmentId || busyAction !== null}
-                  />
-                </label>
-                <div className="profiles-workspace__create-actions">
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() => void runAction('createLoad', loadCreateDraft)}
-                    disabled={!targetEnvironmentId || busyAction !== null}
-                  >
-                    <Icon name={busyAction === 'createLoad' ? 'spinner' : 'list'} />
-                    Reload Target Items
-                  </SimmButton>
-                  <span>{createSelectedCount}/{createDraftItems.length} selected</span>
-                </div>
-              </div>
+      <div className="profiles-checklist">
+        <div className="profiles-checklist__bar">
+          <span className="ui-muted">
+            {busyAction === 'createLoad' || busyAction === 'createOpen'
+              ? 'Loading items…'
+              : `${createSelectedCount} of ${createDraftItems.length} selected`}
+          </span>
+          <span className="ui-toolbar__spacer" />
+          <SimmButton
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setCreateSelectedItemKeys(new Set(createDraftItems.map((item, index) => profileItemKey(item, index))))}
+            disabled={busy || createDraftItems.length === 0}
+          >
+            Select All
+          </SimmButton>
+          <SimmButton
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setCreateSelectedItemKeys(new Set())}
+            disabled={busy || createDraftItems.length === 0}
+          >
+            Select None
+          </SimmButton>
+        </div>
+        {createDraftItems.length > 0 ? (
+          <ul className="profiles-checklist__list" aria-label="Create profile items">
+            {createDraftItems.map((item, index) => {
+              const key = profileItemKey(item, index);
+              return (
+                <li key={key}>
+                  <label className="profiles-checklist__item">
+                    <Checkbox
+                      checked={createSelectedItemKeys.has(key)}
+                      onCheckedChange={(checked) => {
+                        setCreateSelectedItemKeys((current) => {
+                          const next = new Set(current);
+                          if (checked) next.add(key);
+                          else next.delete(key);
+                          return next;
+                        });
+                      }}
+                      disabled={busy}
+                    />
+                    <span className="profiles-checklist__name ui-truncate">{item.name}</span>
+                    <span className="profiles-checklist__meta ui-truncate">{itemTypeLabel(item)} · {itemFileIdentity(item)}</span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <div className="ui-empty">
+            <span className="ui-empty__emblem" aria-hidden="true"><Icon name={createEnvironmentId ? 'boxOpen' : 'cubes'} /></span>
+            <p className="ui-empty__title">{createEnvironmentId ? 'Nothing installed yet' : 'Choose a source environment'}</p>
+            <p className="ui-empty__copy">
+              {createEnvironmentId
+                ? 'Install mods, plugins, or UserLibs in this environment, or choose another one.'
+                : 'Its installed mods, plugins, and UserLibs become the starting point for the new profile.'}
+            </p>
+          </div>
+        )}
+      </div>
 
-              {createDraftItems.length > 0 ? (
-                <>
-                  <div className="profiles-workspace__create-actions">
-                    <SimmButton
-                      type="button"
-                      variant="secondary"
-                      className="btn btn-secondary"
-                      onClick={() => setCreateSelectedItemKeys(new Set(createDraftItems.map((item, index) => profileItemKey(item, index))))}
-                      disabled={busyAction !== null}
-                    >
-                      All
-                    </SimmButton>
-                    <SimmButton
-                      type="button"
-                      variant="secondary"
-                      className="btn btn-secondary"
-                      onClick={() => setCreateSelectedItemKeys(new Set())}
-                      disabled={busyAction !== null}
-                    >
-                      None
-                    </SimmButton>
-                  </div>
-                  <div className="profiles-workspace__create-list" aria-label="Create profile items">
-                    {createDraftItems.map((item, index) => {
-                      const key = profileItemKey(item, index);
-                      return (
-                        <label key={key} className="profiles-workspace__create-item">
-                          <Checkbox
-                            checked={createSelectedItemKeys.has(key)}
-                            onCheckedChange={(checked) => {
-                              setCreateSelectedItemKeys((current) => {
-                                const next = new Set(current);
-                                if (checked) next.add(key);
-                                else next.delete(key);
-                                return next;
-                              });
-                            }}
-                            disabled={busyAction !== null}
-                          />
-                          <span>
-                            <strong>{item.name}</strong>
-                            <small>{itemTypeLabel(item)} - {item.fileName ?? item.sourceId ?? item.storageId ?? 'No file identity'}</small>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="profiles-workspace__empty profiles-workspace__empty--compact">Load target items to choose what belongs in this profile.</div>
-              )}
+    </section>
+  );
 
+  const renderProfileDetail = (profile: StoredModProfile) => (
+    <section className="profiles-detail" aria-label="Selected profile">
+      <header className="profiles-detail__header">
+        <div className="profiles-detail__titles">
+          {renaming ? (
+            <form
+              className="profiles-rename"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void runAction('rename', renameProfile);
+              }}
+            >
+              <Input
+                aria-label="Profile name"
+                value={renameValue}
+                onChange={(event) => setRenameValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    setRenaming(false);
+                    setRenameValue(profile.name);
+                  }
+                }}
+                disabled={busy}
+                autoFocus
+              />
+              <SimmButton
+                type="submit"
+                size="sm"
+                disabled={busy || !renameValue.trim() || renameValue.trim() === profile.name}
+              >
+                {busyAction === 'rename' && <Icon name="spinner" spin />}
+                Save Name
+              </SimmButton>
               <SimmButton
                 type="button"
-                className="btn btn-primary"
-                onClick={() => void runAction('createSelected', createSelectedProfile)}
-                disabled={!createDraftManifest || createSelectedCount === 0 || !createProfileName.trim() || busyAction !== null}
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setRenaming(false);
+                  setRenameValue(profile.name);
+                }}
+                disabled={busy}
               >
-                <Icon name={busyAction === 'createSelected' ? 'spinner' : 'plus'} />
-                Create Selected Profile
+                Cancel
+              </SimmButton>
+            </form>
+          ) : (
+            <div className="profiles-detail__name-row">
+              {(() => {
+                const tile = collectionArtwork(profile);
+                return tile ? <ModThumbnail {...tile} name={profile.name} size={32} className="profiles-detail__tile" /> : null;
+              })()}
+              <h2 className="profiles-detail__title" title={profile.name}>{profile.name}</h2>
+              {profile.isDefault && <span className="ui-tag">Default</span>}
+            </div>
+          )}
+          <div className="ui-meta">
+            <span>{runtimeLabel(profile.runtime)}</span>
+            <span>{profileItems.length} {profileItems.length === 1 ? 'item' : 'items'}</span>
+            <span>
+              {activeProfileEnvironments.length > 0
+                ? `Used by ${activeProfileEnvironments.map((environment) => environment.name).join(', ')}`
+                : 'Not used by any environment'}
+            </span>
+          </div>
+        </div>
+        <div className="profiles-detail__actions">
+          {flow === null && (
+            <SimmButton type="button" onClick={() => setFlow('apply')} disabled={busy}>
+              Apply to Environment…
+            </SimmButton>
+          )}
+          <SimmButton
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="More profile actions"
+            aria-haspopup="menu"
+            aria-expanded={moreMenu !== null}
+            title="More profile actions"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setMoreMenu((current) => current ? null : { x: rect.right - 224, y: rect.bottom + 4 });
+            }}
+          >
+            <Icon name="ellipsisH" />
+          </SimmButton>
+        </div>
+      </header>
+
+      {selectedCollection && (
+        <div className="profiles-detail__collection" aria-label="Collection profile status">
+          <div className="ui-meta">
+            <span>Nexus collection, revision {selectedCollection.revisionNumber}</span>
+            <span>{selectedCollectionReadyCount} / {selectedCollectionIncludedCount} ready</span>
+            <span>{selectedCollectionDisabledCount} disabled for install</span>
+            <a href={selectedCollection.sourceUrl} target="_blank" rel="noopener noreferrer" className="profiles-detail__link">
+              Open on Nexus Mods
+              <Icon name="arrowUpRightFromSquare" />
+            </a>
+          </div>
+          {selectedCollectionDownloadActive && selectedCollectionDownload && (
+            <div className="profiles-detail__progress">
+              <span className="ui-muted">
+                Downloading {selectedCollectionDownload.downloadedFiles ?? selectedCollectionReadyCount}
+                {' / '}{selectedCollectionDownload.totalFiles ?? selectedCollectionIncludedCount}
+                {' · '}{Math.round(selectedCollectionDownload.progress)}%
+              </span>
+              <div
+                className="profiles-detail__progress-track"
+                role="progressbar"
+                aria-label={`${selectedCollection.name} download progress`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(selectedCollectionDownload.progress)}
+              >
+                <span style={{ width: `${Math.min(100, Math.max(0, selectedCollectionDownload.progress))}%` }} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="profiles-detail__body">
+        {flow === 'apply' ? renderApplyFlow() : (
+          <>
+            {flow === 'update' && renderUpdateFlow()}
+            {renderItemsTable()}
+          </>
+        )}
+      </div>
+    </section>
+  );
+
+  return (
+    <section className="profiles-workspace workspace-panel ui-page" aria-label="Profiles workspace">
+      <header className="ui-page-header">
+        <div className="ui-page-header__titles">
+          <h1 className="ui-page-title">Profiles</h1>
+        </div>
+        <div className="ui-toolbar">
+          <SimmButton
+            type="button"
+            variant="ghost"
+            onClick={() => void runAction('import', importProfile)}
+            disabled={busy}
+          >
+            <Icon name={busyAction === 'import' ? 'spinner' : 'upload'} spin={busyAction === 'import'} />
+            Import JSON
+          </SimmButton>
+          <SimmButton
+            type="button"
+            variant="secondary"
+            onClick={() => void runAction('createOpen', openCreateProfile)}
+            disabled={busy || flow === 'create'}
+          >
+            <Icon name="plus" />
+            New Profile
+          </SimmButton>
+        </div>
+      </header>
+
+      <div className="profiles-workspace__layout">
+        <aside className="profiles-list" aria-label="Profile library">
+          {profilesLoading && profiles.length === 0 ? (
+            <div className="profiles-list__loading" role="status" aria-label="Loading profiles">
+              {[0, 1, 2, 3].map((index) => <Skeleton key={index} className="profiles-list__skeleton" />)}
+            </div>
+          ) : profiles.length === 0 ? (
+            <div className="ui-empty">
+              <span className="ui-empty__emblem" aria-hidden="true"><Icon name="layerGroup" /></span>
+              <p className="ui-empty__title">No profiles yet</p>
+              <p className="ui-empty__copy">Create one from an environment or import a shared JSON file.</p>
+            </div>
+          ) : groupedProfiles.map((group) => (
+            <section key={group.key} className="profiles-list__group" aria-label={`${group.label} profiles`}>
+              <h2 className="profiles-list__group-title">
+                {group.label}
+                <span>{group.profiles.length}</span>
+              </h2>
+              {group.profiles.length === 0 ? (
+                <p className="profiles-list__empty">No {group.label} profiles.</p>
+              ) : (
+                <ul className="profiles-list__items">
+                  {group.profiles.map((profile) => {
+                    const active = profile.id === selectedProfileId;
+                    const inUse = (profile.activeEnvironmentIds?.length ?? 0) > 0;
+                    const tile = collectionArtwork(profile);
+                    return (
+                      <li key={profile.id}>
+                        <button
+                          type="button"
+                          className={`profiles-workspace__profile-row${active ? ' profiles-workspace__profile-row--active' : ''}`}
+                          aria-current={active ? 'true' : undefined}
+                          onClick={() => {
+                            setSelectedProfileId(profile.id);
+                            setSelectedRuntime(runtimeKey(profile.runtime));
+                            setUserChoseTarget(false);
+                            if (flow === 'create') setFlow(null);
+                          }}
+                          disabled={busy}
+                        >
+                          <span className="profiles-workspace__profile-name ui-truncate" title={profile.name}>{profile.name}</span>
+                          {profile.isDefault && <span className="ui-tag">Default</span>}
+                          <span className="profiles-workspace__profile-meta">
+                            {tile ? (
+                              <ModThumbnail {...tile} name={profile.name} size={20} className="profiles-workspace__tile" />
+                            ) : profile.manifest.items.length > 0 && (
+                              <ThumbnailStack
+                                size={20}
+                                max={4}
+                                items={profile.manifest.items.map((item) => ({
+                                  ...itemArtwork(item),
+                                  name: item.name,
+                                }))}
+                              />
+                            )}
+                            {profile.manifest.items.length} {profile.manifest.items.length === 1 ? 'item' : 'items'}
+                            {inUse ? ' · In use' : ''}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          ))}
+        </aside>
+
+        <div className="profiles-workspace__main">
+          {error && (
+            <div className="ui-callout ui-callout--danger profiles-workspace__message" role="alert">
+              <Icon name="circleExclamation" />
+              <span>{error}</span>
+            </div>
+          )}
+          {notice && (
+            <div className="profiles-workspace__notice" role="status">
+              <Icon name="check" />
+              <span>{notice}</span>
+              <SimmButton type="button" variant="ghost" size="icon-sm" aria-label="Dismiss message" onClick={() => setNotice(null)}>
+                <Icon name="times" />
               </SimmButton>
             </div>
           )}
-
-          <div className="profiles-workspace__table" role="table" aria-label="Profile items">
-            <div className="profiles-workspace__table-head" role="row">
-              <span>Name</span>
-              <span>Details</span>
-              <span>State</span>
-            </div>
-            <div className="profiles-workspace__table-body">
-              {selectedProfile ? planRows.map((row, index) => {
-                const collectionItem = selectedCollectionItems.find((item) => collectionProfileItemMatches(item, row.item));
-                const collectionActionBusy = collectionItem ? busyAction === `collection-${collectionItem.key}` : false;
-                const collectionEnableBusy = collectionItem ? busyAction === `collection-enable-${collectionItem.key}` : false;
-                const isNexusCollectionItem = collectionItem?.sourceChoice === 'nexusmods';
-                const nexusAccessChecking = Boolean(isNexusCollectionItem && nexusDownloadAccess === null);
-                const canDownloadNexusDirectly = Boolean(isNexusCollectionItem && nexusDownloadAccess?.canDirectDownload);
-                const nexusLoginRequired = Boolean(isNexusCollectionItem && nexusDownloadAccess && !nexusDownloadAccess.connected);
-                const collectionReady = collectionItem?.status === 'ready';
-                const collectionSource = collectionItem
-                  ? collectionSourceLabel(collectionItem, row.item)
-                  : null;
-                const collectionSize = collectionItem
-                  ? formatFileSize(
-                    collectionItem.requestedSizeInBytes
-                      ?? collectionFileSizes[collectionItem.nexusFileId],
-                  )
-                  : null;
-                const collectionStateLabel = collectionItem
-                  ? collectionReady
-                    ? 'Ready'
-                    : collectionItem.status === 'downloading'
-                      ? 'Downloading'
-                      : !collectionItem.selected
-                        ? 'Not selected'
-                        : nexusLoginRequired
-                          ? 'Login required'
-                          : 'Download available'
-                  : null;
-                const collectionMeta = collectionItem
-                  ? [collectionSize, collectionSource].filter(Boolean).join(' · ')
-                  : null;
-                return (
-                  <div
-                    key={`${itemIdentity(row.item)}-${index}`}
-                    className={`profiles-workspace__table-row profiles-workspace__table-row--${collectionItem?.status ?? (hasPreviewPlan ? planItemStatusClass(row) : 'tracked')}`}
-                    role="row"
-                  >
-                    <span>
-                      <strong>{row.item.name}</strong>
-                      <small>{collectionItem
-                        ? `${collectionItem.requestedVersion} · Nexus file ${collectionItem.nexusFileId}${collectionItem.requestedAuthor ? ` · ${collectionItem.requestedAuthor}` : ''}`
-                        : row.item.fileName ?? row.item.sourceId ?? row.item.storageId ?? 'No file identity'}</small>
-                    </span>
-                    <span>
-                      <strong>{itemTypeLabel(row.item)}</strong>
-                      {!collectionItem && <small>{row.item.source ?? 'local'}</small>}
-                    </span>
-                    <span title={collectionItem?.statusMessage ?? row.message}>
-                      <strong className={collectionItem
-                        ? `profiles-workspace__collection-state profiles-workspace__collection-state--${collectionReady ? 'ready' : 'not-ready'}`
-                        : undefined}
-                      >
-                        {collectionItem && <Icon name={collectionReady ? 'check' : 'times'} />}
-                        {collectionItem
-                          ? collectionStateLabel
-                          : row.item.enabled === false ? 'Disabled' : 'Enabled'}
-                      </strong>
-                      <small>{collectionMeta ?? (hasPreviewPlan ? (statusLabels[row.status] ?? row.status) : 'Tracked')}</small>
-                      {collectionItem && collectionItem.selected && collectionReady && (
-                        <div
-                          className="profiles-workspace__collection-install-toggle"
-                          title="Choose whether this downloaded mod is installed when the profile is applied."
-                        >
-                          <Switch
-                            size="sm"
-                            checked={row.item.enabled !== false}
-                            disabled={busyAction !== null}
-                            aria-label={`Install ${collectionItem.requestedName} with this profile`}
-                            onCheckedChange={(checked) => void runAction(
-                              `collection-enable-${collectionItem.key}`,
-                              () => setCollectionProfileItemEnabled(collectionItem, Boolean(checked)),
-                            )}
-                          />
-                          <span>{collectionEnableBusy ? 'Saving…' : row.item.enabled === false ? 'Disabled' : 'Install'}</span>
-                        </div>
-                      )}
-                      {collectionItem && collectionItem.selected && collectionItem.status !== 'ready' && (
-                        <SimmButton
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          disabled={busyAction !== null || nexusAccessChecking || nexusLoginRequired}
-                          title={nexusLoginRequired ? 'Sign in to Nexus Mods from Accounts first.' : undefined}
-                          onClick={() => void runAction(`collection-${collectionItem.key}`, () => downloadCollectionProfileItem(collectionItem))}
-                        >
-                          <Icon name={collectionActionBusy || nexusAccessChecking ? 'spinner' : isNexusCollectionItem && !canDownloadNexusDirectly ? 'arrowUpRightFromSquare' : 'download'} />
-                          {collectionActionBusy
-                            ? 'Downloading…'
-                            : nexusAccessChecking
-                              ? 'Checking Nexus…'
-                              : isNexusCollectionItem && !canDownloadNexusDirectly
-                                ? nexusLoginRequired ? 'Sign in required' : 'Open Nexus'
-                                : collectionItem.runtimeMismatch
-                                  ? 'Download anyway'
-                                  : collectionItem.status === 'error'
-                                    ? 'Retry'
-                                    : 'Download'}
-                        </SimmButton>
-                      )}
-                    </span>
-                  </div>
-                );
-              }) : (
-                <div className="profiles-workspace__empty">Choose a profile to inspect its items.</div>
+          {flow === 'create'
+            ? renderCreateFlow()
+            : selectedProfile
+              ? renderProfileDetail(selectedProfile)
+              : !profilesLoading && (
+                <div className="ui-empty">
+                  <span className="ui-empty__emblem" aria-hidden="true"><Icon name="layerGroup" /></span>
+                  <p className="ui-empty__title">Choose a profile</p>
+                  <p className="ui-empty__copy">Select a profile on the left to see its items and apply it to an environment.</p>
+                </div>
               )}
-            </div>
-          </div>
-        </main>
-
-        <aside className="profiles-workspace__inspector" aria-label="Selected profile">
-          <div className="profiles-workspace__inspector-header">
-            <span className="workspace-eyebrow">Selected</span>
-            <h3>{selectedProfile?.name ?? 'No profile selected'}</h3>
-            {selectedProfile && <p>{runtimeLabel(selectedProfile.runtime)} profile with {profileItems.length} tracked items.</p>}
-            {selectedProfile && (
-              <div className="profiles-workspace__active-envs">
-                <strong>Used by</strong>
-                {activeProfileEnvironments.length > 0 ? (
-                  <span>{activeProfileEnvironments.map((environment) => environment.name).join(', ')}</span>
-                ) : (
-                  <span>No environments currently use this profile.</span>
-                )}
-              </div>
-            )}
-          </div>
-
-          {plan && plan.removals.length > 0 && (
-            <details className="profiles-workspace__removals">
-              <summary>
-                <span>
-                  <strong>Environment changes</strong>
-                  <small>
-                    {plan.removals.length} removed
-                    {plan.removals.some((removal) => !removal.recoverable)
-                      ? ` · ${plan.removals.filter((removal) => !removal.recoverable).length} permanent`
-                      : ' · library copies retained'}
-                  </small>
-                </span>
-              </summary>
-              <div className="profiles-workspace__removal-list">
-                {plan.removals.map((removal, index) => (
-                  <div key={`${profileItemKey(removal.item, index)}-removal`} title={removal.message}>
-                    <strong>{removal.item.name}</strong>
-                    <small>{removal.recoverable ? 'Library copy retained' : 'Permanent removal'}</small>
-                  </div>
-                ))}
-              </div>
-            </details>
-          )}
-
-          <label className="profiles-workspace__field">
-            <span>Rename</span>
-            <Input
-              value={renameValue}
-              onChange={(event) => setRenameValue(event.target.value)}
-              disabled={!selectedProfile || busyAction !== null}
-            />
-          </label>
-          <SimmButton
-            type="button"
-            variant="secondary"
-            className="btn btn-secondary"
-            onClick={() => void runAction('rename', renameProfile)}
-            disabled={!selectedProfile || busyAction !== null || renameValue.trim() === selectedProfile?.name}
-          >
-            <Icon name={busyAction === 'rename' ? 'spinner' : 'penToSquare'} />
-            Rename
-          </SimmButton>
-
-          <div className="profiles-workspace__rule">
-            <strong>Runtime lock</strong>
-            <span>{selectedProfile ? `${runtimeLabel(selectedProfile.runtime)} profiles only apply to ${runtimeLabel(selectedProfile.runtime)} environments.` : 'Choose a profile to see compatible environments.'}</span>
-          </div>
-
-          <label className="profiles-workspace__checkbox">
-            <Checkbox
-              checked={includeDisabledExport}
-              onCheckedChange={(checked) => setIncludeDisabledExport(Boolean(checked))}
-            />
-            <span>Include disabled items in JSON export</span>
-          </label>
-
-          <SimmButton
-            type="button"
-            variant="secondary"
-            className="btn btn-secondary"
-            onClick={() => void runAction('export', exportProfile)}
-            disabled={!selectedProfile || busyAction !== null}
-          >
-            <Icon name={busyAction === 'export' ? 'spinner' : 'download'} />
-            Export JSON
-          </SimmButton>
-
-          <SimmButton
-            type="button"
-            variant="secondary"
-            className="btn btn-secondary"
-            onClick={() => void runAction('captureUpdate', updateSelectedFromTarget)}
-            disabled={!selectedProfile || !targetEnvironmentId || busyAction !== null}
-          >
-            <Icon name={busyAction === 'captureUpdate' ? 'spinner' : 'save'} />
-            Capture Into Selected
-          </SimmButton>
-
-          <div className="profiles-workspace__section">
-            <span className="workspace-eyebrow">Capture snapshot</span>
-            <label className="profiles-workspace__field">
-              <span>Snapshot name</span>
-              <Input
-                value={captureName}
-                onChange={(event) => setCaptureName(event.target.value)}
-                placeholder="Profile name"
-                disabled={!targetEnvironmentId || busyAction !== null}
-              />
-            </label>
-            <SimmButton
-              type="button"
-              variant="secondary"
-              className="btn btn-secondary"
-              onClick={() => void runAction('captureNew', captureNewProfile)}
-              disabled={!targetEnvironmentId || !captureName.trim() || busyAction !== null}
-            >
-              <Icon name={busyAction === 'captureNew' ? 'spinner' : 'plus'} />
-              Capture Full Snapshot
-            </SimmButton>
-          </div>
-
-          <SimmButton
-            type="button"
-            variant="destructive"
-            className="btn btn-danger"
-            onClick={() => void runAction('delete', deleteProfile)}
-            disabled={!selectedProfile || selectedProfile.isDefault || selectedProfileActiveCount > 0 || busyAction !== null}
-          >
-            <Icon name={busyAction === 'delete' ? 'spinner' : 'trash'} />
-            Delete
-          </SimmButton>
-        </aside>
+        </div>
       </div>
+
+      {moreMenu && selectedProfile && (
+        <AnchoredContextMenu
+          id="profile-more-actions"
+          x={moreMenu.x}
+          y={moreMenu.y}
+          items={moreMenuItems}
+          onClose={() => setMoreMenu(null)}
+        />
+      )}
     </section>
   );
 }

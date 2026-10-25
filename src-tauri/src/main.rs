@@ -25,6 +25,9 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 static APP_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    if let Some(exit_code) = crate::services::native_console::run_helper_if_requested() {
+        std::process::exit(exit_code);
+    }
     if let Some(exit_code) = crate::cli::run_if_requested() {
         std::process::exit(exit_code);
     }
@@ -59,6 +62,7 @@ fn main() {
             log::info!("Tauri app starting - running setup");
 
             app.manage(crate::commands::app_init::AppPreparationState::default());
+            app.manage(crate::services::native_console::NativeConsoleState::default());
 
             #[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
             {
@@ -228,6 +232,14 @@ fn main() {
             commands::filesystem::open_external_url,
             commands::filesystem::reveal_path,
             commands::filesystem::launch_game,
+            commands::native_console::get_native_console_preferences,
+            commands::native_console::save_native_console_preferences,
+            commands::native_console::open_native_console,
+            commands::native_console::get_native_console_snapshot,
+            commands::native_console::retry_native_console,
+            commands::native_console::pop_out_native_console,
+            commands::native_console::close_native_console_game,
+            commands::native_console::update_native_console_viewport,
             commands::filesystem::browse_directory,
             commands::filesystem::browse_files,
             commands::filesystem::create_directory,
@@ -291,6 +303,7 @@ fn main() {
             commands::melon_loader::install_melon_loader,
             commands::melon_loader::repair_melonloader_launch_options,
             commands::melon_loader::verify_melonloader_launch,
+            commands::melon_loader::inspect_game_launch,
             commands::melon_loader::uninstall_melon_loader,
             commands::melon_loader::get_available_melonloader_versions,
             // GitHub Releases
@@ -404,6 +417,7 @@ fn main() {
             api.prevent_exit();
             let app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
+                crate::services::native_console::shutdown(&app_handle).await;
                 if let Some(service) = app_handle
                     .try_state::<crate::services::mod_integration::ModIntegrationService>(
                 ) {
@@ -418,6 +432,9 @@ fn main() {
             // fallback for owned listeners and download child processes. An OS hard
             // kill cannot run cleanup; startup port recovery handles that case.
             if !APP_SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+                tauri::async_runtime::block_on(crate::services::native_console::shutdown(
+                    app_handle,
+                ));
                 if let Some(service) = app_handle
                     .try_state::<crate::services::mod_integration::ModIntegrationService>(
                 ) {

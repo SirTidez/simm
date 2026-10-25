@@ -1931,3 +1931,133 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GameProcessState {
+    Running,
+    NotRunning,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameLaunchInspection {
+    pub environment_id: String,
+    pub launch_started_at: u64,
+    pub process_state: GameProcessState,
+    pub loader_state: String,
+    pub log_path: String,
+    pub modified_at: Option<u64>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NativeConsolePreferences {
+    pub auto_open: bool,
+    pub show_profile: bool,
+    pub show_mods: bool,
+    pub show_game: bool,
+    pub show_paths: bool,
+    pub sidebar_width: u32,
+}
+
+impl Default for NativeConsolePreferences {
+    fn default() -> Self {
+        Self {
+            auto_open: true,
+            show_profile: true,
+            show_mods: true,
+            show_game: true,
+            show_paths: false,
+            sidebar_width: 360,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleEntry {
+    pub name: String,
+    pub version: Option<String>,
+    pub version_source: Option<String>,
+    pub author: Option<String>,
+    pub file_name: Option<String>,
+    pub enabled: bool,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleSnapshot {
+    pub supported: bool,
+    pub environment: Environment,
+    pub profile_name: Option<String>,
+    pub profile_runtime: Option<String>,
+    pub profile_updated_at: Option<String>,
+    pub entries: Vec<NativeConsoleEntry>,
+    pub preferences: NativeConsolePreferences,
+    pub presentation: String,
+    pub status: String,
+    pub process_id: Option<u32>,
+    pub process_started_at: Option<u64>,
+    pub inventory_updated_at: u64,
+    pub diagnostic: Option<String>,
+    pub messages: NativeConsoleMessages,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleMessages {
+    pub errors: u64,
+    pub warnings: u64,
+    pub entries: Vec<NativeConsoleMessage>,
+    pub omitted: u64,
+    pub generation: u64,
+    pub state: String,
+    pub diagnostic: Option<String>,
+    pub sources: Vec<NativeConsoleSourceCounts>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleSourceCounts {
+    pub source: Option<String>,
+    pub origin: Option<NativeConsoleMessageOrigin>,
+    pub errors: u64,
+    pub warnings: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleMessage {
+    pub id: u64,
+    pub line_number: u64,
+    pub level: String,
+    pub timestamp: Option<String>,
+    pub source: Option<String>,
+    pub origin: Option<NativeConsoleMessageOrigin>,
+    pub message: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleMessageOrigin {
+    pub name: String,
+    pub file_name: Option<String>,
+    pub kind: String,
+}
+
+/// Logical WebView client coordinates. No native parent/owner relationship is created.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConsoleViewport {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub visible: bool,
+    pub revision: u64,
+}

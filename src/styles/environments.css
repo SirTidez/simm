@@ -1,0 +1,735 @@
+/*
+ * Environment Overview tab (EnvironmentList with onlyEnvironmentId), the
+ * all-environments list it falls back to, the MelonLoader version dialog,
+ * the Mod Integration dialog and notice, and the version picker rows the
+ * Mods and Mod Library surfaces share.
+ */
+
+/* ------------------------------------------------------------ Overview page */
+
+.env-overview-root,
+.env-overview-host {
+  min-width: 0;
+}
+
+.env-overview-list {
+  display: grid;
+  gap: var(--simm-space-4);
+  padding: var(--simm-space-5);
+}
+
+.env-overview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-6);
+  min-width: 0;
+}
+
+.env-overview--page {
+  /* Full workspace width so the body lines up with the header and its Play
+     button; long prose is capped separately below. */
+  padding: var(--simm-space-5);
+  container: env-overview / inline-size;
+}
+
+.env-overview--page:focus,
+.env-overview--page:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.env-overview--card {
+  padding: var(--simm-space-4) var(--simm-space-5) var(--simm-space-5);
+}
+
+.env-overview--focused {
+  border-color: var(--simm-accent-line);
+}
+
+.env-overview__card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  min-width: 0;
+  padding-bottom: var(--simm-space-3);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.env-overview__card-title {
+  margin: 0;
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+}
+
+/* Description + overflow menu. */
+/* Top area: description + details, with the game's own store art on the right. */
+.env-overview__top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--simm-space-6);
+  min-width: 0;
+}
+
+.env-overview__top-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-6);
+  min-width: 0;
+}
+
+.env-overview__art {
+  width: 16rem;
+  border-radius: var(--simm-radius-lg);
+}
+
+/* Narrow workspaces: the details table needs the width more than the art does. */
+@container env-overview (max-width: 52rem) {
+  .env-overview__art {
+    display: none;
+  }
+}
+
+.env-overview__card-art {
+  flex: none;
+  width: 64px;
+  height: 30px;
+  border-radius: var(--simm-radius-sm);
+}
+
+.env-overview__intro {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-2);
+  min-width: 0;
+}
+
+.env-overview__description {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-1);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.env-overview__description p {
+  max-width: 75ch;
+  margin: 0;
+  padding-top: 3px;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-base);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.env-overview__description [data-slot='button'] {
+  opacity: 0.7;
+}
+
+.env-overview__description:hover [data-slot='button'],
+.env-overview__description [data-slot='button']:focus-visible {
+  opacity: 1;
+}
+
+.env-overview__editor {
+  display: grid;
+  gap: var(--simm-space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 40rem;
+}
+
+.env-overview__editor .ui-section-title {
+  margin: 0;
+}
+
+.env-overview__editor-row {
+  display: flex;
+  gap: var(--simm-space-2);
+}
+
+.env-overview__editor-row [data-slot='input'] {
+  flex: 1 1 auto;
+}
+
+.env-overview__editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--simm-space-2);
+}
+
+.env-overview__section {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Facts. */
+.env-overview__facts {
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: 0;
+  font-size: var(--simm-text-base);
+}
+
+.env-overview__facts dt,
+.env-overview__facts dd {
+  display: flex;
+  align-items: center;
+  min-height: 2.25rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--simm-line) 70%, transparent);
+}
+
+.env-overview__facts dt {
+  padding-right: var(--simm-space-4);
+  font-size: var(--simm-text-sm);
+}
+
+.env-overview__fact-row {
+  gap: var(--simm-space-2);
+  flex-wrap: wrap;
+}
+
+.env-overview__path {
+  flex: 0 1 auto;
+  max-width: calc(100% - 4rem);
+  color: var(--simm-text);
+}
+
+.env-overview__warn-action[data-slot='button'] {
+  border-color: color-mix(in srgb, var(--simm-warn) 55%, transparent);
+  color: var(--simm-warn-text);
+}
+
+.env-overview__launch-method {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--simm-space-1) var(--simm-space-5);
+}
+
+.env-overview__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  font-size: var(--simm-text-sm);
+  cursor: pointer;
+}
+
+/* Installed content summary line: keeps the .ui-meta gap so its separators
+   sit centred between items. */
+.env-overview__summary [data-slot='button'][data-variant='link'] {
+  font-size: var(--simm-text-base);
+  color: var(--simm-text);
+  font-weight: 400;
+}
+
+.env-overview__summary [data-slot='button'][data-variant='link']:hover {
+  color: var(--simm-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.env-overview__summary strong {
+  font-weight: 600;
+}
+
+.env-overview__summary .env-overview__summary-warn[data-slot='button'] {
+  color: var(--simm-warn-text);
+}
+
+/* Not installed / failed. */
+.env-overview__callout {
+  align-items: center;
+}
+
+.env-overview__callout-copy {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.env-overview__callout-copy span {
+  color: var(--simm-text-2);
+}
+
+/* Download / verification progress. */
+.env-overview__progress {
+  gap: var(--simm-space-2);
+}
+
+.env-overview__progress-head {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  font-size: var(--simm-text-base);
+}
+
+.env-overview__progress-head strong {
+  font-weight: 600;
+}
+
+.env-overview__progress-head .ui-num {
+  color: var(--simm-text-2);
+}
+
+.env-overview__progress-meta,
+.env-overview__progress-message {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.env-overview__progress-message {
+  color: var(--simm-text-3);
+}
+
+.env-progress {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--simm-raised-hover);
+  overflow: hidden;
+}
+
+.env-progress__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--simm-accent);
+  transition: width var(--simm-medium) var(--simm-ease);
+}
+
+.env-progress--indeterminate .env-progress__fill {
+  width: 30% !important;
+  animation: env-progress-sweep 1.4s var(--simm-ease) infinite;
+}
+
+@keyframes env-progress-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(340%); }
+}
+
+/* Danger zone. */
+.env-overview__danger {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-4);
+  margin-top: 0;
+}
+
+.env-overview__danger-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.env-overview__danger-copy .ui-section-title {
+  margin-bottom: 2px;
+  color: var(--simm-text);
+}
+
+.env-overview__danger-copy p {
+  margin: 0;
+  font-size: var(--simm-text-sm);
+}
+
+.env-overview__load-error {
+  margin: var(--simm-space-5);
+}
+
+/* Skeleton. */
+.env-overview--skeleton {
+  gap: var(--simm-space-3);
+}
+
+.env-skeleton {
+  display: block;
+  border-radius: var(--simm-radius-sm);
+}
+
+.env-skeleton--line { width: min(28rem, 70%); height: 0.875rem; }
+.env-skeleton--title { width: 6rem; height: 0.75rem; margin-top: var(--simm-space-4); }
+.env-skeleton--row { width: 100%; height: 2rem; }
+
+/* Compact environment selector (legacy; not reachable from the shell). */
+.workspace-environment-sidebar {
+  display: grid;
+  gap: var(--simm-space-2);
+  padding: var(--simm-space-3);
+}
+
+.workspace-environment-sidebar__title {
+  margin: 0;
+  font-size: var(--simm-text-sm);
+  font-weight: 600;
+}
+
+.workspace-environment-sidebar__copy {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-xs);
+}
+
+.workspace-environment-sidebar__list {
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-environment-sidebar__button[data-slot='button'] {
+  justify-content: flex-start;
+  width: 100%;
+  color: var(--simm-text-2);
+}
+
+.workspace-environment-sidebar__button--active[data-slot='button'] {
+  background: var(--simm-accent-soft);
+  color: var(--simm-text);
+}
+
+.workspace-environment-sidebar__button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------ MelonLoader dialog */
+
+.melonloader-dialog {
+  --simm-dialog-width: 36rem;
+}
+
+.melonloader-dialog__body {
+  gap: var(--simm-space-3);
+}
+
+.melonloader-dialog__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-3);
+  font-size: var(--simm-text-sm);
+}
+
+.melonloader-dialog__nightly {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  color: var(--simm-text-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.melonloader-dialog__list {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  overflow: hidden;
+}
+
+.melonloader-dialog__list .env-skeleton--row {
+  margin: var(--simm-space-2);
+  width: auto;
+}
+
+.melonloader-dialog__release {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  min-height: var(--simm-row-h);
+  padding: var(--simm-space-2) var(--simm-space-3);
+  border-bottom: 1px solid var(--simm-line);
+  cursor: pointer;
+  transition: background-color var(--simm-fast) var(--simm-ease);
+}
+
+.melonloader-dialog__release:last-child {
+  border-bottom: 0;
+}
+
+.melonloader-dialog__release:hover {
+  background: var(--simm-hover);
+}
+
+.melonloader-dialog__release--selected {
+  background: var(--simm-accent-soft);
+}
+
+.melonloader-dialog__release-main {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.melonloader-dialog__release-title {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  font-size: var(--simm-text-base);
+}
+
+.melonloader-dialog__release-title strong {
+  font-weight: 600;
+}
+
+.melonloader-dialog__release .ui-meta {
+  font-size: var(--simm-text-xs);
+}
+
+.melonloader-dialog__release-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--simm-space-1);
+  flex: none;
+  color: var(--simm-accent-text);
+  font-size: var(--simm-text-xs);
+  text-decoration: none;
+}
+
+.melonloader-dialog__release-link:hover {
+  text-decoration: underline;
+}
+
+/* ------------------------------------------------------------ Mod Integration dialog */
+
+.mod-integration-dialog {
+  --simm-dialog-width: 40rem;
+}
+
+.mod-integration-dialog__body {
+  gap: var(--simm-space-5);
+}
+
+.mod-integration-dialog__section {
+  display: grid;
+  gap: var(--simm-space-2);
+  min-width: 0;
+}
+
+.mod-integration-dialog__section .ui-section-title {
+  margin: 0;
+}
+
+.mod-integration-dialog__hint {
+  margin: 0;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+.mod-integration-dialog__loading {
+  display: grid;
+  gap: var(--simm-space-2);
+}
+
+.mod-integration-policy-list {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  overflow: hidden;
+}
+
+.mod-integration-policy {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-2) var(--simm-space-3);
+  border-bottom: 1px solid var(--simm-line);
+  cursor: pointer;
+}
+
+.mod-integration-policy:last-child {
+  border-bottom: 0;
+}
+
+.mod-integration-policy:hover {
+  background: var(--simm-hover);
+}
+
+.mod-integration-policy:has([data-checked]) {
+  background: var(--simm-accent-soft);
+}
+
+.mod-integration-policy [data-slot='radio-group-item'] {
+  margin-top: 3px;
+}
+
+.mod-integration-policy > span {
+  display: grid;
+  gap: 1px;
+}
+
+.mod-integration-policy strong {
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.mod-integration-policy small {
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-xs);
+}
+
+.mod-integration-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--simm-line);
+}
+
+.mod-integration-list__row {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  min-height: var(--simm-row-h);
+  padding: var(--simm-space-2) 0;
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.mod-integration-list__main {
+  display: grid;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--simm-text-sm);
+}
+
+.mod-integration-list__main strong {
+  font-weight: 500;
+}
+
+.mod-integration-list__main .ui-meta,
+.mod-integration-list__main .ui-subtle {
+  font-size: var(--simm-text-xs);
+}
+
+.mod-integration-list__actions {
+  display: flex;
+  gap: var(--simm-space-2);
+  flex: none;
+}
+
+/* Notice (rendered by the shell when a mod asks for a decision). */
+
+/* No eyebrows: the title says what the notice is. */
+
+/* ------------------------------------------------------------ Version picker rows
+ * Shared by the Mods and Mod Library version choosers.
+ */
+
+.workspace-version-list {
+  display: grid;
+  gap: var(--simm-space-2);
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.workspace-version-row {
+  display: grid !important;
+  gap: var(--simm-space-1);
+  align-items: stretch !important;
+  justify-content: stretch !important;
+  width: 100%;
+  height: auto !important;
+  min-height: 3.5rem;
+  padding: var(--simm-space-2) var(--simm-space-3);
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+  color: var(--simm-text);
+  text-align: left;
+  white-space: normal !important;
+  overflow: hidden;
+  box-sizing: border-box;
+  cursor: pointer;
+  transition: border-color var(--simm-fast) var(--simm-ease), background-color var(--simm-fast) var(--simm-ease);
+}
+
+.workspace-version-row:hover {
+  border-color: var(--simm-line-strong);
+  background: var(--simm-hover);
+}
+
+.workspace-version-row--active {
+  border-color: var(--simm-accent-line);
+  background: var(--simm-accent-soft);
+}
+
+.workspace-version-row__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: flex-start;
+  gap: var(--simm-space-2);
+  min-width: 0;
+}
+
+.workspace-version-row__header--nexus-file {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace-version-row__title,
+.workspace-version-row__file-title {
+  min-width: 0;
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-version-row__file-title {
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.workspace-version-row__badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--simm-space-1);
+  max-width: min(58%, 12rem);
+  min-width: 0;
+}
+
+.workspace-version-row__badges--nexus-file {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  max-width: 100%;
+}
+
+.workspace-version-row__badges > * {
+  min-width: 0;
+  max-width: 6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-version-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--simm-space-1) var(--simm-space-3);
+  min-width: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-xs);
+  line-height: 1.35;
+}
+
+.workspace-version-row__meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-version-row__summary {
+  margin: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-xs);
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}

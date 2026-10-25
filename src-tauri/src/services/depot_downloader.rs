@@ -33,6 +33,7 @@ pub struct DepotDownloaderService {
     pending_downloads: Arc<RwLock<HashMap<String, PendingDownload>>>,
     download_progress: Arc<RwLock<HashMap<String, DownloadProgress>>>,
     byte_meter_ready: Arc<RwLock<HashMap<String, String>>>,
+    byte_meter_observed: Arc<RwLock<HashMap<String, (String, u64)>>>,
     auth_prompted_downloads: Arc<RwLock<HashSet<String>>>,
     credential_handoffs: Arc<RwLock<HashMap<String, CredentialHandoffPhase>>>,
     shutting_down: Arc<AtomicBool>,
@@ -235,6 +236,7 @@ impl DepotDownloaderService {
             pending_downloads: Arc::new(RwLock::new(HashMap::new())),
             download_progress: Arc::new(RwLock::new(HashMap::new())),
             byte_meter_ready: Arc::new(RwLock::new(HashMap::new())),
+            byte_meter_observed: Arc::new(RwLock::new(HashMap::new())),
             auth_prompted_downloads: Arc::new(RwLock::new(HashSet::new())),
             credential_handoffs: Arc::new(RwLock::new(HashMap::new())),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -395,6 +397,7 @@ impl DepotDownloaderService {
             .remove(download_id);
         self.credential_handoffs.write().await.remove(download_id);
         self.byte_meter_ready.write().await.remove(download_id);
+        self.byte_meter_observed.write().await.remove(download_id);
     }
 
     async fn take_auth_retry_requested(&self, download_id: &str) -> bool {
@@ -405,6 +408,7 @@ impl DepotDownloaderService {
             .remove(download_id);
         self.credential_handoffs.write().await.remove(download_id);
         self.byte_meter_ready.write().await.remove(download_id);
+        self.byte_meter_observed.write().await.remove(download_id);
         requested
     }
 
@@ -841,13 +845,18 @@ impl DepotDownloaderService {
 
         // Parse percentage: "Downloading depot 3164501 (45%)" or "05.30% filepath"
         // Try format with parentheses first: (45%)
-        let previous_progress = progress.progress;
+        let previous_progress =
+            if progress.operation == DepotOperation::Download && progress.total_bytes.is_none() {
+                0.0
+            } else {
+                progress.progress
+            };
         let percent_re_paren = Regex::new(r"\((\d+)%\)").unwrap();
         let mut parsed_percent = None;
         if let Some(caps) = percent_re_paren.captures(line) {
             if let Ok(percent) = caps[1].parse::<f64>() {
                 let percent = percent.clamp(0.0, 100.0);
-                progress.progress = previous_progress.max(percent);
+                progress.progress = previous_progress.max(percent.min(99.5));
                 parsed_percent = Some(percent);
             }
         }
@@ -860,7 +869,7 @@ impl DepotDownloaderService {
                 if let Ok(percent) = caps[1].parse::<f64>() {
                     // Only update if we found a valid percentage (0-100)
                     if percent >= 0.0 && percent <= 100.0 {
-                        progress.progress = previous_progress.max(percent);
+                        progress.progress = previous_progress.max(percent.min(99.5));
                         parsed_percent = Some(percent);
                     }
                 }
@@ -886,7 +895,7 @@ impl DepotDownloaderService {
                 .downloaded_bytes
                 .filter(|downloaded| *downloaded > 0)
             {
-                if percent > 0.0 {
+                if percent > 0.0 && percent < 100.0 {
                     let estimated_total =
                         ((downloaded_bytes as f64) * 100.0 / percent).ceil() as u64;
                     progress.total_bytes = Some(estimated_total.max(downloaded_bytes));
@@ -1036,6 +1045,12 @@ impl DepotDownloaderService {
             return None;
         }
 
+        // A new environment can already contain a tiny launcher/config file.
+        // Its size is not a usable estimate of the game being downloaded.
+        if !path.join("Schedule I.exe").is_file() {
+            return None;
+        }
+
         const NON_DEPOT_ROOTS: [&str; 6] = [
             ".DepotDownloader",
             "MelonLoader",
@@ -1100,10 +1115,32 @@ impl DepotDownloaderService {
             return;
         }
 
+        let observed_bytes = {
+            let mut observed = self.byte_meter_observed.write().await;
+            let entry = observed
+                .entry(download_id.to_string())
+                .or_insert_with(|| (operation_id.to_string(), 0));
+            if entry.0 != operation_id {
+                *entry = (operation_id.to_string(), 0);
+            }
+            entry.1 = entry.1.saturating_add(downloaded_bytes_delta);
+            entry.1
+        };
         let metered_downloaded_bytes = progress
             .downloaded_bytes
             .unwrap_or(0)
             .saturating_add(downloaded_bytes_delta);
+        if progress
+            .total_bytes
+            .is_some_and(|total| observed_bytes > total)
+        {
+            // The previous install was smaller than the new branch. Keep the
+            // measured bytes and wait for a new percentage milestone to
+            // calibrate a useful total.
+            progress.total_bytes = None;
+            progress.progress = 0.0;
+            progress.eta = None;
+        }
         let downloaded_bytes = progress
             .total_bytes
             .filter(|total| *total > 0)
@@ -2077,6 +2114,7 @@ impl Clone for DepotDownloaderService {
             pending_downloads: Arc::clone(&self.pending_downloads),
             download_progress: Arc::clone(&self.download_progress),
             byte_meter_ready: Arc::clone(&self.byte_meter_ready),
+            byte_meter_observed: Arc::clone(&self.byte_meter_observed),
             auth_prompted_downloads: Arc::clone(&self.auth_prompted_downloads),
             credential_handoffs: Arc::clone(&self.credential_handoffs),
             shutting_down: Arc::clone(&self.shutting_down),
@@ -3228,7 +3266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn byte_meter_never_displays_more_than_the_estimated_total() -> Result<()> {
+    async fn byte_meter_discards_an_underestimated_total() -> Result<()> {
         let service = DepotDownloaderService::new();
         let app = mock_app();
         let handle = app.handle();
@@ -3237,6 +3275,61 @@ mod tests {
             "download-meter-cap".to_string(),
             DownloadProgress {
                 download_id: "download-meter-cap".to_string(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 99.5,
+                downloaded_bytes: Some(225),
+                total_bytes: Some(225),
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: None,
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .apply_byte_meter_sample(&handle, "download-meter-cap", &operation_id, 1_000, 50)
+            .await;
+
+        let progress = service
+            .get_progress("download-meter-cap")
+            .await
+            .expect("progress remains available");
+        assert_eq!(progress.downloaded_bytes, Some(1_225));
+        assert_eq!(progress.total_bytes, None);
+        assert_eq!(progress.progress, 0.0);
+
+        service
+            .parse_progress(
+                "25.00% C:\\Games\\Schedule I_Data\\resources.assets",
+                "download-meter-cap",
+                &handle,
+            )
+            .await?;
+        let recalibrated = service
+            .get_progress("download-meter-cap")
+            .await
+            .expect("progress remains available");
+        assert_eq!(recalibrated.total_bytes, Some(4_900));
+        assert_eq!(recalibrated.progress, 25.0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn byte_meter_keeps_estimate_when_only_milestone_anchor_exceeds_it() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        let operation_id = unique_login_id();
+        service.download_progress.write().await.insert(
+            "download-milestone-overlap".to_string(),
+            DownloadProgress {
+                download_id: "download-milestone-overlap".to_string(),
                 operation_id: operation_id.clone(),
                 operation: DepotOperation::Download,
                 status: DownloadStatus::Downloading,
@@ -3254,11 +3347,17 @@ mod tests {
         );
 
         service
-            .apply_byte_meter_sample(&handle, "download-meter-cap", &operation_id, 250, 50)
+            .apply_byte_meter_sample(
+                &handle,
+                "download-milestone-overlap",
+                &operation_id,
+                250,
+                50,
+            )
             .await;
 
         let progress = service
-            .get_progress("download-meter-cap")
+            .get_progress("download-milestone-overlap")
             .await
             .expect("progress remains available");
         assert_eq!(progress.downloaded_bytes, Some(1_000));
@@ -3283,6 +3382,65 @@ mod tests {
             DepotDownloaderService::estimated_install_size(temp.path()),
             Some(1_536)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn estimated_install_size_ignores_partial_new_environment() -> Result<()> {
+        let temp = tempdir()?;
+        std::fs::write(temp.path().join("branch-info.json"), vec![0_u8; 225])?;
+
+        assert_eq!(
+            DepotDownloaderService::estimated_install_size(temp.path()),
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn first_depot_completion_does_not_estimate_the_whole_download() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+        let operation_id = unique_login_id();
+        service.download_progress.write().await.insert(
+            "download-new-branch".to_string(),
+            DownloadProgress {
+                download_id: "download-new-branch".to_string(),
+                operation_id: operation_id.clone(),
+                operation: DepotOperation::Download,
+                status: DownloadStatus::Downloading,
+                progress: 0.0,
+                downloaded_bytes: Some(0),
+                total_bytes: None,
+                downloaded_files: None,
+                total_files: None,
+                speed: None,
+                eta: None,
+                message: None,
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .apply_byte_meter_sample(&handle, "download-new-branch", &operation_id, 225, 225)
+            .await;
+        service
+            .parse_progress(
+                "100.00% C:\\Games\\Schedule I_Data\\resources.assets",
+                "download-new-branch",
+                &handle,
+            )
+            .await?;
+        let progress = service
+            .get_progress("download-new-branch")
+            .await
+            .expect("progress remains available");
+        assert_eq!(progress.downloaded_bytes, Some(225));
+        assert_eq!(progress.total_bytes, None);
+        assert!(progress.progress < 100.0);
+
         Ok(())
     }
 

@@ -1,0 +1,594 @@
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #1a1a1a;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Base font size for consistent scaling */
+  font-size: 16px;
+
+  --sidebar-collapsed-width: clamp(2.75rem, 4vw, 3.25rem);
+  --sidebar-expanded-width: clamp(11rem, 18vw, 14rem);
+  --sidebar-gap: clamp(0.25rem, 0.8vw, 0.4rem);
+  --sidebar-label-gap: clamp(0.5rem, 1vw, 0.75rem);
+  --shell-sidebar-transition-duration: 300ms;
+  --shell-sidebar-transition-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --shell-sidebar-content-transition-duration: 90ms;
+  --scrollbar-size: 11px;
+  --scrollbar-radius: 999px;
+  --scrollbar-track-idle: transparent;
+  --scrollbar-track-hover: color-mix(in srgb, var(--workspace-stroke-soft, rgba(90, 121, 163, 0.12)) 35%, transparent);
+  --scrollbar-thumb-idle: transparent;
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--workspace-strong-surface, rgba(122, 160, 211, 0.26)) 62%, transparent);
+  --scrollbar-thumb-active: color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 42%, rgba(255, 255, 255, 0.18));
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+/* Keep desktop rem sizing stable across 1080p, 1440p, and 4k; scale only for compact/mobile layouts. */
+
+@media (max-width: 768px) {
+  :root {
+    font-size: 14px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb-idle) var(--scrollbar-track-idle);
+}
+
+*:hover,
+*:focus-within {
+  scrollbar-color: var(--scrollbar-thumb-hover) var(--scrollbar-track-hover);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--bg-gradient, #1a1a1a);
+  background-attachment: fixed;
+  position: relative;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-pattern, none);
+  background-attachment: fixed;
+  pointer-events: none;
+  z-index: 0;
+}
+
+#app {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* App Layout */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+  background-color: transparent;
+  color: var(--app-text-color, #ffffff);
+  position: relative;
+  z-index: 1;
+  /* Application chrome should behave like a native desktop surface, not a document. */
+  user-select: none;
+}
+
+/* Keep copyable, user-authored, and diagnostic content intentionally selectable. */
+
+/* Status Bar (compact footer) */
+
+.btn-icon-small {
+  border-radius: var(--simm-radius-sm);
+  border: 1px solid transparent;
+  padding: 0.3rem;
+  font-size: var(--simm-text-xs);
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  color: var(--text-secondary, #cccccc);
+  min-width: auto;
+  height: auto;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+.btn-icon-small:hover:not(:disabled) {
+  background-color: var(--btn-secondary-bg, #3a3a3a);
+  color: #646cff;
+}
+
+.btn-icon-small:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.btn-icon-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.checking-dots {
+  display: inline-block;
+  width: 1.5em;
+  text-align: left;
+  overflow: hidden;
+}
+
+.checking-dots::after {
+  content: '...';
+  display: inline-block;
+  animation: checking-dots 1.4s steps(4, end) infinite;
+  width: 1.5em;
+}
+
+@keyframes checking-dots {
+  0% {
+    content: '';
+  }
+  25% {
+    content: '.';
+  }
+  50% {
+    content: '..';
+  }
+  75%, 100% {
+    content: '...';
+  }
+}
+
+/* Buttons */
+
+/* Environment List */
+
+/* Every direct child of the grid fills its cell completely */
+
+/* The Launch Game cell is a positioned flex container so the
+   button fills it and the dropdown can anchor absolutely */
+
+/* Badges */
+
+.badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-block;
+  letter-spacing: 0.03em;
+}
+
+.badge-gray {
+  background-color: var(--badge-gray, #4a4a4a);
+  color: #ffffff;
+}
+
+.badge-blue {
+  background-color: var(--badge-blue, #0066cc);
+  color: #ffffff;
+}
+
+.badge-orange-red {
+  background-color: var(--badge-orange-red, #cc5500);
+  color: #ffffff;
+}
+
+.badge-yellow {
+  background-color: var(--badge-yellow, #ffaa00);
+  color: #000000;
+}
+
+.badge-green {
+  background-color: var(--badge-green, #28a745);
+  color: #ffffff;
+}
+
+.badge-red {
+  background-color: var(--badge-red, #dc3545);
+  color: #ffffff;
+}
+
+.badge-orange {
+  background-color: var(--badge-orange, #ff9800);
+  color: #ffffff;
+}
+
+.badge-cyan {
+  background-color: var(--badge-cyan, #00bcd4);
+  color: #000000;
+}
+
+/* Progress Bar */
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background-color: var(--border-color, #3a3a3a);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+/* Modal */
+
+/* Nested modal overlay for modals within modals */
+
+/* Short blocking decisions stay centered. Long workflow dialogs retain the
+ * shared top alignment so their headers and scroll regions remain predictable. */
+
+/* Icon Button */
+
+.btn-icon {
+  border-radius: var(--simm-radius);
+  border: 1px solid transparent;
+  padding: 0.5em;
+  font-size: 1.25rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  color: var(--app-text-color, #ffffff);
+  min-width: clamp(2.25rem, 4vw, 2.5rem);
+  height: clamp(2.25rem, 4vw, 2.5rem);
+}
+
+.btn-icon:hover {
+  background-color: var(--btn-secondary-bg, #3a3a3a);
+  color: #646cff;
+}
+
+.btn-icon:active {
+  transform: scale(0.95);
+}
+
+/* Accounts */
+
+/* Help Overlay */
+
+/* Wizard */
+
+/* Forms */
+
+/* Checkbox labels should be inline with the checkbox */
+
+/* Make labels containing checkboxes inline-flex */
+
+/* Settings */
+
+/* Configuration Editor */
+
+/* Logs Panel */
+
+.info-box,
+.warning-box {
+  padding: 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.info-box {
+  background-color: var(--info-box-bg, rgba(30, 58, 95, 0.4));
+  border: 1px solid var(--info-box-border, rgba(42, 74, 111, 0.5));
+}
+
+.warning-box {
+  background-color: var(--warning-box-bg, rgba(90, 58, 30, 0.4));
+  border: 1px solid var(--warning-box-border, rgba(106, 74, 47, 0.5));
+}
+
+.info-box p,
+.warning-box p {
+  margin: 0.375rem 0;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+.info-box p:first-child,
+.warning-box p:first-child {
+  margin-top: 0;
+}
+
+.info-box p:last-child,
+.warning-box p:last-child {
+  margin-bottom: 0;
+}
+
+.info-box code,
+.warning-box code {
+  display: block;
+  background-color: rgba(0, 0, 0, 0.3);
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+}
+
+/* Utilities */
+
+.loading {
+  text-align: center;
+  padding: 2rem;
+  color: #888;
+}
+
+.error {
+  background-color: #5a1a1a;
+  border: 1px solid #7a2a2a;
+  color: #ffaaaa;
+  padding: 1rem;
+  border-radius: 6px;
+  margin: 1rem 0;
+}
+
+/* Loading Spinner Animation */
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Responsive Breakpoints */
+
+/* Smooth theme transitions for theme-aware elements */
+
+.app,
+.modal-content,
+.btn,
+input,
+select,
+textarea {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Desktop shell refactor */
+
+:root {
+  font-family: "Segoe UI Variable", "Segoe UI", "Trebuchet MS", sans-serif;
+
+  --app-bg-color: #0f141d;
+  --header-bg-color: #151d2a;
+  --card-bg-color: #1a2433;
+  --card-border-color: #2b3950;
+  --border-color: #243246;
+  --app-text-color: #edf4ff;
+  --text-secondary: #9aabc6;
+  --text-tertiary: #8696ae;
+  --input-bg-color: #101824;
+  --input-border-color: #2b3a50;
+  --input-text-color: #edf4ff;
+  --btn-secondary-bg: #1a2434;
+  --btn-secondary-hover: #27354c;
+  --primary-btn-color: #4e8ad9;
+  --primary-btn-hover: #5c98e6;
+  --workspace-header-height: 44px;
+  --workspace-gap: 0.75rem;
+  --workspace-card-radius: 0.42rem;
+  --workspace-stroke: var(--theme-workspace-stroke, var(--card-border-color, rgba(112, 142, 186, 0.32)));
+  --workspace-stroke-soft: var(--theme-workspace-stroke-soft, var(--border-color, rgba(98, 128, 170, 0.2)));
+  --workspace-title-color: var(--theme-workspace-title-color, var(--app-text-color, #eef5ff));
+  --workspace-copy-color: var(--theme-workspace-copy-color, var(--text-secondary, #9fb5d2));
+  --workspace-eyebrow-color: var(--theme-workspace-eyebrow-color, var(--text-tertiary, var(--text-secondary, #93add0)));
+  --workspace-surface-card: var(--theme-workspace-surface-card, linear-gradient(180deg, var(--card-bg-color, #1a2433), var(--card-bg-color, #1a2433)));
+  --workspace-surface-card-strong: var(--theme-workspace-surface-card-strong, linear-gradient(180deg, var(--header-bg-color, #151d2a), var(--card-bg-color, #1a2433)));
+  --workspace-surface-muted: var(--theme-workspace-surface-muted, var(--input-bg-color, #101824));
+  --workspace-surface-muted-soft: var(--theme-workspace-surface-muted-soft, var(--input-bg-color, #101824));
+  --workspace-path-surface: var(--theme-workspace-path-surface, var(--input-bg-color, #101824));
+  --workspace-icon-surface: var(--theme-workspace-icon-surface, linear-gradient(180deg, var(--primary-btn-color, #4e8ad9), var(--primary-btn-hover, #5c98e6)));
+}
+
+body {
+  background:
+    var(--bg-pattern, none),
+    var(--bg-gradient, linear-gradient(180deg, #0a0f17 0%, #111826 52%, #0f141d 100%));
+  background-attachment: fixed;
+}
+
+#root,
+#app {
+  height: 100vh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell-sidebar,
+  .downloads-popover {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}
+
+.loading-skeleton {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  border-radius: 0.38rem;
+  background: color-mix(in srgb, var(--workspace-surface-card-strong, rgba(38, 52, 75, 0.86)) 72%, rgba(255, 255, 255, 0.1));
+}
+
+.loading-skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--primary-btn-color, #4e8ad9) 24%, rgba(255, 255, 255, 0.18)),
+    transparent
+  );
+  animation: skeleton-shimmer 1.35s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.workspace-panel {
+  max-height: none;
+  overflow: hidden;
+}
+
+@keyframes downloads-panel-progress {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(230%);
+  }
+}
+
+.workspace-panel-fallback {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 1.5rem;
+}
+
+.workspace-panel-fallback__header {
+  display: grid;
+  gap: 0.28rem;
+  justify-items: center;
+  text-align: center;
+  padding: 1.1rem 1.25rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--workspace-stroke, var(--card-border-color, #2b3950));
+  background: var(--workspace-surface-card, var(--card-bg-color, #1a2433));
+  color: var(--workspace-copy-color, var(--text-secondary, #9fb5d2));
+}
+
+.workspace-panel-fallback__header strong {
+  color: var(--workspace-title-color, var(--app-text-color, #eef5ff));
+  font-size: 0.95rem;
+}
+
+.settings-section h3 {
+  letter-spacing: 0.015em;
+}
+
+/* Desktop-style environment list */
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: 'Geist Variable', sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

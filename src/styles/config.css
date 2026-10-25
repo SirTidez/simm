@@ -1,0 +1,658 @@
+/*
+ * Config tab: file explorer | editor (header, section toolbar, property rows,
+ * draft footer). Settings are property rows, not cards.
+ */
+
+.config-editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--simm-bg);
+}
+
+.config-editor__shell {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 16rem minmax(0, 1fr);
+  min-height: 0;
+}
+
+.config-skeleton-bar {
+  display: block;
+  height: 10px;
+  border-radius: var(--simm-radius-sm);
+  background: var(--simm-raised-hover);
+  animation: config-skeleton-pulse 1.4s var(--simm-ease) infinite;
+}
+
+.config-skeleton-bar--thin {
+  width: 70%;
+  height: 8px;
+  opacity: 0.7;
+}
+
+.config-skeleton-bar--field {
+  width: 40%;
+  height: var(--simm-control-h-sm);
+}
+
+@keyframes config-skeleton-pulse {
+  50% { opacity: 0.45; }
+}
+
+/* ------------------------------------------------------------ Explorer */
+
+.config-explorer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--simm-line);
+  background: var(--simm-chrome);
+}
+
+.config-explorer__search {
+  position: relative;
+  padding: var(--simm-space-3) var(--simm-space-3) var(--simm-space-2);
+}
+
+.config-explorer__search > i,
+.config-explorer__search > svg,
+.config-workspace__filter > i,
+.config-workspace__filter > svg {
+  position: absolute;
+  top: 50%;
+  left: var(--simm-space-3);
+  transform: translateY(-50%);
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+  pointer-events: none;
+}
+
+.config-explorer__search > i,
+.config-explorer__search > svg {
+  top: calc(50% + 2px);
+  left: calc(var(--simm-space-3) * 2);
+}
+
+.config-explorer__search input,
+.config-workspace__filter input {
+  width: 100%;
+  height: var(--simm-control-h);
+  padding-left: 2rem;
+}
+
+.config-explorer__list {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-4);
+  min-height: 0;
+  padding: var(--simm-space-2) var(--simm-space-2) var(--simm-space-4);
+  overflow-y: auto;
+}
+
+.config-explorer__group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.config-explorer__group-title {
+  margin-bottom: var(--simm-space-1);
+  padding: 0 var(--simm-space-2);
+}
+
+.config-explorer__subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.config-explorer__subgroup + .config-explorer__subgroup {
+  margin-top: var(--simm-space-2);
+}
+
+.config-explorer__subgroup-label {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-width: 0;
+  margin: 0;
+  padding: var(--simm-space-1) var(--simm-space-2) 2px;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+  font-weight: 500;
+}
+
+.config-explorer__file {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  padding: var(--simm-space-1) var(--simm-space-2);
+  border: 0;
+  border-radius: var(--simm-radius);
+  background: transparent;
+  color: var(--simm-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--simm-fast) var(--simm-ease);
+}
+
+.config-explorer__file:hover {
+  background: var(--simm-hover);
+}
+
+.config-explorer__file[aria-current='true'] {
+  background: var(--simm-accent-soft);
+}
+
+.config-explorer__file-name {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-width: 0;
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.config-explorer__file[aria-current='true'] .config-explorer__file-name {
+  font-weight: 600;
+}
+
+.config-explorer__file-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-explorer__dirty {
+  flex: none;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 999px;
+  background: var(--simm-warn);
+}
+
+.config-explorer__file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--simm-text-3);
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-2xs);
+}
+
+.config-explorer__matches {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 var(--simm-space-1) var(--simm-space-3);
+  padding-left: var(--simm-space-2);
+  border-left: 1px solid var(--simm-line);
+}
+
+.config-explorer__match-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.config-explorer__match {
+  display: flex;
+  align-items: baseline;
+  gap: var(--simm-space-2);
+  width: 100%;
+  min-width: 0;
+  height: 1.5rem;
+  padding: 0 var(--simm-space-2);
+  border: 0;
+  border-radius: var(--simm-radius-sm);
+  background: transparent;
+  color: var(--simm-text-2);
+  font: inherit;
+  font-size: var(--simm-text-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.config-explorer__match:hover {
+  background: var(--simm-hover);
+  color: var(--simm-text);
+}
+
+.config-explorer__match--section {
+  align-items: center;
+  color: var(--simm-text);
+  font-weight: 500;
+}
+
+.config-explorer__match--section i,
+.config-explorer__match--section svg {
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-2xs);
+}
+
+.config-explorer__match-key {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--simm-font-mono);
+}
+
+.config-explorer__match-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--simm-text-3);
+}
+
+.config-explorer__match--more {
+  color: var(--simm-accent-text);
+}
+
+.config-explorer__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-2);
+}
+
+.config-explorer__skeleton-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-explorer__empty {
+  padding: var(--simm-space-6) var(--simm-space-3);
+}
+
+/* ------------------------------------------------------------ Workspace */
+
+.config-workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.config-workspace__error {
+  margin: var(--simm-space-3) var(--simm-space-5) 0;
+  align-items: center;
+}
+
+.config-workspace__empty {
+  flex: 1 1 auto;
+}
+
+.config-workspace__header {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-3);
+  min-height: 3.25rem;
+  padding: var(--simm-space-2) var(--simm-space-4) var(--simm-space-2) var(--simm-space-5);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.config-workspace__titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.config-workspace__title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--simm-text);
+}
+
+.config-workspace__meta {
+  flex-wrap: nowrap;
+  font-size: var(--simm-text-xs);
+  white-space: nowrap;
+}
+
+.config-workspace__meta > * {
+  flex: none;
+}
+
+.config-workspace__meta > .config-workspace__path {
+  flex: 0 1 auto;
+  min-width: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--simm-text-2xs);
+}
+
+/* Compact segmented control. */
+.config-workspace__mode-switch {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border: 1px solid var(--simm-line-strong);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+}
+
+.config-workspace__mode-switch [data-slot='button'].config-workspace__mode-button {
+  height: var(--simm-control-h-sm);
+  min-height: var(--simm-control-h-sm);
+  padding: 0 var(--simm-space-3);
+  border-radius: var(--simm-radius-sm);
+  font-size: var(--simm-text-xs);
+  color: var(--simm-text-2);
+}
+
+.config-workspace__mode-switch [data-slot='button'].config-workspace__mode-button[aria-pressed='true'] {
+  background: var(--simm-raised-hover);
+  color: var(--simm-text);
+  box-shadow: inset 0 0 0 1px var(--simm-line-strong);
+}
+
+.config-workspace__warning {
+  margin: var(--simm-space-3) var(--simm-space-5) 0;
+}
+
+.config-workspace__warning i,
+.config-workspace__warning svg {
+  margin-top: 2px;
+  color: var(--simm-warn-text);
+}
+
+.config-workspace__warning strong {
+  font-weight: 600;
+}
+
+.config-workspace__warning p {
+  margin: 2px 0 0;
+  color: var(--simm-text-2);
+}
+
+.config-workspace__toolbar {
+  flex-wrap: nowrap;
+  padding: var(--simm-space-2) var(--simm-space-5);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.config-workspace__section-select {
+  flex: 0 1 14rem;
+  min-width: 9rem;
+  height: var(--simm-control-h);
+}
+
+.config-workspace__filter {
+  position: relative;
+  flex: 0 1 18rem;
+  min-width: 10rem;
+}
+
+.config-workspace__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.config-workspace__body--structured {
+  padding: var(--simm-space-2) var(--simm-space-5) var(--simm-space-6);
+}
+
+.config-workspace__body--raw {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.config-workspace__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-4);
+  padding: var(--simm-space-5);
+}
+
+.config-workspace__skeleton-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-4);
+}
+
+/* ------------------------------------------------------------ Sections and property rows */
+
+.config-section + .config-section {
+  margin-top: var(--simm-space-5);
+}
+
+.config-section__head {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-height: 2.25rem;
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.config-section__title {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-sm);
+  font-weight: 600;
+  color: var(--simm-text);
+}
+
+.config-section__count {
+  flex: none;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+.config-section__action[data-slot='button'] {
+  flex: none;
+  color: var(--simm-text-2);
+}
+
+.config-section__empty {
+  margin: 0;
+  padding: var(--simm-space-3) 0;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+}
+
+.config-prop {
+  display: grid;
+  grid-template-columns: minmax(10rem, 2fr) minmax(10rem, 3fr) var(--simm-control-h-sm);
+  align-items: center;
+  gap: var(--simm-space-4);
+  min-height: 2.75rem;
+  padding: var(--simm-space-1) 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--simm-line) 60%, transparent);
+}
+
+.config-prop:hover {
+  background: var(--simm-hover);
+}
+
+.config-prop--new {
+  background: var(--simm-accent-soft);
+}
+
+.config-prop__key {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-left: var(--simm-space-2);
+}
+
+.config-prop__key-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-sm);
+  color: var(--simm-text);
+}
+
+.config-prop__key-input,
+.config-prop__comment-input,
+.config-prop__input {
+  height: var(--simm-control-h-sm);
+  min-height: var(--simm-control-h-sm);
+}
+
+.config-prop__key-input {
+  font-family: var(--simm-font-mono);
+}
+
+.config-prop__comment-input {
+  font-size: var(--simm-text-xs);
+}
+
+.config-prop__comment {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--simm-radius-sm);
+  background: transparent;
+  color: var(--simm-text-3);
+  font: inherit;
+  font-size: var(--simm-text-xs);
+  line-height: 1.4;
+  text-align: left;
+  cursor: text;
+}
+
+.config-prop__comment:hover {
+  color: var(--simm-text-2);
+}
+
+.config-prop__value {
+  min-width: 0;
+}
+
+.config-prop__input {
+  width: 100%;
+}
+
+.config-prop__input--number {
+  font-variant-numeric: tabular-nums;
+}
+
+.config-prop__bool {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  height: var(--simm-control-h-sm);
+}
+
+.config-prop__bool-text {
+  min-width: 2.5rem;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.config-prop__more[data-slot='button'] {
+  color: var(--simm-text-3);
+}
+
+.config-prop__more[data-slot='button']:hover:not(:disabled),
+.config-prop__more[data-slot='button'][aria-expanded='true'] {
+  color: var(--simm-text);
+}
+
+/* ------------------------------------------------------------ Raw editor */
+
+.config-raw__editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.config-raw__editor > div {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------ Draft footer */
+
+.config-workspace__draft-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  min-height: 3.25rem;
+  padding: var(--simm-space-2) var(--simm-space-4) var(--simm-space-2) var(--simm-space-5);
+  border-top: 1px solid var(--simm-line);
+  background: var(--simm-chrome);
+}
+
+.config-workspace__draft-state {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--simm-text-sm);
+  color: var(--simm-text-2);
+}
+
+.config-workspace__draft-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--simm-text-3);
+}
+
+.config-workspace__draft-dot--dirty {
+  background: var(--simm-warn);
+}
+
+.config-workspace__draft-dot--dirty + .config-workspace__draft-label {
+  color: var(--simm-text);
+  font-weight: 500;
+}
+
+.config-workspace__draft-other {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+.config-workspace__draft-other::before {
+  content: '·';
+  margin-right: var(--simm-space-2);
+}
+
+/* Unchecked switches need a visible track on light themes too. */
+.config-prop__bool [data-slot='switch']:not([data-checked]) {
+  background: var(--simm-line-input);
+  box-shadow: none;
+}

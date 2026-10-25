@@ -29,6 +29,7 @@ struct PluginInfo {
     file_name: String,
     path: String,
     version: Option<String>,
+    author: Option<String>,
     source: Option<ModSource>,
     related_mod: Option<String>,
     disabled: Option<bool>,
@@ -756,6 +757,13 @@ impl PluginsService {
         }
 
         // Load metadata
+        let assembly_infos = crate::services::melon_metadata::read_files(
+            dll_files
+                .iter()
+                .map(|(path, _)| PathBuf::from(path))
+                .collect(),
+        )
+        .await?;
         let plugin_metadata = self
             .load_plugin_metadata(&plugins_directory)
             .await
@@ -777,7 +785,7 @@ impl PluginsService {
                 file_name.clone()
             };
 
-            let plugin_name = original_file_name.replace(".dll", "").replace(".DLL", "");
+            let mut plugin_name = original_file_name.replace(".dll", "").replace(".DLL", "");
             let normalized_file_path = Self::normalize_path(&file_path);
             let normalized_active_path = normalized_file_path
                 .strip_suffix(".disabled")
@@ -830,18 +838,33 @@ impl PluginsService {
                         .and_then(|meta| meta.mod_name.clone())
                 });
 
-            let version = file_metadata
+            let mut version = file_metadata
                 .as_ref()
-                .and_then(|m| m.installed_version.clone().or(m.source_version.clone()));
+                .and_then(|m| m.source_version.clone().or(m.installed_version.clone()));
 
             let source = file_metadata.as_ref().and_then(|m| m.source.clone());
+            let mut author = file_metadata.as_ref().and_then(|m| m.author.clone());
+            if let Some(info) = assembly_infos.get(Path::new(&file_path)) {
+                if !matches!(
+                    source.as_ref(),
+                    Some(ModSource::Thunderstore | ModSource::Nexusmods | ModSource::Github)
+                ) {
+                    plugin_name = info.name.clone().unwrap_or(plugin_name);
+                    version = Some(info.version.clone());
+                    author = info.author.clone().or(author);
+                } else {
+                    version = version.or(Some(info.version.clone()));
+                    author = author.or(info.author.clone());
+                }
+            }
 
             plugins.push(PluginInfo {
                 name: plugin_name.clone(),
                 file_name: original_file_name,
                 path: file_path,
                 version,
-                source,
+                author,
+                source: source.or(Some(ModSource::Local)),
                 related_mod,
                 disabled: Some(is_disabled),
             });
@@ -962,6 +985,10 @@ impl PluginsService {
             .await
             .context("Failed to copy plugin file")?;
 
+        let mut assembly_infos =
+            crate::services::melon_metadata::read_files(vec![dest_path.clone()]).await?;
+        let assembly_info = assembly_infos.remove(&dest_path);
+
         let source_str = metadata
             .as_ref()
             .and_then(|m| m.get("source").and_then(|s| s.as_str()));
@@ -978,23 +1005,27 @@ impl PluginsService {
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
         });
-        let source_version = metadata.as_ref().and_then(|m| {
-            m.get("sourceVersion")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string())
-        });
+        let mut source_version = metadata
+            .as_ref()
+            .and_then(|m| {
+                m.get("sourceVersion")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| assembly_info.as_ref().map(|info| info.version.clone()));
         let source_url = metadata.as_ref().and_then(|m| {
             m.get("sourceUrl")
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
         });
-        let mod_name = metadata
+        let mut mod_name = metadata
             .as_ref()
             .and_then(|m| {
                 m.get("modName")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string())
             })
+            .or_else(|| assembly_info.as_ref().and_then(|info| info.name.clone()))
             .or_else(|| {
                 Some(
                     original_file_name
@@ -1003,11 +1034,25 @@ impl PluginsService {
                         .to_string(),
                 )
             });
-        let author = metadata.as_ref().and_then(|m| {
-            m.get("author")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string())
-        });
+        let mut author = metadata
+            .as_ref()
+            .and_then(|m| {
+                m.get("author")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| assembly_info.as_ref().and_then(|info| info.author.clone()));
+
+        if !matches!(
+            mod_source.as_ref(),
+            Some(ModSource::Thunderstore | ModSource::Nexusmods | ModSource::Github)
+        ) {
+            if let Some(info) = &assembly_info {
+                mod_name = info.name.clone().or(mod_name);
+                author = info.author.clone().or(author);
+                source_version = Some(info.version.clone());
+            }
+        }
 
         let mut plugin_metadata = self
             .load_plugin_metadata(&plugins_directory)
@@ -1030,7 +1075,7 @@ impl PluginsService {
                 likes_or_endorsements: None,
                 updated_at: None,
                 tags: None,
-                installed_version: None,
+                installed_version: assembly_info.map(|info| info.version),
                 library_added_at: None,
                 installed_at: Some(chrono::Utc::now()),
                 last_update_check: None,
@@ -1461,6 +1506,85 @@ mod tests {
         assert_eq!(fs::read(&outside).await?, b"must survive");
         assert!(plugins_dir.join("Escaped.dll").exists());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn local_plugin_identity_is_persisted_and_survives_disable_and_replacement() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = PluginsService::new(pool.clone());
+        let output = temp.path().join("env");
+        EnvironmentService::new(pool)?
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".into(),
+                output.to_string_lossy().into(),
+                None,
+                None,
+            )
+            .await?;
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/melon-metadata");
+        service
+            .install_dll_plugin(
+                output.to_str().unwrap(),
+                fixtures.join("Legacy.dll").to_str().unwrap(),
+                "Local.dll",
+                None,
+            )
+            .await?;
+        let metadata = service
+            .load_plugin_metadata(&output.join("Plugins"))
+            .await?;
+        assert_eq!(
+            metadata["Local.dll"].author.as_deref(),
+            Some("Plugin author")
+        );
+        assert_eq!(
+            metadata["Local.dll"].source_version.as_deref(),
+            Some("1.8.2")
+        );
+        service
+            .disable_plugin(output.to_str().unwrap(), "Local.dll")
+            .await?;
+        let result = service.list_plugins(output.to_str().unwrap()).await?;
+        assert_eq!(result["plugins"][0]["name"], "Legacy plugin");
+        assert_eq!(result["plugins"][0]["author"], "Plugin author");
+        assert_eq!(result["plugins"][0]["version"], "1.8.2");
+        assert_eq!(result["plugins"][0]["disabled"], true);
+        fs::copy(
+            fixtures.join("Numeric.dll"),
+            output.join("Plugins/Local.dll.disabled"),
+        )
+        .await?;
+        let result = service.list_plugins(output.to_str().unwrap()).await?;
+        assert_eq!(result["plugins"][0]["version"], "2.3.4-rc.2");
+        assert_eq!(result["plugins"][0]["author"], "Numeric author");
+        service.install_dll_plugin(output.to_str().unwrap(), fixtures.join("Modern.dll").to_str().unwrap(), "Remote.dll", Some(serde_json::json!({"source":"github", "sourceVersion":"release-9", "author":"Package author"}))).await?;
+        let result = service.list_plugins(output.to_str().unwrap()).await?;
+        let remote = result["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["fileName"] == "Remote.dll")
+            .unwrap();
+        assert_eq!(
+            remote["version"], "release-9",
+            "remote package version must retain its source identity"
+        );
+        assert_eq!(remote["author"], "Package author");
+        let metadata = service
+            .load_plugin_metadata(&output.join("Plugins"))
+            .await?;
+        assert_eq!(
+            metadata["Remote.dll"].source_version.as_deref(),
+            Some("release-9")
+        );
         Ok(())
     }
 

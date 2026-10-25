@@ -1,6 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render as renderBase, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProfilesWorkspace } from './ProfilesWorkspace';
+import { AppDialogProvider } from './AppDialogProvider';
+const render = (ui: Parameters<typeof renderBase>[0]) => renderBase(<AppDialogProvider>{ui}</AppDialogProvider>);
 import type { Environment, ModProfileSaveRequest, StoredModProfile } from '../types';
 
 const storeMocks = vi.hoisted(() => ({
@@ -36,6 +38,7 @@ const dialogMocks = vi.hoisted(() => ({
   save: vi.fn(),
 }));
 
+vi.mock('./useLibraryArtwork', () => ({ useLibraryArtwork: () => () => null }));
 vi.mock('../stores/environmentStore', () => ({
   useEnvironmentStore: storeMocks.useEnvironmentStore,
 }));
@@ -140,6 +143,16 @@ const profiles: StoredModProfile[] = [
   },
 ];
 
+async function openApplyFlow() {
+  fireEvent.click(await screen.findByRole('button', { name: /Apply to Environment/i }));
+  return screen.findByRole('region', { name: 'Apply preview' });
+}
+
+async function openMoreMenu() {
+  fireEvent.click(await screen.findByRole('button', { name: 'More profile actions' }));
+  return screen.findByRole('menu');
+}
+
 const plan = {
   profile: profiles[0].manifest.profile,
   targetEnvironmentId: 'il2cpp-env',
@@ -239,6 +252,7 @@ describe('ProfilesWorkspace', () => {
     });
     render(<ProfilesWorkspace />);
     await screen.findByRole('button', { name: /Default IL2CPP/i });
+    await openApplyFlow();
     const applyAndLaunchButton = screen.getByRole('button', { name: /Apply & Launch/i });
     await waitFor(() => expect(applyAndLaunchButton).not.toBeDisabled());
     fireEvent.click(applyAndLaunchButton);
@@ -256,6 +270,7 @@ describe('ProfilesWorkspace', () => {
       messages: [],
     });
     render(<ProfilesWorkspace />);
+    await openApplyFlow();
     await waitFor(() => expect(screen.getByRole('button', { name: /^Apply$/i })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: /^Apply$/i }));
     expect(await screen.findByText(/Could not finish applying.*correcting the reported file operation/)).toBeTruthy();
@@ -268,14 +283,16 @@ describe('ProfilesWorkspace', () => {
 
     expect(await screen.findByRole('button', { name: /Default IL2CPP/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Default Mono/i })).toBeTruthy();
-    expect(screen.getAllByText(/Default Profile/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('Default').length).toBeGreaterThanOrEqual(2);
 
-    const targetSelect = screen.getByLabelText(/target environment/i);
-    const monoOption = within(targetSelect).getByRole('option', { name: /Mono Test/i }) as HTMLOptionElement;
-    expect(monoOption.disabled).toBe(true);
+    await openApplyFlow();
+    fireEvent.click(screen.getByRole('combobox', { name: /target environment/i }));
+    const monoOption = await screen.findByRole('option', { name: /Mono Test/i });
+    expect(monoOption).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
 
     fireEvent.click(screen.getByRole('button', { name: /Default Mono/i }));
-    await waitFor(() => expect(screen.getByLabelText(/target environment/i)).toHaveValue('mono-env'));
+    await waitFor(() => expect(screen.getByRole('combobox', { name: /target environment/i })).toHaveTextContent('Mono Test'));
   });
 
   it('initializes from the preferred environment runtime', async () => {
@@ -284,7 +301,8 @@ describe('ProfilesWorkspace', () => {
     expect(await screen.findByRole('button', { name: /Default Mono/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Default IL2CPP/i })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Default Mono' })).toBeTruthy();
-    expect(screen.getByLabelText(/target environment/i)).toHaveValue('mono-env');
+    await openApplyFlow();
+    expect(screen.getByRole('combobox', { name: /target environment/i })).toHaveTextContent('Mono Test');
   });
 
   it('selects a requested collection profile when opened from Downloads', async () => {
@@ -586,7 +604,7 @@ describe('ProfilesWorkspace', () => {
     );
 
     expect(await screen.findByText('Download available')).toBeTruthy();
-    expect(screen.getByText('2 KB · Nexus')).toBeTruthy();
+    expect(screen.getByText('2 KB · Nexus Mods')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /^Download$/i }));
 
     await waitFor(() => {
@@ -838,7 +856,7 @@ describe('ProfilesWorkspace', () => {
     });
   });
 
-  it('uses the supported Tauri confirmation before deleting a custom profile', async () => {
+  it('uses themed confirmation before deleting a custom profile', async () => {
     const customProfile: StoredModProfile = {
       ...profiles[1],
       id: 'profile-custom',
@@ -858,15 +876,14 @@ describe('ProfilesWorkspace', () => {
     render(<ProfilesWorkspace initialProfileId="profile-custom" />);
 
     expect(await screen.findByRole('heading', { name: 'Custom Mono Profile' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    const menu = await openMoreMenu();
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Delete/ }));
 
-    await waitFor(() => {
-      expect(dialogMocks.confirm).toHaveBeenCalledWith(
-        'Delete Custom Mono Profile?',
-        { title: 'Delete profile', kind: 'warning' },
-      );
-      expect(apiMocks.deleteModProfile).toHaveBeenCalledWith('profile-custom');
-    });
+    const decision = await screen.findByRole('alertdialog', { name: 'Delete profile' });
+    expect(apiMocks.deleteModProfile).not.toHaveBeenCalled();
+    expect(dialogMocks.confirm).not.toHaveBeenCalled();
+    fireEvent.click(within(decision).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(apiMocks.deleteModProfile).toHaveBeenCalledWith('profile-custom'));
   });
 
   it('does not label un-previewed default profile items as unsupported', async () => {
@@ -874,7 +891,7 @@ describe('ProfilesWorkspace', () => {
 
     await screen.findByRole('button', { name: /Default IL2CPP/i });
 
-    expect(screen.getByText('Tracked')).toBeTruthy();
+    expect(screen.getByRole('table', { name: /profile items/i })).toHaveTextContent('IL2CPP Mod');
     expect(screen.queryByText('Unsupported')).toBeNull();
   });
 
@@ -883,20 +900,19 @@ describe('ProfilesWorkspace', () => {
 
     await screen.findByRole('button', { name: /Default IL2CPP/i });
 
-    expect(screen.getByText('Used by')).toBeTruthy();
-    expect(screen.getByText('IL2CPP Test')).toBeTruthy();
+    expect(screen.getByText('Used by IL2CPP Test')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Default Mono/i }));
 
-    await waitFor(() => expect(screen.getByText('Mono Test')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Used by Mono Test')).toBeTruthy());
   });
 
   it('exports full-state JSON when disabled items are included', async () => {
     render(<ProfilesWorkspace />);
 
     await screen.findByRole('button', { name: /Default IL2CPP/i });
-    fireEvent.click(screen.getByRole('checkbox', { name: /include disabled items/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Export JSON/i }));
+    const menu = await openMoreMenu();
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Export JSON With Disabled Items/i }));
 
     await waitFor(() => {
       expect(apiMocks.exportModProfileFromLibrary).toHaveBeenCalledWith({
@@ -907,14 +923,15 @@ describe('ProfilesWorkspace', () => {
     expect(apiMocks.saveModProfileFile).toHaveBeenCalledWith(profiles[0].manifest, 'C:/tmp/profile.json');
   });
 
-  it('keeps profile import visible in the library without crowding the apply toolbar', async () => {
+  it('keeps profile import in the page header, away from the apply flow', async () => {
     render(<ProfilesWorkspace />);
 
-    const library = screen.getByRole('complementary', { name: /profile library/i });
-    const toolbar = document.querySelector('.profiles-workspace__toolbar');
-    const importButton = within(library).getByRole('button', { name: /Import JSON/i });
+    await screen.findByRole('button', { name: /Default IL2CPP/i });
+    const header = screen.getByRole('heading', { name: 'Profiles', level: 1 }).closest('header');
+    const importButton = within(header as HTMLElement).getByRole('button', { name: /Import JSON/i });
 
-    expect(toolbar).not.toContainElement(importButton);
+    const applyFlow = await openApplyFlow();
+    expect(applyFlow).not.toContainElement(importButton);
     fireEvent.click(importButton);
 
     await waitFor(() => {
@@ -933,6 +950,7 @@ describe('ProfilesWorkspace', () => {
     render(<ProfilesWorkspace />);
 
     await screen.findByRole('button', { name: /Default IL2CPP/i });
+    await openApplyFlow();
     const applyAndLaunchButton = screen.getByRole('button', { name: /Apply & Launch/i });
     await waitFor(() => expect(applyAndLaunchButton).not.toBeDisabled());
     fireEvent.click(applyAndLaunchButton);
@@ -959,6 +977,7 @@ describe('ProfilesWorkspace', () => {
 
     render(<ProfilesWorkspace />);
     await screen.findByRole('button', { name: /Default IL2CPP/i });
+    await openApplyFlow();
     fireEvent.click(screen.getByRole('button', { name: /^Apply$/i }));
 
     await waitFor(() => {
@@ -993,18 +1012,19 @@ describe('ProfilesWorkspace', () => {
 
     render(<ProfilesWorkspace />);
     await screen.findByRole('button', { name: /Default IL2CPP/i });
+    const applyFlow = await openApplyFlow();
     fireEvent.click(screen.getByRole('button', { name: /^Apply$/i }));
 
-    await waitFor(() => expect(dialogMocks.confirm).toHaveBeenCalled());
-    const [warning, options] = dialogMocks.confirm.mock.calls[0];
-    expect(warning).toContain('Local Only Mod');
-    expect(warning).toContain('permanently deleted');
-    expect(options).toEqual({ title: 'Profile switch will delete files', kind: 'warning' });
+    const decision = await screen.findByRole('alertdialog', { name: 'Profile switch will delete files' });
+    expect(decision).toHaveTextContent('Local Only Mod');
+    expect(decision).toHaveTextContent('permanently deleted');
+    expect(dialogMocks.confirm).not.toHaveBeenCalled();
+    fireEvent.click(within(decision).getByRole('button', { name: 'Cancel' }));
     expect(apiMocks.applyModProfile).not.toHaveBeenCalled();
-    const inspector = screen.getByRole('complementary', { name: /selected profile/i });
-    expect(within(inspector).getByText('Environment changes')).toBeTruthy();
-    expect(within(inspector).getByText(/1 removed.*1 permanent/)).toBeTruthy();
-    expect(screen.getByRole('table', { name: /profile items/i })).toHaveTextContent('IL2CPP Mod');
+    expect(within(applyFlow).getByText(/1 to remove \(1 permanent\)/)).toBeTruthy();
+    expect(within(applyFlow).getByText('Deleted permanently')).toBeTruthy();
+    expect(applyFlow).toHaveTextContent('Local Only Mod');
+    expect(applyFlow).toHaveTextContent('IL2CPP Mod');
   });
 
   it('creates a new profile from selected target items', async () => {
@@ -1032,19 +1052,21 @@ describe('ProfilesWorkspace', () => {
     render(<ProfilesWorkspace preferredEnvironmentId="mono-env" />);
 
     await screen.findByRole('button', { name: /Default Mono/i });
+    await openApplyFlow();
     await waitFor(() => {
-      expect(screen.getByLabelText(/target environment/i)).toHaveValue('mono-env');
+      expect(screen.getByRole('combobox', { name: /target environment/i })).toHaveTextContent('Mono Test');
     });
-    fireEvent.click(screen.getByRole('button', { name: /^Create Profile$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^New Profile$/i }));
     await screen.findByRole('checkbox', { name: /Mono Extra/i });
     expect(apiMocks.exportEnvironmentProfile).toHaveBeenCalledWith('mono-env');
+    expect(screen.getByRole('combobox', { name: /source environment/i })).toHaveTextContent('Mono Test');
     fireEvent.change(screen.getByPlaceholderText('New profile name'), {
       target: { value: 'Custom Mono' },
     });
 
     const extraItem = screen.getByRole('checkbox', { name: /Mono Extra/i });
     fireEvent.click(extraItem);
-    fireEvent.click(screen.getByRole('button', { name: /Create Selected Profile/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Create Profile$/i }));
 
     await waitFor(() => {
       expect(apiMocks.saveModProfile).toHaveBeenCalledWith(expect.objectContaining({

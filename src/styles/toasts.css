@@ -1,0 +1,207 @@
+/* Toasts, notices, and launch feedback.
+ *
+ * One toast anatomy for every floating notice: title, one-line body, at most
+ * two actions, and a dismiss icon. Toasts sit bottom-right, above the status
+ * bar, away from the page header and its Play button.
+ * `.mod-integration-notice` and `.app-notice` are rendered by App.tsx and share
+ * the same anatomy here.
+ */
+
+.notice-toast,
+.mod-integration-notice,
+.app-notice {
+  position: fixed;
+  right: var(--simm-space-4);
+  bottom: calc(var(--simm-statusbar-height, 1.75rem) + var(--simm-space-3));
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-2);
+  width: min(22rem, calc(100vw - 2rem));
+  max-width: none;
+  padding: var(--simm-space-3) var(--simm-space-2) var(--simm-space-3) var(--simm-space-4);
+  border: 1px solid var(--simm-line-strong);
+  border-radius: var(--simm-radius-lg);
+  background: var(--simm-panel);
+  box-shadow: var(--simm-shadow-overlay);
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+}
+
+.mod-integration-notice {
+  z-index: 71;
+}
+
+/* Lift toasts above the launch feedback strip so they never cover its actions. */
+.app-desktop-shell:has(.game-launch-status) :is(.notice-toast, .mod-integration-notice, .app-notice) {
+  bottom: calc(var(--simm-statusbar-height, 1.75rem) + 6.5rem);
+}
+
+.app-notice {
+  z-index: 72;
+}
+
+.notice-toast__header,
+.mod-integration-notice__header,
+.app-notice__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--simm-space-2);
+}
+
+.notice-toast__title,
+.mod-integration-notice__header strong,
+.app-notice__header strong {
+  display: block;
+  padding-top: var(--simm-space-1);
+  font-size: var(--simm-text-base);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--simm-text);
+}
+
+/* No eyebrows: the title names the notice. */
+.mod-integration-notice__eyebrow {
+  display: none;
+}
+
+.notice-toast__dismiss,
+.mod-integration-notice__dismiss,
+.app-notice__dismiss {
+  flex: none;
+  margin-top: -2px;
+}
+
+.notice-toast__body,
+.mod-integration-notice p,
+.app-notice__body {
+  margin: 0;
+  padding-right: var(--simm-space-2);
+  font-size: var(--simm-text-sm);
+  line-height: 1.45;
+  color: var(--simm-text-2);
+  overflow-wrap: anywhere;
+}
+
+.notice-toast__body strong,
+.mod-integration-notice p strong {
+  font-weight: 600;
+  color: var(--simm-text);
+}
+
+.notice-toast__actions,
+.mod-integration-notice__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--simm-space-2);
+  padding-right: var(--simm-space-2);
+}
+
+/* Danger notice: same anatomy, tone on the border and title only. */
+.app-notice--danger {
+  border-color: color-mix(in srgb, var(--simm-danger) 55%, var(--simm-line-strong));
+}
+
+.app-notice--danger .app-notice__header strong {
+  color: var(--simm-danger-text);
+}
+
+/* Optional stack container for the lead: toasts placed inside it flow as a column. */
+.notice-toast-region {
+  position: fixed;
+  right: var(--simm-space-4);
+  bottom: calc(var(--simm-statusbar-height, 1.75rem) + var(--simm-space-3));
+  z-index: 70;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--simm-space-2);
+  pointer-events: none;
+}
+
+.notice-toast-region > * {
+  position: static;
+  pointer-events: auto;
+}
+
+/* ------------------------------------------------- Game launch feedback
+ * Inline strip above the status bar: it reports on the launch the user just
+ * started without covering the page. */
+
+.game-launch-status {
+  flex: none;
+  max-height: 30vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--simm-line);
+  background: var(--simm-chrome);
+  color: var(--simm-text);
+}
+
+.game-launch-status__notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-2) var(--simm-space-3) var(--simm-space-2) var(--simm-space-5);
+}
+
+.game-launch-status__notice + .game-launch-status__notice {
+  border-top: 1px solid var(--simm-line);
+}
+
+.game-launch-status__icon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--simm-info-text);
+}
+
+.game-launch-status__content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.game-launch-status__title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 var(--simm-space-2);
+  font-size: var(--simm-text-sm);
+}
+
+.game-launch-status__title strong {
+  font-weight: 600;
+}
+
+.game-launch-status__environment {
+  min-width: 0;
+  color: var(--simm-text-2);
+}
+
+.game-launch-status__body,
+.game-launch-status__detail {
+  margin: 0;
+  font-size: var(--simm-text-sm);
+  color: var(--simm-text-2);
+}
+
+.game-launch-status__path {
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-2xs);
+  color: var(--simm-text-3);
+}
+
+.game-launch-status__actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: var(--simm-space-1);
+}
+
+@media (max-width: 800px) {
+  .game-launch-status__notice {
+    flex-wrap: wrap;
+  }
+}

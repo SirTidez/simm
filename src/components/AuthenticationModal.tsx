@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Icon } from './Icon';
 import { SimmButton, SimmDialogContent } from './primitives';
 
@@ -207,220 +207,156 @@ export function AuthenticationModal({
       >
         <DialogHeader className="modal-header auth-modal__header">
           <div className="auth-modal__heading">
-            <span className="settings-eyebrow">Steam Access</span>
             <DialogTitle>{waitingForAuth ? 'Waiting for Steam Approval' : 'Authenticate with Steam'}</DialogTitle>
             <DialogDescription>
               {required
-                ? 'Authenticate with Steam to authorize SIMM to manage your Schedule I game install.'
-                : 'Connect Steam when SIMM needs authorization for advanced Schedule I installs.'}
+                ? 'SIMM needs Steam authorization to manage this Schedule I install.'
+                : 'Only needed for Steam branch installs that SIMM downloads itself.'}
             </DialogDescription>
           </div>
           {!required && (
             <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close Steam authentication dialog">
-              ×
+              <Icon name="times" />
             </SimmButton>
           )}
         </DialogHeader>
 
-        <div className="auth-modal__status-strip" aria-hidden={waitingForAuth}>
-          <div className="auth-modal__status-pill">
-            <Icon name="fas fa-shield-halved" />
-            Steam authorization
-          </div>
-          <div className="auth-modal__status-pill">
-            <Icon name="fas fa-lock" />
-            Stored locally
-          </div>
-          <div className="auth-modal__status-pill">
-            <Icon name="fas fa-mobile-screen-button" />
-            Steam Guard may be required
-          </div>
-        </div>
-
         {waitingForAuth ? (
           <div className="auth-modal__waiting">
-            <div className="auth-modal__waiting-card">
-              <div className="auth-modal__spinner" aria-hidden="true"></div>
-              <div className="auth-modal__waiting-copy">
-                <h3>Approve the Steam login</h3>
-                <p>{authMessage || 'Please approve the login request in the Steam Mobile App.'}</p>
-                <p className="auth-modal__waiting-note">
-                  The download will continue automatically as soon as Steam confirms the session.
-                </p>
-              </div>
-
-              {error && <div className="error-message auth-modal__error-banner">{error}</div>}
-
-              {!required && (
-                <div className="auth-modal__actions auth-modal__actions--waiting">
-                  <SimmButton type="button" className="btn btn-secondary" onClick={onClose}>
-                    Close
-                  </SimmButton>
-                </div>
-              )}
+            <div className="auth-modal__spinner" aria-hidden="true"></div>
+            <div className="auth-modal__waiting-copy">
+              <h3>Approve the Steam login</h3>
+              <p>{authMessage || 'Please approve the login request in the Steam Mobile App.'}</p>
+              <p className="auth-modal__muted">
+                The download continues automatically as soon as Steam confirms the session.
+              </p>
             </div>
-          </div>
-        ) : (
-          <div className="auth-modal__body">
-            <aside className="auth-modal__panel auth-modal__panel--intro">
-              <div className="auth-modal__panel-copy">
-                <span className="settings-eyebrow">Why SIMM needs this</span>
-                <h3>Authorize SIMM for Schedule I install management.</h3>
-                <p>
-                  SIMM uses Steam credentials only when advanced Steam install actions need approval. This does not affect normal browsing or local workspace management.
-                </p>
-              </div>
 
-              <div className="auth-modal__security-grid">
-                <div className="auth-modal__security-card">
-                  <span>Storage</span>
-                  <strong>Encrypted locally</strong>
-                </div>
-                <div className="auth-modal__security-card">
-                  <span>Use case</span>
-                  <strong>Schedule I access</strong>
-                </div>
-                <div className="auth-modal__security-card">
-                  <span>Approval</span>
-                  <strong>Steam Guard if prompted</strong>
-                </div>
-              </div>
+            {error && <div className="ui-callout ui-callout--danger auth-modal__error" role="alert">{error}</div>}
 
-              <div className="settings-callout auth-modal__callout">
-                <strong>What to expect</strong>
-                <p>{authMode === 'qr'
-                  ? 'Scan the QR code with the Steam Mobile App. SIMM stores the remembered DepotDownloader session name for future installs.'
-                  : 'Enter your Steam account details, then approve the session in Steam if Guard prompts appear.'}</p>
-              </div>
-            </aside>
-
-            <form className="auth-modal__panel auth-modal__panel--form" onSubmit={handleSubmit}>
-              {error && <div className="error-message auth-modal__error-banner">{error}</div>}
-
-              <div className="auth-modal__fields">
-                <div className="auth-modal__mode-toggle" role="tablist" aria-label="Steam authentication method">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={authMode === 'qr'}
-                    className={authMode === 'qr' ? 'auth-modal__mode-button auth-modal__mode-button--active' : 'auth-modal__mode-button'}
-                    onClick={() => handleAuthModeChange('qr')}
-                    disabled={loading}
-                  >
-                    <Icon name="fas fa-mobile-screen-button" />
-                    QR Code
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={authMode === 'password'}
-                    className={authMode === 'password' ? 'auth-modal__mode-button auth-modal__mode-button--active' : 'auth-modal__mode-button'}
-                    onClick={() => handleAuthModeChange('password')}
-                    disabled={loading}
-                  >
-                    <Icon name="fas fa-lock" />
-                    Password
-                  </button>
-                </div>
-
-                {authMode === 'qr' ? (
-                  <div className="auth-modal__qr-panel">
-                    <div className="auth-modal__qr-header">
-                      <Icon name="fas fa-mobile-screen-button" />
-                      <div>
-                        <strong>Steam Mobile QR login</strong>
-                        <small>Start the QR session, then scan the code shown here with the Steam Mobile App.</small>
-                      </div>
-                    </div>
-                    <pre className={qrOutputClassName} aria-live="polite" data-testid="steam-auth-qr-output">
-                      {qrDisplayLines.length > 0
-                        ? qrDisplayLines.join('\n')
-                        : 'Select “Start QR Login” below to generate a QR code.'}
-                    </pre>
-                  </div>
-                ) : (
-                  <>
-                    <div className="form-group">
-                      <label htmlFor="auth-steam-username">Steam Username</label>
-                      <Input
-                        id="auth-steam-username"
-                        type="text"
-                        value={username}
-                        onChange={(event) => setUsername(event.target.value)}
-                        placeholder="Enter your Steam username"
-                        required
-                        autoComplete="username"
-                      />
-                    </div>
-
-                    <div className="form-group">
-                      <label htmlFor="auth-steam-password">Steam Password</label>
-                      <Input
-                        id="auth-steam-password"
-                        type="password"
-                        value={password}
-                        onChange={(event) => setPassword(event.target.value)}
-                        placeholder="Enter your Steam password"
-                        required
-                        autoComplete="current-password"
-                      />
-                    </div>
-
-                    <div className="form-group">
-                      <label htmlFor="auth-steam-guard">Steam Guard Code <span className="auth-modal__optional">Optional</span></label>
-                      <Input
-                        id="auth-steam-guard"
-                        type="text"
-                        value={steamGuard}
-                        onChange={(event) => setSteamGuard(event.target.value)}
-                        placeholder="Enter the Steam Guard code if Steam requests one"
-                        maxLength={5}
-                        autoComplete="one-time-code"
-                      />
-                      <small className="auth-modal__helper">Only required when Steam asks for a mobile or email verification code.</small>
-                    </div>
-                  </>
-                )}
-
-                <div className="settings-field auth-modal__preference">
-                  <div
-                    className="settings-toggle settings-toggle-button"
-                    onClick={(event) => {
-                      if (authMode === 'qr') return;
-                      if ((event.target as HTMLElement).closest('[data-slot="switch"]')) return;
-                      setSaveCredentials((checked) => !checked);
-                    }}
-                  >
-                    <Switch
-                      checked={saveCredentials}
-                      onCheckedChange={setSaveCredentials}
-                      disabled={authMode === 'qr'}
-                      aria-label="Remember credentials securely"
-                      className="settings-toggle__switch"
-                    />
-                    <span className="settings-toggle__copy">
-                      <strong>{authMode === 'qr' ? 'Remember QR session' : 'Remember credentials securely'}</strong>
-                      <small>{authMode === 'qr'
-                        ? 'DepotDownloader stores the remembered session, and SIMM stores only the account name needed to reuse it.'
-                        : 'Store this Steam login locally in encrypted form for future Steam authorization.'}</small>
-                    </span>
-                  </div>
-                </div>
-              </div>
-
+            {!required && (
               <div className="auth-modal__actions">
-                {!required && (
-                  <SimmButton type="button" onClick={onClose} className="btn btn-secondary">
-                    Cancel
-                  </SimmButton>
-                )}
-                <SimmButton type="submit" className="btn btn-primary" disabled={submitDisabled}>
-                  <Icon name={loading ? 'fas fa-spinner fa-spin' : authMode === 'qr' ? 'fas fa-mobile-screen-button' : 'fas fa-right-to-bracket'} spin={loading} />
-                  {loading ? 'Authenticating…' : authMode === 'qr' ? (qrListenerReady ? 'Start QR Login' : 'Preparing QR Login') : 'Authenticate with Steam'}
+                <SimmButton type="button" variant="outline" onClick={onClose}>
+                  Close
                 </SimmButton>
               </div>
-            </form>
+            )}
           </div>
+        ) : (
+          <form className="auth-modal__form" onSubmit={handleSubmit}>
+            <div className="ui-tabs-line auth-modal__tabs" role="tablist" aria-label="Steam authentication method">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={authMode === 'qr'}
+                className="ui-tabs-line__tab"
+                onClick={() => handleAuthModeChange('qr')}
+                disabled={loading}
+              >
+                <Icon name="mobileScreenButton" />
+                QR Code
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={authMode === 'password'}
+                className="ui-tabs-line__tab"
+                onClick={() => handleAuthModeChange('password')}
+                disabled={loading}
+              >
+                <Icon name="lock" />
+                Password
+              </button>
+            </div>
+
+            <div className="auth-modal__body">
+              <p className="auth-modal__expect">
+                {authMode === 'qr'
+                  ? 'Start the QR login, then scan the code below with the Steam Mobile App.'
+                  : 'Enter your Steam account details. If Steam Guard asks for approval, confirm it in the Steam Mobile App or enter the code below.'}
+              </p>
+
+              {error && <div className="ui-callout ui-callout--danger auth-modal__error" role="alert">{error}</div>}
+
+              {authMode === 'qr' ? (
+                <pre className={qrOutputClassName} aria-live="polite" data-testid="steam-auth-qr-output">
+                  {qrDisplayLines.length > 0
+                    ? qrDisplayLines.join('\n')
+                    : 'Select “Start QR Login” below to generate a QR code.'}
+                </pre>
+              ) : (
+                <div className="auth-modal__fields">
+                  <div className="auth-modal__field">
+                    <label htmlFor="auth-steam-username">Steam username</label>
+                    <Input
+                      id="auth-steam-username"
+                      type="text"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      required
+                      autoComplete="username"
+                    />
+                  </div>
+
+                  <div className="auth-modal__field">
+                    <label htmlFor="auth-steam-password">Steam password</label>
+                    <Input
+                      id="auth-steam-password"
+                      type="password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      required
+                      autoComplete="current-password"
+                    />
+                  </div>
+
+                  <div className="auth-modal__field">
+                    <label htmlFor="auth-steam-guard">Steam Guard code <span className="auth-modal__optional">(optional)</span></label>
+                    <Input
+                      id="auth-steam-guard"
+                      type="text"
+                      value={steamGuard}
+                      onChange={(event) => setSteamGuard(event.target.value)}
+                      placeholder="Only if Steam asks for one"
+                      maxLength={5}
+                      autoComplete="one-time-code"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {authMode === 'qr' ? (
+                <p className="auth-modal__note">
+                  <Icon name="lock" />
+                  <span>SIMM keeps only your Steam account name. DepotDownloader remembers the session for future installs.</span>
+                </p>
+              ) : (
+                <label className="auth-modal__remember">
+                  <Checkbox
+                    checked={saveCredentials}
+                    onCheckedChange={(checked) => setSaveCredentials(checked === true)}
+                    aria-label="Remember credentials securely"
+                  />
+                  <span className="auth-modal__remember-copy">
+                    <span>Remember credentials securely</span>
+                    <small>Stored encrypted on this device for future Steam authorization.</small>
+                  </span>
+                </label>
+              )}
+            </div>
+
+            <div className="auth-modal__actions">
+              {!required && (
+                <SimmButton type="button" variant="outline" onClick={onClose}>
+                  Cancel
+                </SimmButton>
+              )}
+              <SimmButton type="submit" disabled={submitDisabled}>
+                {loading && <Icon name="spinner" spin />}
+                {loading ? 'Authenticating…' : authMode === 'qr' ? (qrListenerReady ? 'Start QR Login' : 'Preparing QR Login') : 'Authenticate with Steam'}
+              </SimmButton>
+            </div>
+          </form>
         )}
       </SimmDialogContent>
     </Dialog>

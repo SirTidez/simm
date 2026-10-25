@@ -20,30 +20,10 @@ interface MessageOverlayProps {
 }
 
 const typeConfig = {
-  success: {
-    eyebrow: 'Completed',
-    icon: 'circleCheck',
-    tone: 'success',
-    headline: 'The requested action completed successfully.',
-  },
-  error: {
-    eyebrow: 'Attention Required',
-    icon: 'circleExclamation',
-    tone: 'danger',
-    headline: 'Something needs review before you continue.',
-  },
-  info: {
-    eyebrow: 'Information',
-    icon: 'circleInfo',
-    tone: 'info',
-    headline: 'Review this message before continuing.',
-  },
-} as const satisfies Record<MessageOverlayProps['type'] extends infer T ? Exclude<T, undefined> : never, {
-  eyebrow: string;
-  icon: IconName;
-  tone: string;
-  headline: string;
-}>;
+  success: { icon: 'circleCheck', tone: 'success' },
+  error: { icon: 'circleExclamation', tone: 'danger' },
+  info: { icon: 'circleInfo', tone: 'info' },
+} as const satisfies Record<NonNullable<MessageOverlayProps['type']>, { icon: IconName; tone: string }>;
 
 export function MessageOverlay({
   isOpen,
@@ -77,28 +57,24 @@ export function MessageOverlay({
         aria-describedby={messageId}
       >
         <DialogHeader className="modal-header app-dialog__header">
-          <div className="app-dialog__heading">
-            <span className="app-dialog__eyebrow">{config.eyebrow}</span>
+          <div className="app-dialog__title-row">
+            <span className="app-dialog__tone-icon" aria-hidden="true">
+              <Icon name={config.icon} />
+            </span>
             <DialogTitle id={titleId}>{title}</DialogTitle>
           </div>
-          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close message dialog">×</SimmButton>
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close message dialog">
+            <Icon name="times" />
+          </SimmButton>
         </DialogHeader>
 
         <div className="app-dialog__body">
-          <div className={`app-dialog__callout app-dialog__callout--${config.tone}`}>
-            <div className="app-dialog__icon" aria-hidden="true">
-              <Icon name={config.icon} />
-            </div>
-            <div className="app-dialog__meta">
-              <strong>{config.headline}</strong>
-              <DialogDescription id={messageId}>{message}</DialogDescription>
-            </div>
-          </div>
+          <DialogDescription id={messageId} className="app-dialog__message">{message}</DialogDescription>
         </div>
 
         <DialogFooter className="app-dialog__footer">
           <div className="app-dialog__actions">
-            <SimmButton className="btn btn-primary" onClick={onClose} autoFocus>
+            <SimmButton onClick={onClose} autoFocus>
               OK
             </SimmButton>
           </div>

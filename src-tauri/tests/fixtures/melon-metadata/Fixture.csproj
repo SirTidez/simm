@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>$(Case)</AssemblyName>
+    <DefineConstants>$(Case)</DefineConstants>
+    <AssemblyVersion Condition="'$(Case)' != 'Fallback'">9.8.7.6</AssemblyVersion>
+    <AssemblyVersion Condition="'$(Case)' == 'Fallback'">3.4.5.6</AssemblyVersion>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Fixture.cs" />
+    <Compile Include="Attributes.cs" Condition="'$(Case)' == 'Numeric'" />
+    <ProjectReference Include="Attributes.csproj" Condition="'$(Case)' != 'Numeric'" />
+  </ItemGroup>
+</Project>

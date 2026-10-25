@@ -3,7 +3,7 @@ param(
     [string] $Image = "simm-linux-builder:ubuntu22.04",
     [string] $UbuntuVersion = "22.04",
     [string] $BunVersion = "latest",
-    [string] $NodeVersion = "22.12.0",
+    [string] $NodeVersion = "22.23.4",
     [string] $RustToolchain = "stable",
     [switch] $SkipImageBuild,
     [switch] $Help

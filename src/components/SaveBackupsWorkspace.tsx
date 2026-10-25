@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 import { ApiService } from '../services/api';
 import type { GameSaveAccount, GameSaveBackup, GameSaveRestorePreview, GameSaveSlot } from '../types';
 import { getErrorMessage } from '../utils/errors';
+import { AnchoredContextMenu } from './AnchoredContextMenu';
 import { Icon } from './Icon';
 import { SimmButton, SimmDialogContent } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -19,7 +20,11 @@ const formatBytes = (bytes: number) => {
 const formatTimestamp = (value: string | null) => {
   if (!value) return 'Not available';
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleString(undefined, {
+      month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
 };
 
 const formatCurrency = (value: number) => new Intl.NumberFormat(undefined, {
@@ -43,6 +48,46 @@ const formatShortDate = (value: string) => {
     ? value
     : parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 };
+
+type SavesSelectOption = { value: string; label: string };
+
+const RETENTION_OPTIONS: SavesSelectOption[] = [
+  { value: 'all', label: 'All backups' },
+  { value: '3', label: '3 newest' },
+  { value: '5', label: '5 newest' },
+  { value: '10', label: '10 newest' },
+  { value: '20', label: '20 newest' },
+];
+
+function SavesSelect({ value, options, onValueChange, disabled, className, size, id, label, title }: {
+  value: string;
+  options: SavesSelectOption[];
+  onValueChange: (value: string) => void;
+  disabled?: boolean;
+  className?: string;
+  size?: 'sm' | 'default';
+  id?: string;
+  label?: string;
+  title?: string;
+}) {
+  return (
+    <Select
+      items={options}
+      value={value}
+      disabled={disabled}
+      onValueChange={(next) => { if (typeof next === 'string') onValueChange(next); }}
+    >
+      <SelectTrigger id={id} size={size} className={className} aria-label={label} title={title}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent align="start">
+        <SelectGroup>
+          {options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
 
 const accountLabel = (account: GameSaveAccount) => account.displayName ?? `Steam ID ${account.steamId}`;
 
@@ -90,7 +135,7 @@ const slotSummary = (slot: GameSaveSlot) => {
     slot.netWorth !== null ? `${formatCompactCurrency(slot.netWorth)} net worth` : null,
     slot.lastPlayedAt ? `Played ${formatShortDate(slot.lastPlayedAt)}` : null,
   ].filter((detail): detail is string => detail !== null);
-  return details.length > 0 ? details.join(' · ') : `${formatBytes(slot.sizeBytes)} · ${formatTimestamp(slot.lastModified)}`;
+  return details.length > 0 ? details.join(' · ') : `${formatBytes(slot.sizeBytes)} · Changed ${formatTimestamp(slot.lastModified)}`;
 };
 
 const exportFileName = (steamId: string, slotNumber: number) => {
@@ -109,14 +154,14 @@ const backupVersionLabel = (backup: GameSaveBackup, index: number) => {
       : date.toLocaleString(undefined, {
         month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
       });
-    return `${index === 0 ? 'Latest' : 'Backup'} · ${formatted}`;
+    return index === 0 ? `${formatted} (latest)` : formatted;
   }
-  return `Legacy backup — ${formatTimestamp(backup.lastModified)}`;
+  return `${formatTimestamp(backup.lastModified)} (legacy backup)`;
 };
 
 function SaveDetail({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
-  return <div className="save-backups-workspace__game-detail"><span>{label}</span><strong>{value}</strong></div>;
+  return <><dt>{label}</dt><dd>{value}</dd></>;
 }
 
 type PendingRestore = {
@@ -130,7 +175,7 @@ const previewCurrency = (value: number | null) => value === null ? '—' : forma
 const previewNumber = (value: number | null) => value === null ? '—' : formatNumber(value);
 const previewTimestamp = (value: string | null) => value ? formatTimestamp(value) : '—';
 
-const restorePreviewRows = (preview: GameSaveRestorePreview) => [
+const restorePreviewRows = (preview: GameSaveRestorePreview): Array<[string, string, string]> => [
   ['Organisation', previewText(preview.current.organizationName), previewText(preview.restored.organizationName)],
   ['Cash balance', previewCurrency(preview.current.cashBalance), previewCurrency(preview.restored.cashBalance)],
   ['Bank balance', previewCurrency(preview.current.onlineBalance), previewCurrency(preview.restored.onlineBalance)],
@@ -143,7 +188,21 @@ const restorePreviewRows = (preview: GameSaveRestorePreview) => [
   ['Save size', preview.current.exists ? formatBytes(preview.current.sizeBytes) : 'Empty slot', preview.restored.exists ? formatBytes(preview.restored.sizeBytes) : 'Unavailable'],
 ];
 
-export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
+const timeOf = (value: string | null) => {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+/** Restoring an older save is the one case that needs a warning: progress since then is replaced. */
+const restoreLosesProgress = (preview: GameSaveRestorePreview) => {
+  if (!preview.current.exists) return false;
+  const current = timeOf(preview.current.lastPlayedAt) ?? timeOf(preview.current.lastModified);
+  const restored = timeOf(preview.restored.lastPlayedAt) ?? timeOf(preview.restored.lastModified);
+  return current !== null && restored !== null && restored < current;
+};
+
+export function SaveBackupsWorkspace(_props: { onClose: () => void }) {
   const [status, setStatus] = useState<Awaited<ReturnType<typeof ApiService.getGameSaveBackupStatus>> | null>(null);
   const [selectedSteamId, setSelectedSteamId] = useState<string | null>(null);
   const [selectedSlotNumber, setSelectedSlotNumber] = useState(1);
@@ -157,6 +216,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
   const [pendingRestore, setPendingRestore] = useState<PendingRestore | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [folderMenu, setFolderMenu] = useState<{ x: number; y: number } | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -334,119 +394,161 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const losesProgress = pendingRestore ? restoreLosesProgress(pendingRestore.preview) : false;
+
   return (
-    <section className="save-backups-workspace workspace-panel">
-      <WorkspacePageHeader
-        eyebrow="Recovery"
-        title="Save Management"
-        description="Inspect, back up, export, and explicitly restore the five Schedule I save slots."
-      >
-        <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void refresh()} disabled={loading || selectionLocked}>
-          <Icon name="rotate" /> Refresh
-        </SimmButton>
-        <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenSaveFolder()} disabled={!selectedAccount}>
-          <Icon name="folderOpen" /> Open saves
-        </SimmButton>
-        <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenGameBackupFolder()} disabled={!selectedAccount}>
-          <Icon name="folderOpen" /> Open game backups
-        </SimmButton>
-        <SimmButton type="button" variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close save management">
-          <Icon name="times" />
-        </SimmButton>
-      </WorkspacePageHeader>
+    <section className="save-backups-workspace workspace-panel ui-page" aria-label="Saves">
+      <header className="ui-page-header">
+        <div className="ui-page-header__titles">
+          <h1 className="ui-page-title">Saves</h1>
+          {selectedAccount && (
+            <p className="ui-page-subtitle save-backups-workspace__location" title={selectedAccount.path}>
+              <code>{selectedAccount.path}</code>
+            </p>
+          )}
+        </div>
+        <div className="ui-toolbar">
+          {status?.available && status.accounts.length > 0 && selectedAccount && (
+            <SavesSelect
+              className="save-backups-workspace__account"
+              label="Steam account"
+              title={`Steam ID ${selectedAccount.steamId}`}
+              value={selectedAccount.steamId}
+              options={status.accounts.map((account) => ({ value: account.steamId, label: accountLabel(account) }))}
+              onValueChange={setSelectedSteamId}
+              disabled={selectionLocked}
+            />
+          )}
+          <SimmButton
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => void refresh()}
+            disabled={loading || selectionLocked}
+            aria-label="Refresh saves"
+            title="Refresh saves"
+          >
+            <Icon name="rotate" spin={loading} />
+          </SimmButton>
+          <SimmButton
+            type="button"
+            variant="ghost"
+            size="icon"
+            disabled={!selectedAccount}
+            aria-label="Open folders"
+            aria-haspopup="menu"
+            aria-expanded={folderMenu !== null}
+            title="Open folders"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setFolderMenu((current) => current ? null : { x: rect.right - 208, y: rect.bottom + 4 });
+            }}
+          >
+            <Icon name="folderOpen" />
+          </SimmButton>
+        </div>
+      </header>
 
-      {error && <div className="save-backups-workspace__alert save-backups-workspace__alert--error" role="alert">{error}</div>}
-      {notice && <div className="save-backups-workspace__alert save-backups-workspace__alert--success" role="status">{notice}</div>}
+      {error && (
+        <div className="ui-callout ui-callout--danger save-backups-workspace__message" role="alert">
+          <Icon name="circleExclamation" />
+          <span>{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div className="save-backups-workspace__notice" role="status">
+          <Icon name="check" />
+          <span>{notice}</span>
+          <SimmButton type="button" variant="ghost" size="icon-sm" aria-label="Dismiss message" onClick={() => setNotice(null)}>
+            <Icon name="times" />
+          </SimmButton>
+        </div>
+      )}
 
-      {loading ? (
-        <div className="save-backups-workspace__empty" role="status">Inspecting local save slots…</div>
+      {loading && !status ? (
+        <div className="save-backups-workspace__loading" role="status" aria-label="Inspecting local save slots">
+          {[0, 1, 2, 3, 4].map((index) => <span key={index} className="save-backups-workspace__skeleton" />)}
+        </div>
       ) : !status?.available ? (
-        <div className="save-backups-workspace__empty">
-          <Icon name="circleInfo" />
-          <strong>Save management is not available yet</strong>
-          <span>{status?.message ?? 'No local Schedule I save data was found.'}</span>
+        <div className="ui-empty">
+          <span className="ui-empty__emblem" aria-hidden="true"><Icon name="save" /></span>
+          <p className="ui-empty__title">No Schedule I saves found</p>
+          <p className="ui-empty__copy">{status?.message ?? 'Start Schedule I once so it creates its save folder, then refresh.'}</p>
+          <SimmButton type="button" variant="secondary" onClick={() => void refresh()} disabled={loading}>
+            <Icon name="rotate" /> Refresh
+          </SimmButton>
         </div>
       ) : !selectedAccount ? (
-        <div className="save-backups-workspace__empty">
-          <Icon name="folderOpen" />
-          <strong>No Steam save account found</strong>
-          <span>Start Schedule I once, then refresh this page to find its local save folders.</span>
+        <div className="ui-empty">
+          <span className="ui-empty__emblem" aria-hidden="true"><Icon name="userCircle" /></span>
+          <p className="ui-empty__title">No Steam save account found</p>
+          <p className="ui-empty__copy">Start Schedule I once, then refresh this page to find its local save folders.</p>
+          <SimmButton type="button" variant="secondary" onClick={() => void refresh()} disabled={loading}>
+            <Icon name="rotate" /> Refresh
+          </SimmButton>
         </div>
       ) : (
-        <>
-          <section className="save-backups-workspace__context" aria-label="Selected save account">
-            <div className="save-backups-workspace__location">
-              <strong className="save-backups-workspace__location-title">Schedule I save location</strong>
-              <code className="save-backups-workspace__location-path" title={selectedAccount.path}>{selectedAccount.path}</code>
-            </div>
-            <label>
-              <span>Steam account</span>
-              <select value={selectedAccount.steamId} onChange={(event) => setSelectedSteamId(event.target.value)} disabled={selectionLocked}>
-                {status.accounts.map((account) => <option key={account.steamId} value={account.steamId}>{accountLabel(account)}</option>)}
-              </select>
-              <small>{selectedAccount.displayName ? `Steam ID ${selectedAccount.steamId}` : 'Steam display name is unavailable for this profile.'}</small>
-            </label>
-            <label className="save-backups-workspace__retention" title="Applies only when you explicitly create a backup. SIMM keeps the newest game-style snapshots.">
-              <span>Keep backups</span>
-              <select
-                value={backupRetentionLimit ?? 'all'}
-                onChange={(event) => setBackupRetentionLimit(event.target.value === 'all' ? null : Number(event.target.value))}
-                disabled={selectionLocked}
-              >
-                <option value="all">Keep all</option>
-                <option value="3">3 newest</option>
-                <option value="5">5 newest</option>
-                <option value="10">10 newest</option>
-                <option value="20">20 newest</option>
-              </select>
-              <small>Applies when you create a backup.</small>
-            </label>
-          </section>
-
-          <div className="save-backups-workspace__layout">
-            <section className="save-backups-workspace__slot-list" aria-labelledby="save-slots-heading">
-              <header className="save-backups-workspace__section-heading">
-                <div><span>Game saves</span><h3 id="save-slots-heading">Save slots</h3></div>
-                <strong>{localSaveCount} {localSaveCount === 1 ? 'slot' : 'slots'}</strong>
-              </header>
-              <div className="save-backups-workspace__slots">
-                {selectedAccount.slots.map((slot) => {
-                  const selected = slot.slotNumber === selectedSlotNumber;
-                  return (
-                    <SimmButton
-                      key={slot.slotNumber}
+        <div className="save-backups-workspace__layout">
+          <section className="save-backups-workspace__slot-list" aria-labelledby="save-slots-heading">
+            <h2 id="save-slots-heading" className="save-backups-workspace__list-title">
+              Save slots
+              <span>{localSaveCount} of {selectedAccount.slots.length} in use</span>
+            </h2>
+            <ul className="save-backups-workspace__slots">
+              {selectedAccount.slots.map((slot) => {
+                const selected = slot.slotNumber === selectedSlotNumber;
+                return (
+                  <li key={slot.slotNumber}>
+                    <button
                       type="button"
-                      variant="ghost"
                       className={`save-backups-workspace__slot${selected ? ' save-backups-workspace__slot--selected' : ''}${slot.exists ? '' : ' save-backups-workspace__slot--missing'}`}
                       onClick={() => setSelectedSlotNumber(slot.slotNumber)}
                       disabled={selectionLocked}
-                      aria-current={selected ? 'page' : undefined}
+                      aria-current={selected ? 'true' : undefined}
                     >
                       <span className="save-backups-workspace__slot-number">{slot.slotNumber}</span>
-                      <span className="save-backups-workspace__slot-copy">
-                        <strong>{slot.exists ? slotLabel(slot) : 'Empty slot'}</strong>
-                        <small>{slot.exists ? slotSummary(slot) : 'No local save data'}</small>
-                      </span>
-                      <span className={`save-backups-workspace__backup-state${slot.backup ? ' save-backups-workspace__backup-state--ready' : ''}`}>
-                        <Icon name={slot.backup ? 'check' : 'minus'} /> {slot.backup ? 'Backed up' : 'No backup'}
-                      </span>
-                    </SimmButton>
-                  );
-                })}
-              </div>
-            </section>
+                      <span className="save-backups-workspace__slot-name ui-truncate">{slot.exists ? slotLabel(slot) : 'Empty slot'}</span>
+                      {slot.exists && !slot.backup && <span className="ui-tag">No backup</span>}
+                      <span className="save-backups-workspace__slot-meta ui-truncate">{slot.exists ? slotSummary(slot) : 'No local save data'}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
 
-            <aside className="save-backups-workspace__inspector" aria-label="Selected save slot details">
-              <header className="save-backups-workspace__section-heading">
-                <div><span>Selected slot</span><h3>{selectedSlot ? slotLabel(selectedSlot) : 'Slot'}</h3></div>
-                <Icon name="save" />
-              </header>
-              {selectedSlot && (
-                <div className="save-backups-workspace__inspector-body">
-                  <div className="save-backups-workspace__detail-row"><span>Current save</span><strong>{selectedSlot.exists ? formatBytes(selectedSlot.sizeBytes) : 'Not present'}</strong></div>
-                  <div className="save-backups-workspace__detail-row"><span>Last changed</span><strong>{selectedSlot.exists ? formatTimestamp(selectedSlot.lastModified) : '—'}</strong></div>
-                  {(selectedSlot.cashBalance !== null || selectedSlot.onlineBalance !== null || selectedSlot.netWorth !== null || selectedSlot.rank !== null || selectedSlot.totalXp !== null || selectedSlot.createdAt || selectedSlot.lastPlayedAt || selectedSlot.lastSaveVersion) && (
-                    <section className="save-backups-workspace__game-details" aria-label="Game save details">
+          <section className="save-backups-workspace__detail" aria-label="Selected save slot details">
+            {selectedSlot && (
+              <>
+                <header className="save-backups-workspace__detail-header">
+                  <div className="save-backups-workspace__detail-titles">
+                    <h2 className="save-backups-workspace__detail-title">{selectedSlot.exists ? slotLabel(selectedSlot) : `Slot ${selectedSlot.slotNumber}`}</h2>
+                    <div className="ui-meta">
+                      <span>Slot {selectedSlot.slotNumber}</span>
+                      {selectedSlot.exists ? (
+                        <>
+                          <span>{formatBytes(selectedSlot.sizeBytes)}</span>
+                          <span>Changed {formatTimestamp(selectedSlot.lastModified)}</span>
+                        </>
+                      ) : <span>Empty</span>}
+                    </div>
+                  </div>
+                  <div className="save-backups-workspace__detail-actions">
+                    <SimmButton type="button" variant="secondary" disabled={!selectedSlot.exists || busy} onClick={() => void handleExport()}>
+                      <Icon name={exportInProgress ? 'spinner' : 'download'} spin={exportInProgress} />
+                      {exportInProgress ? 'Exporting…' : 'Export ZIP'}
+                    </SimmButton>
+                    <SimmButton type="button" disabled={!selectedSlot.exists || busy} onClick={() => void handleBackup()}>
+                      <Icon name={backupInProgress ? 'spinner' : 'save'} spin={backupInProgress} />
+                      {backupInProgress ? 'Backing Up…' : 'Back Up Now'}
+                    </SimmButton>
+                  </div>
+                </header>
+
+                {selectedSlot.exists && (selectedSlot.cashBalance !== null || selectedSlot.onlineBalance !== null || selectedSlot.netWorth !== null || selectedSlot.rank !== null || selectedSlot.totalXp !== null || selectedSlot.createdAt || selectedSlot.lastPlayedAt || selectedSlot.lastSaveVersion) && (
+                  <section className="save-backups-workspace__section" aria-label="Game save details">
+                    <h3 className="ui-section-title">Save</h3>
+                    <dl className="ui-kv save-backups-workspace__facts">
                       {selectedSlot.cashBalance !== null && <SaveDetail label="Cash balance" value={formatCurrency(selectedSlot.cashBalance)} />}
                       {selectedSlot.onlineBalance !== null && <SaveDetail label="Bank balance" value={formatCurrency(selectedSlot.onlineBalance)} />}
                       {selectedSlot.netWorth !== null && <SaveDetail label="Net worth" value={formatCurrency(selectedSlot.netWorth)} />}
@@ -455,99 +557,128 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
                       {selectedSlot.createdAt && <SaveDetail label="Created" value={formatTimestamp(selectedSlot.createdAt)} />}
                       {selectedSlot.lastPlayedAt && <SaveDetail label="Last played" value={formatTimestamp(selectedSlot.lastPlayedAt)} />}
                       {selectedSlot.lastSaveVersion && <SaveDetail label="Save version" value={selectedSlot.lastSaveVersion} />}
-                    </section>
-                  )}
-                  <div className="save-backups-workspace__backup-detail">
-                    <div className="save-backups-workspace__backup-summary">
-                      <span>{selectedSlot.backups.length === 1 ? 'Game backup' : 'Game backups'}</span>
-                      {selectedGameBackup && <small>{selectedSlot.backups.length} available · {formatBytes(selectedGameBackup.sizeBytes)}</small>}
-                    </div>
+                      <dt>Location</dt>
+                      <dd className="ui-mono save-backups-workspace__path" title={selectedSlot.path}>{selectedSlot.path}</dd>
+                    </dl>
+                  </section>
+                )}
+
+                <section className="save-backups-workspace__section" aria-label="Backup options">
+                  <h3 className="ui-section-title">Backups</h3>
+                  <dl className="ui-kv save-backups-workspace__facts">
+                    <dt>Available</dt>
+                    <dd>
+                      {selectedSlot.backups.length === 0
+                        ? 'No backup yet'
+                        : `${selectedSlot.backups.length} ${selectedSlot.backups.length === 1 ? 'backup' : 'backups'}${selectedGameBackup ? ` · latest ${formatBytes(selectedGameBackup.sizeBytes)}` : ''}`}
+                    </dd>
+                    <dt><label htmlFor="save-backups-retention">Keep</label></dt>
+                    <dd>
+                      <SavesSelect
+                        id="save-backups-retention"
+                        size="sm"
+                        className="save-backups-workspace__inline-select"
+                        value={backupRetentionLimit === null ? 'all' : String(backupRetentionLimit)}
+                        options={RETENTION_OPTIONS}
+                        onValueChange={(next) => setBackupRetentionLimit(next === 'all' ? null : Number(next))}
+                        disabled={selectionLocked}
+                        title="Applies when you back up. SIMM keeps the newest game-style snapshots."
+                      />
+                    </dd>
+                  </dl>
+                </section>
+
+                <section className="save-backups-workspace__section" aria-label="Restore options">
+                  <h3 className="ui-section-title">Restore</h3>
+                  <p className="save-backups-workspace__hint">
+                    You see a preview of the changes first. SIMM backs up the current save before replacing it, so you can roll back.
+                  </p>
+                  <div className="save-backups-workspace__restore-row">
                     {selectedGameBackup ? (
-                      <label className="save-backups-workspace__backup-picker">
-                        <span className="sr-only">Game backup version</span>
-                        <select
-                          value={selectedGameBackup.path}
-                          onChange={(event) => setSelectedBackupPath(event.target.value)}
-                          disabled={selectionLocked}
-                          aria-label="Select a game backup version to restore"
-                        >
-                          {selectedSlot.backups.map((backup, index) => (
-                            <option key={backup.path} value={backup.path}>{backupVersionLabel(backup, index)}</option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : <strong className="save-backups-workspace__backup-empty">No backup yet</strong>}
+                      <SavesSelect
+                        className="save-backups-workspace__restore-select"
+                        label="Select a game backup version to restore"
+                        value={selectedGameBackup.path}
+                        options={selectedSlot.backups.map((backup, index) => ({ value: backup.path, label: backupVersionLabel(backup, index) }))}
+                        onValueChange={setSelectedBackupPath}
+                        disabled={selectionLocked}
+                      />
+                    ) : (
+                      <span className="save-backups-workspace__hint">Back up this slot to restore it later.</span>
+                    )}
+                    <SimmButton type="button" variant="secondary" disabled={!selectedGameBackup || busy} onClick={() => void handleRestoreGameBackup()}>
+                      <Icon name={previewInProgress ? 'spinner' : 'rotateLeft'} spin={previewInProgress} />
+                      Restore Game Backup…
+                    </SimmButton>
+                    <SimmButton type="button" variant="ghost" disabled={busy} onClick={() => void handleRestoreZip()}>
+                      <Icon name="upload" />
+                      Restore From ZIP…
+                    </SimmButton>
                   </div>
-                  <div className="save-backups-workspace__path-row">
-                    <p className="save-backups-workspace__path" title={selectedSlot.path}>{selectedSlot.path}</p>
-                    <span
-                      className="save-backups-workspace__info-hint"
-                      tabIndex={0}
-                      role="img"
-                      aria-label="Backup and restore information"
-                      title={`Game backups are timestamped snapshots in backups\\SaveGame_${selectedSlot.slotNumber}. Restores create an automatic rollback backup before replacing the active save.`}
-                    >
-                      <Icon name="circleInfo" />
-                    </span>
-                  </div>
-                  <section className="save-backups-workspace__action-group" aria-label="Backup options">
-                    <span>Backup</span>
-                    <div className="save-backups-workspace__inspector-actions">
-                      <SimmButton type="button" className="btn btn-primary" disabled={!selectedSlot.exists || busy} onClick={() => void handleBackup()}>
-                        <Icon name={backupInProgress ? 'spinner' : 'save'} spin={backupInProgress} />
-                        {backupInProgress ? 'Updating backup…' : `Back up ${slotLabel(selectedSlot)}`}
-                      </SimmButton>
-                      <SimmButton type="button" className="btn btn-secondary" disabled={!selectedSlot.exists || busy} onClick={() => void handleExport()}>
-                        <Icon name={exportInProgress ? 'spinner' : 'download'} spin={exportInProgress} />
-                        {exportInProgress ? 'Exporting ZIP…' : 'Export ZIP'}
-                      </SimmButton>
-                    </div>
-                  </section>
-                  <section className="save-backups-workspace__action-group" aria-label="Restore options">
-                    <span>Restore</span>
-                    <p className="save-backups-workspace__restore-note">Choose a source to preview its changes before replacing this slot.</p>
-                    <div className="save-backups-workspace__inspector-actions">
-                      <SimmButton type="button" className="btn btn-secondary" disabled={!selectedGameBackup || busy} onClick={() => void handleRestoreGameBackup()}>
-                        <Icon name={restoreInProgress ? 'spinner' : 'rotateLeft'} spin={restoreInProgress} />
-                        {restoreInProgress ? 'Restoring…' : 'Restore game backup'}
-                      </SimmButton>
-                      <SimmButton type="button" className="btn btn-secondary" disabled={busy} onClick={() => void handleRestoreZip()}>
-                        <Icon name={restoreInProgress ? 'spinner' : 'upload'} spin={restoreInProgress} />
-                        {restoreInProgress ? 'Restoring…' : 'Restore ZIP'}
-                      </SimmButton>
-                    </div>
-                  </section>
-                </div>
-              )}
-            </aside>
-          </div>
-        </>
+                </section>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+
+      {folderMenu && selectedAccount && (
+        <AnchoredContextMenu
+          id="save-folder-actions"
+          x={folderMenu.x}
+          y={folderMenu.y}
+          onClose={() => setFolderMenu(null)}
+          items={[
+            { key: 'saves', label: 'Open Save Folder', icon: 'folderOpen', onSelect: () => void handleOpenSaveFolder() },
+            { key: 'backups', label: 'Open Backup Folder', icon: 'folderOpen', onSelect: () => void handleOpenGameBackupFolder() },
+          ]}
+        />
       )}
 
       <Dialog open={pendingRestore !== null} onOpenChange={(isOpen) => { if (!isOpen && !restoreInProgress) setPendingRestore(null); }}>
         <SimmDialogContent className="app-dialog save-restore-preview" showCloseButton={false} aria-label="Save restore preview">
           <DialogHeader className="modal-header app-dialog__header">
-            <div className="app-dialog__heading"><span className="app-dialog__eyebrow">Restore preview</span><DialogTitle>Review save changes</DialogTitle></div>
+            <div className="app-dialog__heading"><DialogTitle>Review save changes</DialogTitle></div>
             <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setPendingRestore(null)} disabled={restoreInProgress} aria-label="Close restore preview"><Icon name="times" /></SimmButton>
           </DialogHeader>
           {pendingRestore && <div className="app-dialog__body save-restore-preview__body">
-            <DialogDescription>{pendingRestore.preview.sourceLabel} will replace SaveGame_{pendingRestore.preview.slotNumber}. Review the current and restored values below.</DialogDescription>
-            <div className="save-restore-preview__table-wrap">
-              <table>
-                <thead><tr><th scope="col">Field</th><th scope="col">Current</th><th scope="col">Restored</th></tr></thead>
-                <tbody>{restorePreviewRows(pendingRestore.preview).map(([field, current, restored]) => (
-                  <tr key={field} className={current === restored ? 'save-restore-preview__row--same' : 'save-restore-preview__row--changed'}>
-                    <th scope="row">{field}</th><td>{current}</td><td>{restored}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-            <p className="save-restore-preview__warning"><Icon name="triangleExclamation" /> Restoring replaces the active slot. SIMM will first create and validate an automatic rollback backup.</p>
+            <DialogDescription>
+              {pendingRestore.preview.sourceLabel} will replace SaveGame_{pendingRestore.preview.slotNumber}.
+            </DialogDescription>
+            {losesProgress && (
+              <div className="ui-callout ui-callout--warn save-restore-preview__callout">
+                <Icon name="triangleExclamation" />
+                <span>
+                  This backup is older than the current save. Progress since
+                  {' '}{formatTimestamp(pendingRestore.preview.restored.lastPlayedAt ?? pendingRestore.preview.restored.lastModified)} will be replaced.
+                </span>
+              </div>
+            )}
+            <table className="ui-table save-restore-preview__table">
+              <thead><tr><th scope="col">Field</th><th scope="col">Change</th></tr></thead>
+              <tbody>{restorePreviewRows(pendingRestore.preview).map(([field, current, restored]) => (
+                <tr key={field} className={current === restored ? 'save-restore-preview__row--same' : 'save-restore-preview__row--changed'}>
+                  <th scope="row">{field}</th>
+                  <td>
+                    {current === restored ? (
+                      <span className="save-restore-preview__same">{current}</span>
+                    ) : (
+                      <span className="save-restore-preview__change">
+                        <span>{current}</span>
+                        <span className="save-restore-preview__arrow" aria-label="becomes">→</span>
+                        <strong>{restored}</strong>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+            <p className="save-restore-preview__note">SIMM first creates and checks a rollback backup of the current save.</p>
           </div>}
           <DialogFooter className="app-dialog__footer"><div className="app-dialog__actions">
-            <SimmButton type="button" className="btn btn-secondary" onClick={() => setPendingRestore(null)} disabled={restoreInProgress}>Cancel</SimmButton>
-            <SimmButton type="button" className="btn btn-primary" onClick={() => void handleConfirmRestore()} disabled={restoreInProgress}>
-              <Icon name={restoreInProgress ? 'spinner' : 'rotateLeft'} spin={restoreInProgress} /> {restoreInProgress ? 'Restoring…' : 'Restore this save'}
+            <SimmButton type="button" variant="ghost" onClick={() => setPendingRestore(null)} disabled={restoreInProgress}>Cancel</SimmButton>
+            <SimmButton type="button" onClick={() => void handleConfirmRestore()} disabled={restoreInProgress}>
+              <Icon name={restoreInProgress ? 'spinner' : 'rotateLeft'} spin={restoreInProgress} /> {restoreInProgress ? 'Restoring…' : 'Restore This Save'}
             </SimmButton>
           </div></DialogFooter>
         </SimmDialogContent>

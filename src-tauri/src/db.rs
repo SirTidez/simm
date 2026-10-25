@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -62,7 +63,7 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
         .await
         .context("Failed to open SQLite database")?;
 
-    let migrator = sqlx::migrate!();
+    let migrator = normalized_migrator();
     maybe_create_startup_backup(&pool, &migrator, database_preexisted).await?;
     reconcile_historical_migration_checksums(&pool, &migrator).await?;
     if let Err(err) = migrator.run(&pool).await {
@@ -110,6 +111,53 @@ pub fn get_backups_dir() -> Result<PathBuf> {
     let backups_dir = get_data_dir()?.join("backups");
     std::fs::create_dir_all(&backups_dir).context("Failed to create backups directory")?;
     Ok(backups_dir)
+}
+
+/// Convert embedded migration scripts to the repository's canonical CRLF form.
+/// SQLx hashes migration bytes verbatim, so this keeps migrations deterministic
+/// even when a build checkout supplies LF files.
+fn normalize_lf_to_crlf(sql: &str) -> String {
+    let mut normalized = String::with_capacity(sql.len());
+    let mut characters = sql.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                normalized.push('\r');
+                if characters.peek().copied() == Some('\n') {
+                    let _ = characters.next();
+                    normalized.push('\n');
+                }
+            }
+            '\n' => normalized.push_str("\r\n"),
+            _ => normalized.push(character),
+        }
+    }
+
+    normalized
+}
+
+fn normalized_migrator() -> sqlx::migrate::Migrator {
+    let embedded = sqlx::migrate!();
+    let migrations = embedded
+        .iter()
+        .map(|migration| {
+            sqlx::migrate::Migration::new(
+                migration.version,
+                migration.description.clone(),
+                migration.migration_type,
+                Cow::Owned(normalize_lf_to_crlf(&migration.sql)),
+                migration.no_tx,
+            )
+        })
+        .collect();
+
+    sqlx::migrate::Migrator {
+        migrations: Cow::Owned(migrations),
+        ignore_missing: embedded.ignore_missing,
+        locking: embedded.locking,
+        no_tx: embedded.no_tx,
+    }
 }
 
 fn get_data_dir_override() -> Option<PathBuf> {
@@ -520,6 +568,18 @@ async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool> {
     Ok(exists.is_some())
 }
 
+async fn table_definition_contains(pool: &SqlitePool, table: &str, fragment: &str) -> Result<bool> {
+    let definition: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("Failed to inspect definition for table {table}"))?;
+    Ok(definition
+        .map(|definition| definition.contains(fragment))
+        .unwrap_or(false))
+}
+
 /// A checksum is reconciled only when the concrete objects introduced by that
 /// exact historical migration are present. Merely having the foundational
 /// table names is not sufficient evidence that an altered migration ran.
@@ -552,6 +612,13 @@ async fn migration_schema_invariant(pool: &SqlitePool, version: i64) -> Result<b
             && index_exists(pool, "idx_environment_deletion_journal_state").await?),
         9 => Ok(table_exists(pool, "telemetry_upload_sessions").await?
             && index_exists(pool, "idx_telemetry_upload_sessions_queue").await?),
+        10 => Ok(table_exists(pool, "mod_integration_config").await?
+            && table_exists(pool, "mod_integration_requests").await?
+            && index_exists(pool, "idx_mod_integration_requests_environment_status").await?),
+        11 => Ok(table_exists(pool, "mod_integration_requests").await?
+            && table_definition_contains(pool, "mod_integration_requests", "requestManagement")
+                .await?
+            && index_exists(pool, "idx_mod_integration_requests_environment_status").await?),
         _ => Ok(false),
     }
 }
@@ -641,7 +708,7 @@ pub async fn repair_database(pool: &SqlitePool) -> Result<PathBuf> {
     let backup_path = create_database_backup(pool, "pre-repair").await?;
     ensure_additive_schema(pool).await?;
     crate::services::settings::SettingsService::repair_corrupt_settings(pool).await?;
-    let migrator = sqlx::migrate!();
+    let migrator = normalized_migrator();
     reconcile_historical_migration_checksums(pool, &migrator).await?;
     migrator
         .run(pool)
@@ -1536,6 +1603,7 @@ mod tests {
     use super::*;
     use crate::types::{EnvironmentStatus, LogLevel, ModSource, Platform, Runtime};
     use serial_test::serial;
+    use sha2::{Digest, Sha384};
     use std::collections::HashMap;
     use tempfile::tempdir;
     use tokio::fs;
@@ -1566,6 +1634,37 @@ mod tests {
             } else {
                 std::env::remove_var(self.key);
             }
+        }
+    }
+
+    #[test]
+    fn normalize_lf_to_crlf_preserves_existing_crlf() {
+        assert_eq!(
+            normalize_lf_to_crlf("one\ntwo\r\nthree\rfour"),
+            "one\r\ntwo\r\nthree\rfour"
+        );
+    }
+
+    #[test]
+    fn normalized_migrator_uses_crlf_sql_and_matching_checksums() {
+        let migrator = normalized_migrator();
+
+        for migration in migrator.iter() {
+            let sql = migration.sql.as_bytes();
+            for (index, byte) in sql.iter().enumerate() {
+                if *byte == b'\n' {
+                    assert!(
+                        index > 0 && sql[index - 1] == b'\r',
+                        "migration {} contains an LF-only newline",
+                        migration.version
+                    );
+                }
+            }
+
+            assert_eq!(
+                migration.checksum.as_ref(),
+                Sha384::digest(migration.sql.as_bytes()).as_slice()
+            );
         }
     }
 
@@ -1923,7 +2022,7 @@ mod tests {
             sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&*repaired_pool)
                 .await?;
-        let expected: Vec<(i64, Vec<u8>)> = sqlx::migrate!()
+        let expected: Vec<(i64, Vec<u8>)> = normalized_migrator()
             .iter()
             .map(|migration| (migration.version, migration.checksum.as_ref().to_vec()))
             .collect();
@@ -2163,7 +2262,7 @@ mod tests {
             .execute(&*pool)
             .await?;
 
-        let migrator = sqlx::migrate!();
+        let migrator = normalized_migrator();
         assert!(database_requires_migration_backup(&pool, &migrator).await?);
 
         Ok(())
@@ -2187,7 +2286,7 @@ mod tests {
             .execute(&*pool)
             .await?;
 
-        let migrator = sqlx::migrate!();
+        let migrator = normalized_migrator();
         reconcile_historical_migration_checksums(&pool, &migrator).await?;
         let retained: Vec<u8> =
             sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
@@ -2195,6 +2294,38 @@ mod tests {
                 .fetch_one(&*pool)
                 .await?;
         assert_eq!(retained, mismatched);
+
+        for version in [10_i64, 11_i64] {
+            let migration = migrator
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("test migration should exist");
+            let lf_sql = migration.sql.replace("\r\n", "\n");
+            let lf_checksum = Sha384::digest(lf_sql.as_bytes()).to_vec();
+            assert_ne!(lf_checksum, migration.checksum.as_ref());
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+                .bind(lf_checksum)
+                .bind(version)
+                .execute(&*pool)
+                .await?;
+        }
+
+        reconcile_historical_migration_checksums(&pool, &migrator).await?;
+        for version in [10_i64, 11_i64] {
+            let reconciled: Vec<u8> =
+                sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                    .bind(version)
+                    .fetch_one(&*pool)
+                    .await?;
+            let expected = migrator
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("test migration should exist")
+                .checksum
+                .as_ref()
+                .to_vec();
+            assert_eq!(reconciled, expected);
+        }
 
         Ok(())
     }

@@ -1,22 +1,26 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
-import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 
 import { ApiService } from '../services/api';
+import { onPluginsChanged as subscribePluginsChanged } from '../services/events';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
+import { ModThumbnail, type ModArtwork, type ModThumbnailSize } from './media/ModThumbnail';
+import { useModArtwork } from './media/useModArtwork';
 import { SimmButton } from './primitives';
-import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface PluginInfo {
   name: string;
   fileName: string;
   path: string;
   version?: string;
+  author?: string;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   relatedMod?: string;
   disabled?: boolean;
@@ -48,28 +52,38 @@ function getPluginSourceLabel(source?: PluginInfo['source']): string {
   }
 }
 
-function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+/** Library artwork when the file belongs to a known mod, otherwise a neutral type glyph in the same box. */
+function AssetThumbnail({
+  artwork,
+  name,
+  glyph,
+  size,
+}: {
+  artwork: ModArtwork | null;
+  name: string;
+  glyph: string;
+  size: ModThumbnailSize;
+}) {
+  if (artwork) return <ModThumbnail {...artwork} name={name} size={size} />;
   return (
-    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
+    <span className="ui-thumb" style={{ '--ui-thumb-size': `${size}px` } as CSSProperties} aria-hidden="true">
+      <Icon name={glyph} />
+    </span>
   );
 }
 
-function InspectorEmpty({ children }: { children: string }) {
-  return (
-    <Empty className="workspace-collection__inspector-empty">
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
-  );
+/** True when a click landed on a control inside a row (switch, button), not on the row itself. */
+function isInteractiveTarget(target: EventTarget | null, row: HTMLElement): boolean {
+  if (!(target instanceof Element)) return false;
+  const control = target.closest('button, a, input, select, textarea, [role="switch"], [role="checkbox"]');
+  return Boolean(control && row.contains(control));
 }
 
 export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Props) {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  const lookupArtwork = useModArtwork();
+  const pluginArtwork = (plugin: PluginInfo) =>
+    lookupArtwork(plugin.relatedMod) ?? lookupArtwork(plugin.fileName) ?? lookupArtwork(plugin.name);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pluginsDirectory, setPluginsDirectory] = useState('');
@@ -89,6 +103,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
   } | null>(null);
   const [togglingPluginKey, setTogglingPluginKey] = useState<string | null>(null);
   const environmentGenerationRef = useRef(0);
+  const loadRequestRef = useRef(0);
 
   const loadEnvironment = useCallback(async (generation = environmentGenerationRef.current) => {
     const requestedEnvironmentId = environmentId;
@@ -101,25 +116,26 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
     }
   }, [environmentId]);
 
-  const loadPlugins = useCallback(async (generation = environmentGenerationRef.current) => {
+  const loadPlugins = useCallback(async (generation = environmentGenerationRef.current, showSpinner = true) => {
+    const request = ++loadRequestRef.current;
     const requestedEnvironmentId = environmentId;
-    setLoading(true);
-    setError(null);
+    if (showSpinner) { setLoading(true); setError(null); }
 
     try {
       const result = await ApiService.getPlugins(requestedEnvironmentId);
-      if (generation !== environmentGenerationRef.current) return;
+      if (generation !== environmentGenerationRef.current || request !== loadRequestRef.current) return;
       setPlugins(result.plugins.map((plugin) => ({
         ...plugin,
         source: plugin.source as PluginInfo['source'],
       })));
       setPluginsDirectory(result.pluginsDirectory);
+      setError(null);
     } catch (err) {
-      if (generation !== environmentGenerationRef.current) return;
-      setPlugins([]);
+      if (generation !== environmentGenerationRef.current || request !== loadRequestRef.current) return;
+      if (showSpinner) setPlugins([]);
       setError(err instanceof Error ? err.message : 'Failed to load plugins');
     } finally {
-      if (generation === environmentGenerationRef.current) setLoading(false);
+      if (generation === environmentGenerationRef.current && request === loadRequestRef.current) setLoading(false);
     }
   }, [environmentId]);
 
@@ -140,7 +156,38 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
     }
 
     void loadEnvironment(generation);
-    void loadPlugins(generation);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let running = false;
+    let pending = false;
+    const refresh = async (showSpinner = false) => {
+      if (running) { pending = true; return; }
+      running = true;
+      do {
+        pending = false;
+        await loadPlugins(generation, showSpinner);
+        showSpinner = false;
+      } while (!disposed && pending);
+      running = false;
+    };
+    void (async () => {
+      try {
+        const stop = await subscribePluginsChanged((event) => {
+          if (!disposed && event.environmentId === environmentId) void refresh();
+        });
+        if (disposed) stop();
+        else unlisten = stop;
+      } catch (error) {
+        console.warn('Failed to register plugin inventory listener:', error);
+      }
+      if (!disposed) void refresh(true);
+    })();
+    return () => {
+      disposed = true;
+      environmentGenerationRef.current += 1;
+      loadRequestRef.current += 1;
+      unlisten?.();
+    };
   }, [environmentId, isOpen, loadEnvironment, loadPlugins]);
 
   const filteredPlugins = useMemo(() => {
@@ -156,6 +203,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
       || getPluginSourceLabel(plugin.source).toLowerCase().includes(normalizedQuery)
       || (plugin.relatedMod || '').toLowerCase().includes(normalizedQuery)
       || (plugin.version || '').toLowerCase().includes(normalizedQuery)
+      || (plugin.author || '').toLowerCase().includes(normalizedQuery)
     ));
   }, [plugins, searchTerm]);
 
@@ -325,12 +373,6 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
           onSelect: () => void handleOpenFolder(),
         },
         {
-          key: 'reload',
-          label: 'Reload',
-          icon: 'rotate',
-          onSelect: () => void loadPlugins(),
-        },
-        {
           key: 'delete',
           label: 'Delete',
           icon: 'trash',
@@ -370,187 +412,254 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
         cancelText="Close"
       />
 
-      <div className="mods-overlay workspace-collection-shell">
-        <WorkspacePageHeader
-          eyebrow={environment?.name || 'Environment'}
-          title="Plugins"
-          description={`Manage plugin DLLs, disabled state, and the Plugins folder for ${environment?.name || 'this environment'}.`}
-        />
-
-        <div className="workspace-collection">
-          <div className="workspace-collection__main">
-            <div className="workspace-collection__header">
-              <div className="workspace-collection__nav">
-                <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--summary">
-                  <strong>{environment?.name || 'Environment'}</strong>
-                  <span>{environment?.runtime || 'Unknown'} • Plugin inventory</span>
-                </div>
-
-                <div className="workspace-collection__summary">
-                  <div className="workspace-collection__summary-chip">
-                    <span>Plugins</span>
-                    <strong>{plugins.length}</strong>
-                  </div>
-                  <div className="workspace-collection__summary-chip">
-                    <span>Disabled</span>
-                    <strong>{disabledCount}</strong>
-                  </div>
-                  <div className="workspace-collection__summary-chip">
-                    <span>Folder</span>
-                    <strong>{pluginsDirectory ? 'Ready' : 'Unavailable'}</strong>
-                  </div>
-                </div>
+      <div className={`env-assets ui-split${plugins.length === 0 && !loading ? ' env-assets--solo' : ''}`}>
+        <section className="env-assets__main" aria-label="Plugins">
+          <div className="env-assets__head">
+            <div className="ui-toolbar env-assets__bar">
+              <div className="env-assets-search">
+                <Icon name="search" className="env-assets-search__icon" />
+                <Input
+                  type="search"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                  placeholder="Search plugins"
+                  aria-label="Search plugins"
+                />
               </div>
-
-              <div className="workspace-collection__toolbar">
-                <div className="workspace-collection__toolbar-search">
-                  <Input
-                    type="text"
-                    value={searchTerm}
-                    onChange={(event) => setSearchTerm(event.target.value)}
-                    placeholder="Search plugins"
-                  />
-                </div>
-                <div className="workspace-collection__toolbar-group">
-                  <SimmButton onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
-                    {uploading ? 'Uploading...' : 'Add Plugin'}
-                  </SimmButton>
-                  <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
-                    Open Folder
-                  </SimmButton>
-                  <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void loadPlugins()} disabled={loading}>
-                    Reload
-                  </SimmButton>
-                </div>
+              <SimmButton
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Reload plugins"
+                title="Reload plugins"
+                onClick={() => void loadPlugins()}
+                disabled={loading}
+              >
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'rotate'} />
+              </SimmButton>
+              <span className="ui-toolbar__spacer" />
+              <div className="ui-toolbar__group env-assets__actions">
+                <SimmButton type="button" variant="secondary" onClick={() => void handleOpenFolder()}>
+                  <Icon name="folderOpen" />
+                  Open Folder
+                </SimmButton>
+                <SimmButton type="button" variant="default" onClick={handleUploadClick} disabled={uploading}>
+                  <Icon name={uploading ? 'fas fa-spinner fa-spin' : 'plus'} />
+                  {uploading ? 'Adding...' : 'Add Plugin'}
+                </SimmButton>
               </div>
-
-              {pluginsDirectory && (
-                <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--path">
-                  <span className="workspace-collection__path-label">Plugins Directory</span>
-                  <code className="workspace-collection__path-value">{pluginsDirectory}</code>
-                </div>
-              )}
             </div>
+            {pluginsDirectory && (
+              <p className="env-assets__summary ui-truncate" title={pluginsDirectory}>
+                {plugins.length} {plugins.length === 1 ? 'plugin' : 'plugins'}
+                {disabledCount > 0 ? ` · ${disabledCount} disabled` : ''}
+                {' · '}
+                <code className="ui-mono">{pluginsDirectory}</code>
+              </p>
+            )}
+          </div>
 
-            <div className="workspace-collection__content">
-              {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
-              {!error && loading && <CollectionEmpty>Loading plugins...</CollectionEmpty>}
-              {!error && !loading && plugins.length === 0 && (
-                <CollectionEmpty>No plugins detected for this environment.</CollectionEmpty>
-              )}
-              {!error && !loading && plugins.length > 0 && filteredPlugins.length === 0 && (
-                <CollectionEmpty>No plugins match this search.</CollectionEmpty>
-              )}
-              {!error && !loading && filteredPlugins.length > 0 && (
-                <div className="workspace-collection__list">
+          <div className="env-assets__content">
+            {error && (
+              <div className="env-assets__notices">
+                <div className="ui-callout ui-callout--danger env-assets-error" role="alert">
+                  <span className="env-assets-error__text">{error}</span>
+                  <span className="ui-toolbar__group">
+                    <SimmButton type="button" variant="outline" size="sm" onClick={() => void loadPlugins()}>
+                      Retry
+                    </SimmButton>
+                    <SimmButton type="button" variant="ghost" size="sm" onClick={() => setError(null)}>
+                      Dismiss
+                    </SimmButton>
+                  </span>
+                </div>
+              </div>
+            )}
+            {loading && plugins.length === 0 && (
+              <div className="env-assets-skeleton" aria-busy="true" aria-label="Loading plugins">
+                {Array.from({ length: 4 }, (_, index) => (
+                  <div key={index} className="env-assets-skeleton__row">
+                    <Skeleton className="env-assets-skeleton__icon" />
+                    <div className="env-assets-skeleton__text">
+                      <Skeleton className="env-assets-skeleton__line" />
+                      <Skeleton className="env-assets-skeleton__line env-assets-skeleton__line--short" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!error && !loading && plugins.length === 0 && (
+              <div className="ui-empty env-assets-empty">
+                <span className="ui-empty__emblem" aria-hidden="true"><Icon name="plug" /></span>
+                <h3 className="ui-empty__title">No plugins in this environment</h3>
+                <p className="ui-empty__copy">
+                  Plugins are MelonLoader plugins that load before mods, such as MLVScan or runtime fixes.
+                  Add a .dll or .zip and SIMM places it in this environment&apos;s Plugins folder.
+                </p>
+                <div className="env-assets-empty__actions">
+                  <SimmButton type="button" variant="secondary" onClick={handleUploadClick} disabled={uploading}>
+                    {uploading ? 'Adding...' : 'Add Plugin File'}
+                  </SimmButton>
+                </div>
+              </div>
+            )}
+            {!loading && plugins.length > 0 && filteredPlugins.length === 0 && (
+              <div className="ui-empty env-assets-empty">
+                <span className="ui-empty__emblem" aria-hidden="true"><Icon name="search" /></span>
+                <h3 className="ui-empty__title">No plugins match</h3>
+                <p className="ui-empty__copy">Nothing in this environment matches &quot;{searchTerm.trim()}&quot;.</p>
+                <div className="env-assets-empty__actions">
+                  <SimmButton type="button" variant="secondary" onClick={() => setSearchTerm('')}>
+                    Clear Search
+                  </SimmButton>
+                </div>
+              </div>
+            )}
+            {filteredPlugins.length > 0 && (
+              <table className="ui-table env-assets-table">
+                <colgroup>
+                  <col />
+                  <col className="env-assets-table__col-source" />
+                  <col className="env-assets-table__col-version" />
+                  <col className="env-assets-table__col-status" />
+                  <col className="env-assets-table__col-toggle" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Source</th>
+                    <th scope="col">Version</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" className="env-assets-table__toggle">Enabled</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {filteredPlugins.map((plugin) => {
                     const pluginKey = getPluginKey(plugin);
                     const isSelected = selectedPluginKey === pluginKey;
                     return (
-                      <div
+                      <tr
                         key={pluginKey}
-                        className={`workspace-collection__row workspace-file-row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setSelectedPluginKey(pluginKey)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
-                            setSelectedPluginKey(pluginKey);
-                          }
+                        className={`ui-row env-assets-row${plugin.disabled ? ' env-assets-row--disabled' : ''}`}
+                        aria-selected={isSelected}
+                        onClick={(event) => {
+                          if (isInteractiveTarget(event.target, event.currentTarget)) return;
+                          setSelectedPluginKey(pluginKey);
                         }}
-                      onContextMenu={(event) => openContextMenu(event, plugin)}
-                    >
-                      <div className="workspace-file-row__icon">
-                        <Icon name="plug" />
-                      </div>
-                        <div className="workspace-collection__row-body">
-                          <div className="workspace-collection__row-title">{plugin.name}</div>
-                          <div className="workspace-collection__row-meta">
-                            {plugin.disabled ? (
-                              <span className="workspace-pill workspace-pill--danger">Disabled</span>
-                            ) : (
-                              <span className="workspace-pill workspace-pill--success">Enabled</span>
-                            )}
-                            <span className="workspace-pill workspace-pill--source">{getPluginSourceLabel(plugin.source)}</span>
-                            {plugin.version && <span className="workspace-pill">{plugin.version}</span>}
-                            {plugin.relatedMod && <span className="workspace-pill">Mod: {plugin.relatedMod}</span>}
-                          </div>
-                          <p className="workspace-collection__row-summary">{plugin.fileName}</p>
-                        </div>
-                      </div>
+                        onContextMenu={(event) => openContextMenu(event, plugin)}
+                      >
+                        <td>
+                          <button
+                            type="button"
+                            className="env-assets-row__open"
+                            aria-pressed={isSelected}
+                            onClick={() => setSelectedPluginKey(pluginKey)}
+                          >
+                            <AssetThumbnail artwork={pluginArtwork(plugin)} name={plugin.name} glyph="plug" size={32} />
+                            <span className="env-assets-row__text">
+                              <span className="env-assets-row__name">{plugin.name}</span>
+                              <span className="env-assets-row__desc">{plugin.author ? `${plugin.author} · ` : ''}{plugin.fileName}</span>
+                            </span>
+                          </button>
+                        </td>
+                        <td className="env-assets-row__muted">{getPluginSourceLabel(plugin.source)}</td>
+                        <td className="env-assets-row__version ui-mono">{plugin.version || '—'}</td>
+                        <td>{plugin.disabled && <span className="ui-tag">Disabled</span>}</td>
+                        <td className="env-assets-table__toggle">
+                          <Switch
+                            checked={!plugin.disabled}
+                            disabled={togglingPluginKey === pluginKey}
+                            aria-label={`${plugin.name} enabled`}
+                            onCheckedChange={() => void handleTogglePlugin(plugin)}
+                          />
+                        </td>
+                      </tr>
                     );
                   })}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <aside className="workspace-collection__inspector">
-            {!selectedPlugin && (
-              <InspectorEmpty>
-                Select a plugin to review file details and environment actions.
-              </InspectorEmpty>
+                </tbody>
+              </table>
             )}
-            {selectedPlugin && (
-              <div className="workspace-inspector-card">
-                <div className="workspace-inspector-card__header workspace-inspector-card__header--file">
-                  <div className="workspace-file-row__icon workspace-file-row__icon--large">
-                    <Icon name="plug" />
+          </div>
+        </section>
+
+        <aside className="ui-inspector env-assets__inspector" aria-label="Plugin details">
+          {!selectedPlugin && (
+            <div className="ui-empty env-assets-empty env-assets-empty--inspector">
+              <p className="ui-empty__copy">Select a plugin to see its file details and actions.</p>
+            </div>
+          )}
+          {selectedPlugin && (
+            <>
+              <div className="env-assets-inspector__head">
+                <AssetThumbnail artwork={pluginArtwork(selectedPlugin)} name={selectedPlugin.name} glyph="plug" size={48} />
+                <div className="env-assets-inspector__titles">
+                  <h3 className="env-assets-inspector__title">{selectedPlugin.name}</h3>
+                  <div className="ui-meta">
+                    <span>{getPluginSourceLabel(selectedPlugin.source)}</span>
+                    {selectedPlugin.version && <span className="ui-mono">{selectedPlugin.version}</span>}
                   </div>
-                  <div>
-                    <h3>{selectedPlugin.name}</h3>
-                    <div className="workspace-inspector-card__subtle">
-                      {getPluginSourceLabel(selectedPlugin.source)} {selectedPlugin.version ? `• ${selectedPlugin.version}` : ''}
-                    </div>
+                  <div className="env-assets-inspector__status">
+                    {selectedPlugin.disabled
+                      ? <span className="ui-tag">Disabled</span>
+                      : <span className="ui-status ui-status--ok">Enabled</span>}
                   </div>
-                </div>
-
-                <div className="workspace-inspector-card__metrics">
-                  <div><span>Status</span><strong>{selectedPlugin.disabled ? 'Disabled' : 'Enabled'}</strong></div>
-                  <div><span>Runtime</span><strong>{environment?.runtime || 'Unknown'}</strong></div>
-                  <div><span>Version</span><strong>{selectedPlugin.version || 'Unknown'}</strong></div>
-                </div>
-
-                <div className="workspace-inspector-card__field">
-                  <label>File Name</label>
-                  <div className="workspace-inspector-card__value">{selectedPlugin.fileName}</div>
-                </div>
-
-                {selectedPlugin.relatedMod && (
-                  <div className="workspace-inspector-card__field">
-                    <label>Related Mod</label>
-                    <div className="workspace-inspector-card__value">{selectedPlugin.relatedMod}</div>
-                  </div>
-                )}
-
-                <div className="workspace-inspector-card__field">
-                  <label>Path</label>
-                  <div className="workspace-inspector-card__value workspace-inspector-card__value--path">{selectedPlugin.path}</div>
-                </div>
-
-                <div className="workspace-inspector-card__actions">
-                  <SimmButton
-                    className={selectedPlugin.disabled ? 'btn btn-primary' : 'btn btn-secondary'}
-                    onClick={() => void handleTogglePlugin(selectedPlugin)}
-                    disabled={togglingPluginKey === getPluginKey(selectedPlugin)}
-                  >
-                    {selectedPlugin.disabled ? 'Enable' : 'Disable'}
-                  </SimmButton>
-                  <SimmButton className="btn btn-secondary" onClick={() => setPendingDelete(selectedPlugin)} disabled={deletingPluginKey === getPluginKey(selectedPlugin)}>
-                    Delete
-                  </SimmButton>
-                  <SimmButton className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
-                    Open Folder
-                  </SimmButton>
-                  <SimmButton className="btn btn-secondary" onClick={() => void loadPlugins()} disabled={loading}>
-                    Reload
-                  </SimmButton>
                 </div>
               </div>
-            )}
-          </aside>
-        </div>
+
+              <div className="env-assets-inspector__actions">
+                <SimmButton
+                  type="button"
+                  variant={selectedPlugin.disabled ? 'secondary' : 'outline'}
+                  onClick={() => void handleTogglePlugin(selectedPlugin)}
+                  disabled={togglingPluginKey === getPluginKey(selectedPlugin)}
+                >
+                  <Icon name={selectedPlugin.disabled ? 'toggleOn' : 'toggleOff'} />
+                  {selectedPlugin.disabled ? 'Enable' : 'Disable'}
+                </SimmButton>
+                <SimmButton type="button" variant="outline" onClick={() => void handleOpenFolder()}>
+                  <Icon name="folderOpen" />
+                  Open Folder
+                </SimmButton>
+              </div>
+
+              <section className="ui-inspector__section">
+                <h4 className="ui-section-title">Details</h4>
+                <dl className="ui-kv">
+                  {selectedPlugin.author ? <><dt>Author</dt><dd>{selectedPlugin.author}</dd></> : null}
+                  <dt>Version</dt>
+                  <dd className="ui-mono">{selectedPlugin.version || 'Unknown'}</dd>
+                  <dt>Source</dt>
+                  <dd>{getPluginSourceLabel(selectedPlugin.source)}</dd>
+                  {selectedPlugin.relatedMod && (
+                    <>
+                      <dt>Used by</dt>
+                      <dd>{selectedPlugin.relatedMod}</dd>
+                    </>
+                  )}
+                  <dt>File</dt>
+                  <dd className="ui-mono">{selectedPlugin.fileName}</dd>
+                  <dt>Path</dt>
+                  <dd className="ui-mono">{selectedPlugin.path}</dd>
+                </dl>
+              </section>
+
+              <div className="ui-danger-zone env-assets-danger">
+                <SimmButton
+                  type="button"
+                  variant="destructive"
+                  onClick={() => setPendingDelete(selectedPlugin)}
+                  disabled={deletingPluginKey === getPluginKey(selectedPlugin)}
+                >
+                  <Icon name="trash" />
+                  Delete
+                </SimmButton>
+                <p className="env-assets-danger__note">
+                  Deletes the file from the Plugins folder of {environment?.name || 'this environment'}.
+                </p>
+              </div>
+            </>
+          )}
+        </aside>
 
         {contextMenu && (
           <AnchoredContextMenu

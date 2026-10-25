@@ -5,3 +5,7 @@ docker/** text eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
 *.ps1 text eol=crlf
+
+# SQLx embeds migration bytes in the executable. Keep migration line endings
+# deterministic so Windows and release checkouts use the same checksums.
+src-tauri/migrations/*.sql text eol=crlf

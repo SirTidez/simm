@@ -20,14 +20,14 @@ describe('HelpOverlay', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /add game/i }));
+    fireEvent.click(screen.getByRole('button', { name: /add environment/i }));
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }));
     fireEvent.click(screen.getByRole('button', { name: /open accounts/i }));
 
     expect(onOpenWizard).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onOpenAccounts).toHaveBeenCalledTimes(1);
-    expect(screen.getByText(/where to start/i)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /get started/i })).toBeTruthy();
   });
 
   it('closes on escape', () => {

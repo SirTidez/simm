@@ -7,74 +7,75 @@ interface ConfigRawEditorProps {
   onChange: (value: string) => void;
 }
 
-const rawConfigEditorTheme = EditorView.theme(
-  {
-    '&': {
-      height: '100%',
-      width: '100%',
-      minWidth: '0',
-      backgroundColor: '#08111f',
-      color: '#eef5ff',
-      fontSize: '0.86rem',
-      display: 'flex',
-      flexDirection: 'column',
-    },
-    '.cm-scroller': {
-      flex: '1 1 auto',
-      minHeight: '0',
-      minWidth: '0',
-      width: '100%',
-      fontFamily: '"Courier New", monospace',
-      lineHeight: '1.55',
-      overflowX: 'auto',
-      overflowY: 'auto',
-    },
-    '.cm-content': {
-      minHeight: '100%',
-      padding: '0.78rem 0.92rem',
-      caretColor: '#eef5ff',
-    },
-    '.cm-focused': {
-      outline: 'none',
-    },
-    '.cm-line': {
-      padding: '0',
-      overflowWrap: 'anywhere',
-    },
-    '.cm-selectionBackground': {
-      backgroundColor: 'rgba(96, 145, 216, 0.38) !important',
-    },
-    '.cm-activeLine': {
-      backgroundColor: 'rgba(52, 82, 124, 0.18)',
-    },
-    '.cm-gutters': {
-      display: 'none',
-    },
-    '.raw-config-token--comment': {
-      color: '#82a3c8',
-    },
-    '.raw-config-token--section': {
-      color: '#7db5ff',
-      fontWeight: '700',
-    },
-    '.raw-config-token--key': {
-      color: '#cfe2ff',
-    },
-    '.raw-config-token--operator': {
-      color: '#7894b8',
-    },
-    '.raw-config-token--string': {
-      color: '#f5d493',
-    },
-    '.raw-config-token--boolean': {
-      color: '#81d6ac',
-    },
-    '.raw-config-token--number': {
-      color: '#b9a4ff',
-    },
+// Colours come from the SIMM tokens so every built-in and custom theme applies.
+const rawConfigEditorTheme = EditorView.theme({
+  '&': {
+    height: '100%',
+    width: '100%',
+    minWidth: '0',
+    backgroundColor: 'var(--simm-sunken)',
+    color: 'var(--simm-text)',
+    fontSize: 'var(--simm-text-sm)',
+    display: 'flex',
+    flexDirection: 'column',
   },
-  { dark: true }
-);
+  '&.cm-focused': {
+    outline: 'none',
+  },
+  '.cm-scroller': {
+    flex: '1 1 auto',
+    minHeight: '0',
+    minWidth: '0',
+    width: '100%',
+    fontFamily: 'var(--simm-font-mono)',
+    lineHeight: '1.6',
+    overflowX: 'auto',
+    overflowY: 'auto',
+  },
+  '.cm-content': {
+    minHeight: '100%',
+    padding: 'var(--simm-space-3) var(--simm-space-4)',
+    caretColor: 'var(--simm-text)',
+  },
+  '.cm-cursor, .cm-dropCursor': {
+    borderLeftColor: 'var(--simm-text)',
+  },
+  '.cm-line': {
+    padding: '0',
+    overflowWrap: 'anywhere',
+  },
+  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
+    backgroundColor: 'color-mix(in srgb, var(--simm-accent) 34%, transparent) !important',
+  },
+  '.cm-activeLine': {
+    backgroundColor: 'var(--simm-hover)',
+  },
+  '.cm-gutters': {
+    display: 'none',
+  },
+  '.raw-config-token--comment': {
+    color: 'var(--simm-text-3)',
+  },
+  '.raw-config-token--section': {
+    color: 'var(--simm-accent-text)',
+    fontWeight: '600',
+  },
+  '.raw-config-token--key': {
+    color: 'var(--simm-text)',
+  },
+  '.raw-config-token--operator': {
+    color: 'var(--simm-text-3)',
+  },
+  '.raw-config-token--string': {
+    color: 'var(--simm-warn-text)',
+  },
+  '.raw-config-token--boolean': {
+    color: 'var(--simm-ok-text)',
+  },
+  '.raw-config-token--number': {
+    color: 'var(--simm-info-text)',
+  },
+});
 
 function markRawToken(builder: RangeSetBuilder<Decoration>, from: number, to: number, className: string) {
   if (to > from) {
@@ -172,6 +173,7 @@ export function ConfigRawEditor({ value, onChange }: ConfigRawEditorProps) {
       maxHeight="100%"
       maxWidth="100%"
       basicSetup={false}
+      theme="none"
       extensions={rawEditorExtensions}
       onChange={onChange}
       aria-label="Raw config content"

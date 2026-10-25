@@ -1,0 +1,327 @@
+/*
+ * Add Environment wizard (and the step indicator the Setup Guide shares).
+ * One decision per step: header with steps, a narrow content column,
+ * Back bottom-left / Continue bottom-right.
+ */
+
+.wizard {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--simm-bg);
+}
+
+.wizard__header {
+  flex: none;
+}
+
+.wizard__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--simm-space-6) var(--simm-space-5);
+}
+
+.wizard__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-5);
+  max-width: 40rem;
+}
+
+.wizard__intro h2 {
+  margin: 0;
+  color: var(--simm-text);
+  font-size: var(--simm-text-md);
+  font-weight: 600;
+}
+
+.wizard__intro p {
+  margin: var(--simm-space-1) 0 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.wizard__hint {
+  margin: calc(var(--simm-space-2) * -1) 0 0;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+}
+
+.wizard__facts {
+  font-size: var(--simm-text-sm);
+}
+
+.wizard__callout {
+  align-items: center;
+}
+
+.wizard__callout-copy {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wizard__callout-copy span {
+  color: var(--simm-text-2);
+}
+
+.wizard__callout-actions {
+  display: flex;
+  flex: none;
+  gap: var(--simm-space-2);
+}
+
+.wizard__skeleton-row {
+  display: block;
+  width: 100%;
+  height: 2.5rem;
+  border-radius: var(--simm-radius-sm);
+}
+
+.wizard__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--simm-space-3);
+  flex: none;
+  padding: var(--simm-space-3) var(--simm-space-5);
+  border-top: 1px solid var(--simm-line);
+  background: var(--simm-bg);
+}
+
+/* ------------------------------------------------------------ Step indicator */
+
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  flex: none;
+}
+
+.wizard-steps__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+  white-space: nowrap;
+}
+
+.wizard-steps__item + .wizard-steps__item::before {
+  content: '';
+  width: 1.5rem;
+  height: 1px;
+  background: var(--simm-line-strong);
+}
+
+.wizard-steps__marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1px solid var(--simm-line-strong);
+  border-radius: 999px;
+  font-size: var(--simm-text-2xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.wizard-steps__item--current {
+  color: var(--simm-text);
+  font-weight: 500;
+}
+
+.wizard-steps__item--current .wizard-steps__marker {
+  border-color: transparent;
+  background: var(--simm-accent-fill);
+  color: var(--simm-on-accent);
+}
+
+.wizard-steps__item--done {
+  color: var(--simm-text-2);
+}
+
+.wizard-steps__item--done .wizard-steps__marker {
+  border-color: var(--simm-accent-line);
+  color: var(--simm-accent-text);
+}
+
+/* ------------------------------------------------------------ Choice list */
+
+.wizard-options {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius-lg);
+  overflow: hidden;
+}
+
+.wizard-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-3) var(--simm-space-4);
+  border-bottom: 1px solid var(--simm-line);
+  cursor: pointer;
+  transition: background-color var(--simm-fast) var(--simm-ease);
+}
+
+.wizard-option:last-child {
+  border-bottom: 0;
+}
+
+.wizard-option:hover {
+  background: var(--simm-hover);
+}
+
+.wizard-option:has([data-checked]) {
+  background: var(--simm-accent-soft);
+}
+
+.wizard-option--disabled {
+  cursor: not-allowed;
+}
+
+.wizard-option--disabled:hover {
+  background: transparent;
+}
+
+.wizard-option--disabled .wizard-option__text strong {
+  color: var(--simm-text-2);
+}
+
+.wizard-option [data-slot='radio-group-item'] {
+  margin-top: 2px;
+}
+
+.wizard-option--disabled .wizard-option__icon {
+  opacity: 0.6;
+}
+
+.wizard-option__art {
+  flex: none;
+  align-self: center;
+  width: 120px;
+  border-radius: var(--simm-radius-sm);
+}
+
+.wizard-option__text {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.wizard-option__text strong {
+  color: var(--simm-text);
+  font-size: var(--simm-text-base);
+  font-weight: 500;
+}
+
+.wizard-option__text .ui-meta {
+  font-size: var(--simm-text-sm);
+}
+
+.wizard-option__path {
+  color: var(--simm-text-3);
+}
+
+.wizard-option > .ui-tag {
+  margin-top: 2px;
+}
+
+/* ------------------------------------------------------------ Fields */
+
+.wizard-field {
+  display: grid;
+  gap: var(--simm-space-1);
+}
+
+.wizard-field > label {
+  color: var(--simm-text);
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+}
+
+.wizard-field__row {
+  display: flex;
+  gap: var(--simm-space-2);
+}
+
+.wizard-field__row > [data-slot='input'] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wizard-field__hint {
+  margin: 0;
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-xs);
+}
+
+/* ------------------------------------------------------------ Folder picker dialog */
+
+.wizard-directory-dialog {
+  --simm-dialog-width: 36rem;
+}
+
+.wizard-directory-dialog__body {
+  gap: var(--simm-space-4);
+}
+
+.wizard-directory-dialog__list {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  height: 16rem;
+  padding: var(--simm-space-1);
+  border: 1px solid var(--simm-line);
+  border-radius: var(--simm-radius);
+  background: var(--simm-sunken);
+  overflow: auto;
+}
+
+.wizard-directory-dialog__list .wizard__skeleton-row {
+  height: 1.75rem;
+  margin-bottom: var(--simm-space-1);
+}
+
+.wizard-directory-row[data-slot='button'] {
+  justify-content: flex-start;
+  width: 100%;
+  height: var(--simm-control-h);
+  padding: 0 var(--simm-space-2);
+  color: var(--simm-text);
+  font-weight: 400;
+}
+
+.wizard-directory-row[data-slot='button'] svg {
+  color: var(--simm-text-3);
+}
+
+.wizard-directory-row--parent[data-slot='button'] {
+  color: var(--simm-text-2);
+}
+
+.wizard-directory-dialog__empty {
+  margin: 0;
+  padding: var(--simm-space-3) var(--simm-space-2);
+  color: var(--simm-text-3);
+  font-size: var(--simm-text-sm);
+}
+
+@media (max-width: 60rem) {
+  .wizard__header {
+    flex-wrap: wrap;
+  }
+}

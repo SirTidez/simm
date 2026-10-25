@@ -184,6 +184,10 @@ pub fn emit_runtime_switch<R: Runtime>(
     app.emit("steam_runtime_switched", result)
 }
 
+pub fn emit_mod_library_changed<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
+    app.emit("mod_library_changed", ())
+}
+
 pub fn emit_mods_changed<R: Runtime>(
     app: &AppHandle<R>,
     environment_id: String,

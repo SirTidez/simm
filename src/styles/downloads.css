@@ -1,0 +1,269 @@
+/* Downloads: the status-bar popover and its panel content.
+ * Position and size of the popover live in shell.css (.downloads-popover--statusbar). */
+
+.downloads-popover {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  transform: translateY(var(--simm-space-1));
+  transform-origin: left bottom;
+  transition:
+    opacity var(--simm-medium) var(--simm-ease),
+    transform var(--simm-medium) var(--simm-ease);
+  pointer-events: none;
+}
+
+.downloads-popover--open {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.downloads-popover--closing {
+  opacity: 0;
+  transform: translateY(var(--simm-space-1));
+}
+
+.downloads-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* The popover is rendered inside the status bar, which does not wrap. */
+  white-space: normal;
+  text-align: left;
+  font-size: var(--simm-text-sm);
+  line-height: 1.45;
+  border: 1px solid var(--simm-line-strong);
+  border-radius: var(--simm-radius-lg);
+  background: var(--simm-panel);
+  color: var(--simm-text);
+}
+
+.downloads-panel--popup {
+  max-height: inherit;
+  box-shadow: var(--simm-shadow-popover);
+  overflow: hidden;
+}
+
+.downloads-panel__header {
+  display: flex;
+  align-items: center;
+  gap: var(--simm-space-2);
+  flex: none;
+  min-height: 2.75rem;
+  padding: var(--simm-space-2) var(--simm-space-2) var(--simm-space-2) var(--simm-space-4);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.downloads-panel__title {
+  margin: 0;
+  font-size: var(--simm-text-base);
+  font-weight: 600;
+}
+
+.downloads-panel__count {
+  font-size: var(--simm-text-sm);
+  color: var(--simm-text-2);
+}
+
+.downloads-panel__close {
+  margin-left: auto;
+}
+
+.downloads-panel__sections {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+.downloads-panel__section + .downloads-panel__section {
+  border-top: 1px solid var(--simm-line);
+}
+
+.downloads-panel__section-title {
+  margin: 0;
+  padding: var(--simm-space-3) var(--simm-space-4) var(--simm-space-1);
+  font-size: var(--simm-text-xs);
+  font-weight: 600;
+  color: var(--simm-text-2);
+}
+
+.downloads-panel__list {
+  margin: 0;
+  padding: 0 0 var(--simm-space-1);
+  list-style: none;
+}
+
+.downloads-panel__row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--simm-space-3);
+  padding: var(--simm-space-2) var(--simm-space-4);
+}
+
+.downloads-panel__row + .downloads-panel__row {
+  border-top: 1px solid color-mix(in srgb, var(--simm-line) 70%, transparent);
+}
+
+/* Media column: 32px mod art, 56px-wide collection banners and game art, or a kind icon. */
+.downloads-panel__thumb,
+.downloads-panel__media {
+  justify-self: center;
+}
+
+.downloads-panel__thumb--banner {
+  width: 56px;
+  border-radius: var(--simm-radius-sm);
+}
+
+.downloads-panel__media {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  border-radius: var(--simm-radius);
+  background: var(--simm-raised-hover);
+  color: var(--simm-text-3);
+}
+
+.downloads-panel__media svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.downloads-panel__media--wide {
+  width: 56px;
+  height: 26px;
+  margin-top: 3px;
+  border-radius: var(--simm-radius-sm);
+}
+
+.downloads-panel__game-art {
+  position: absolute;
+  inset: 0;
+}
+
+.downloads-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.downloads-panel__label {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  font-size: var(--simm-text-sm);
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.downloads-panel__meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--simm-space-2);
+  min-width: 0;
+  font-size: var(--simm-text-xs);
+  color: var(--simm-text-2);
+}
+
+.downloads-panel__context {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.downloads-panel__state {
+  flex: none;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.downloads-panel__state--error {
+  color: var(--simm-danger-text);
+}
+
+.downloads-panel__state--completed,
+.downloads-panel__state--cancelled {
+  color: var(--simm-text-3);
+}
+
+.downloads-panel__message {
+  overflow: hidden;
+  font-family: var(--simm-font-mono);
+  font-size: var(--simm-text-2xs);
+  color: var(--simm-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.downloads-panel__error {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  font-size: var(--simm-text-xs);
+  color: var(--simm-danger-text);
+  overflow-wrap: anywhere;
+}
+
+.downloads-panel__error--banner {
+  flex: none;
+  padding: var(--simm-space-2) var(--simm-space-4);
+  border-bottom: 1px solid var(--simm-line);
+}
+
+.downloads-panel__action {
+  margin-top: -2px;
+}
+
+.downloads-panel__progress-bar {
+  width: 100%;
+  margin-top: var(--simm-space-1);
+}
+
+.downloads-panel__progress-bar [data-slot='progress-track'] {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--simm-raised-hover);
+  overflow: hidden;
+}
+
+.downloads-panel__progress-bar [data-slot='progress-indicator'] {
+  border-radius: inherit;
+  background: var(--simm-accent);
+  transition: width var(--simm-medium) var(--simm-ease);
+}
+
+.downloads-panel__progress-bar--indeterminate [data-slot='progress-indicator'] {
+  width: 40%;
+  animation: downloads-indeterminate 1.2s var(--simm-ease) infinite;
+}
+
+@keyframes downloads-indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
+.downloads-panel__empty {
+  padding: var(--simm-space-6) var(--simm-space-4);
+}
+
+.downloads-panel__empty .ui-empty__copy {
+  max-width: 34ch;
+}

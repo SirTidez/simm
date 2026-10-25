@@ -4,7 +4,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -16,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -46,6 +45,8 @@ import {
   type SecurityScanReportOption,
 } from "./SecurityScanReportOverlay";
 import { Icon } from './Icon';
+import { ModThumbnail, type ModArtwork } from "./media/ModThumbnail";
+import { useModArtwork } from "./media/useModArtwork";
 import { type SecurityReportWorkspaceRequest } from "./SecurityScanReportPage";
 import {
   AnchoredContextMenu,
@@ -55,8 +56,7 @@ import {
   InstallTargetsDialog,
   getNormalizedRuntime,
 } from "./InstallTargetsDialog";
-import { SimmBadge, SimmButton, SimmDialogContent } from "./primitives";
-import { WorkspacePageHeader } from "./WorkspacePageHeader";
+import { SimmButton, SimmDialogContent } from "./primitives";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
   areVersionsEquivalent,
@@ -370,140 +370,233 @@ const DISCOVER_SORT_OPTIONS: Array<{ value: DiscoverSort; label: string }> = [
   { value: "newest", label: "Newest" },
 ];
 
-function CollectionEmpty({ children }: { children: string }) {
-  return (
-    <Empty className="workspace-collection__empty">
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
-  );
-}
-
-type WorkspaceBadgeTone = "source" | "success" | "warning" | "danger";
-
-function WorkspaceBadge({
+function LibraryEmpty({
+  icon,
+  title,
   children,
-  tone,
-  className,
-  style,
+  action,
 }: {
-  children: ReactNode;
-  tone?: WorkspaceBadgeTone;
-  className?: string;
-  style?: CSSProperties;
+  icon: string;
+  title: string;
+  children?: ReactNode;
+  action?: ReactNode;
 }) {
   return (
-    <SimmBadge
-      variant="outline"
-      className={cn(
-        "workspace-pill",
-        tone && `workspace-pill--${tone}`,
-        className,
-      )}
-      style={style}
-    >
-      {children}
-    </SimmBadge>
+    <div className="ui-empty lib-empty">
+      <span className="ui-empty__emblem" aria-hidden="true">
+        <Icon name={icon} />
+      </span>
+      <p className="ui-empty__title">{title}</p>
+      {children ? <p className="ui-empty__copy">{children}</p> : null}
+      {action}
+    </div>
   );
 }
 
-function SecurityScanBadge({
-  summary,
-  compact = false,
-}: {
-  summary?: SecurityScanSummary;
-  compact?: boolean;
-}) {
-  const config = getSecurityBadgeConfig(summary);
-
-  if (!config) {
-    return null;
-  }
-
-  const badge = (
-    <WorkspaceBadge
-      className="workspace-pill--security"
-      style={{
-        borderColor: config.border,
-        background: config.background,
-        color: config.color,
-      }}
-    >
-      <Icon name={`fas ${config.icon}`} style={{ fontSize: "0.7rem" }} />
-      {config.label}
-    </WorkspaceBadge>
+function LibrarySkeletonRows({ label }: { label: string }) {
+  return (
+    <div className="lib-skeleton" role="status" aria-label={label}>
+      {Array.from({ length: 6 }, (_, index) => (
+        <div key={index} className="lib-skeleton__row">
+          <Skeleton className="lib-skeleton__icon" />
+          <div className="lib-skeleton__lines">
+            <Skeleton className="lib-skeleton__line" />
+            <Skeleton className="lib-skeleton__line lib-skeleton__line--short" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
+}
 
-  return compact ? (
-    badge
-  ) : (
-    <div className="workspace-inspector-card__badge-row">{badge}</div>
+type LibraryTagTone = "ok" | "warn" | "danger" | "muted";
+
+function LibraryTag({
+  tone,
+  children,
+}: {
+  tone?: LibraryTagTone;
+  children: ReactNode;
+}) {
+  return (
+    <span className={cn("ui-tag", tone && tone !== "muted" && `ui-tag--${tone}`)}>
+      {children}
+    </span>
+  );
+}
+
+/** One exception per object: security problems first, then pending updates. */
+function getExceptionTag(
+  summary: SecurityScanSummary | undefined,
+  showSecurity: boolean,
+  updateAvailable: boolean,
+  includeMuted = false,
+): { label: string; tone: LibraryTagTone } | null {
+  const security = showSecurity ? getSecurityBadgeConfig(summary) : null;
+  if (security?.exception && (includeMuted || security.tone !== "muted")) {
+    return { label: security.label, tone: security.tone };
+  }
+  if (updateAvailable) {
+    return { label: "Update available", tone: "warn" };
+  }
+  return null;
+}
+
+/** The item's own banner, full width above the title row; absent (no placeholder) without one. */
+function DetailMedia({ src, alt }: { src?: string; alt: string }) {
+  const source = resolveImageSource(src);
+  const [failedSource, setFailedSource] = useState<string | null>(null);
+  if (!source || failedSource === source) return null;
+  return (
+    <figure className="lib-detail__media">
+      <img
+        src={source}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        draggable={false}
+        onError={() => setFailedSource(source)}
+      />
+    </figure>
+  );
+}
+
+/** The icon a featured Thunderstore package publishes, used when the tool is not downloaded yet. */
+function getFeaturedPackageArtwork(
+  pkg: ThunderstorePackageGroup | null | undefined,
+): ModArtwork | null {
+  const representative = pkg?.packagesByRuntime.IL2CPP || pkg?.packagesByRuntime.Mono;
+  const iconUrl =
+    representative?.versions?.[0]?.icon || representative?.icon || representative?.icon_url;
+  return iconUrl ? { iconUrl } : null;
+}
+
+/** A Nexus Collection's tile image as a 16:9 row thumbnail; a neutral glyph without one. */
+function CollectionTile({ src }: { src?: string }) {
+  const source = resolveImageSource(src);
+  const [failedSource, setFailedSource] = useState<string | null>(null);
+  const showImage = Boolean(source) && failedSource !== source;
+  return (
+    <span className={cn("lib-tile", !showImage && "lib-tile--fallback")} aria-hidden="true">
+      {showImage ? (
+        <img
+          src={source}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          onError={() => setFailedSource(source ?? null)}
+        />
+      ) : (
+        <Icon name="layerGroup" />
+      )}
+    </span>
   );
 }
 
 function ModLibraryDetailHeader({
   backLabel,
   onBack,
+  media,
+  mediaAlt,
   icon,
   title,
-  subtitle,
-  tags,
-  metrics,
+  meta,
+  status,
+  actions,
 }: {
   backLabel: string;
   onBack: () => void;
+  media?: string;
+  mediaAlt?: string;
   icon: ReactNode;
   title: string;
-  subtitle?: ReactNode;
-  tags: ReactNode;
-  metrics: Array<{ label: string; value: ReactNode }>;
+  meta: ReactNode;
+  status?: ReactNode;
+  actions?: ReactNode;
 }) {
   return (
-    <header className="workspace-collection__detail-header">
-      <div className="workspace-collection__detail-navigation">
+    <header className="lib-detail__header">
+      <div className="lib-detail__nav">
         <SimmButton
           type="button"
-          variant="secondary"
-          className="btn btn-secondary workspace-collection__detail-back"
+          variant="ghost"
+          size="sm"
+          className="lib-detail__back"
           onClick={onBack}
         >
-          <Icon name="fas fa-arrow-left" />
+          <Icon name="arrowLeft" />
           <span>{backLabel}</span>
         </SimmButton>
-        {icon}
       </div>
-      <div className="workspace-inspector-card__identity workspace-collection__detail-identity">
-        <div className="workspace-collection__detail-copy">
-          <h2>{title}</h2>
-          {subtitle ? (
-            <div className="workspace-inspector-card__subtle">{subtitle}</div>
-          ) : null}
-          <div className="workspace-inspector-card__tags workspace-inspector-card__tags--compact">
-            {tags}
+      <DetailMedia src={media} alt={mediaAlt || `${title} artwork`} />
+      <div className="lib-detail__identity">
+        {icon}
+        <div className="lib-detail__titles">
+          <div className="lib-detail__title-row">
+            <h2 className="lib-detail__title">{title}</h2>
+            {status}
           </div>
+          <div className="ui-meta lib-detail__meta">{meta}</div>
         </div>
-        <div className="workspace-inspector-card__metrics workspace-inspector-card__metrics--compact">
-          {metrics.map((metric) => (
-            <div key={metric.label}>
-              <span>{metric.label}</span>
-              <strong>{metric.value}</strong>
-            </div>
-          ))}
-        </div>
+        {actions ? <div className="lib-detail__actions">{actions}</div> : null}
       </div>
     </header>
   );
 }
 
-function InspectorCardEmpty({ children }: { children: string }) {
+function ExternalIconLink({
+  href,
+  label,
+  title,
+}: {
+  href: string;
+  label: string;
+  title: string;
+}) {
   return (
-    <Empty className="workspace-inspector-card__empty">
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-      </EmptyHeader>
-    </Empty>
+    <a
+      className="btn lib-icon-link"
+      data-slot="button"
+      data-variant="ghost"
+      data-size="icon"
+      aria-label={label}
+      title={title}
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      <Icon name="arrowUpRightFromSquare" />
+    </a>
   );
+}
+
+function LibrarySection({
+  id,
+  title,
+  aside,
+  children,
+}: {
+  id?: string;
+  title: string;
+  aside?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="lib-section" aria-labelledby={id}>
+      <div className="lib-section__header">
+        <h3 id={id} className="ui-section-title lib-section__title">
+          {title}
+        </h3>
+        {aside ? <div className="lib-section__aside">{aside}</div> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function SectionNote({ children }: { children: ReactNode }) {
+  return <p className="lib-section__note">{children}</p>;
 }
 
 function DiscoverSortSelect({
@@ -524,7 +617,7 @@ function DiscoverSortSelect({
     >
       <SelectTrigger
         aria-label="Sort discover results"
-        className="workspace-collection__toolbar-select-trigger"
+        className="lib-select-trigger"
       >
         <SelectValue>
           {(selectedValue) =>
@@ -533,9 +626,57 @@ function DiscoverSortSelect({
           }
         </SelectValue>
       </SelectTrigger>
-      <SelectContent className="workspace-collection__select-content" align="start">
+      <SelectContent align="start">
         <SelectGroup>
           {DISCOVER_SORT_OPTIONS.map((option) => (
+            <SelectItem
+              key={option.value}
+              value={option.value}
+              onClick={() => onValueChange(option.value)}
+            >
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+const DOWNLOADED_FILTER_OPTIONS: Array<{ value: DownloadedFilter; label: string }> = [
+  { value: "all", label: "All mods" },
+  { value: "installed", label: "Installed" },
+  { value: "managed", label: "Managed" },
+  { value: "external", label: "External" },
+];
+
+function DownloadedFilterSelect({
+  value,
+  onValueChange,
+}: {
+  value: DownloadedFilter;
+  onValueChange: (value: DownloadedFilter) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === "string") {
+          onValueChange(nextValue as DownloadedFilter);
+        }
+      }}
+    >
+      <SelectTrigger aria-label="Show mods" className="lib-select-trigger">
+        <SelectValue>
+          {(selectedValue) =>
+            DOWNLOADED_FILTER_OPTIONS.find((option) => option.value === selectedValue)
+              ?.label || (selectedValue === "updates" ? "With updates" : "All mods")
+          }
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent align="start">
+        <SelectGroup>
+          {DOWNLOADED_FILTER_OPTIONS.map((option) => (
             <SelectItem
               key={option.value}
               value={option.value}
@@ -735,6 +876,13 @@ const getNexusFileRowTitle = (
 ): string => {
   const title = stripFileExtension(file.file_name || file.name || "").trim();
   return title || modName;
+};
+
+const formatNexusFileCategory = (value: string): string => {
+  const normalized = value.replace(/_/g, " ").trim().toLowerCase();
+  return normalized
+    ? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`
+    : value;
 };
 
 const formatFileSizeShort = (bytes?: number): string | null => {
@@ -1635,6 +1783,7 @@ export function ModLibraryOverlay({
   onNavigationStateChange,
 }: Props) {
   const { settings } = useSettingsStore();
+  const lookupArtwork = useModArtwork();
   const defaultSearchSource = useMemo<"thunderstore" | "nexusmods">(() => {
     if (navigationState?.searchSource) {
       return navigationState.searchSource;
@@ -1811,6 +1960,7 @@ export function ModLibraryOverlay({
   const [downloading, setDownloading] = useState<string | null>(null);
   const [, setDeleting] = useState<string | null>(null);
   const [activatingGroup, setActivatingGroup] = useState<string | null>(null);
+  const [updatingAllGroups, setUpdatingAllGroups] = useState(false);
   const [, setUpdatingGroup] = useState<string | null>(null);
   const [openVersionMenuGroup, setOpenVersionMenuGroup] = useState<
     string | null
@@ -6926,47 +7076,6 @@ export function ModLibraryOverlay({
     [library],
   );
 
-  const renderCardIcon = useCallback(
-    (
-      name: string,
-      iconCachePath?: string,
-      iconUrl?: string,
-      variant: "inline" | "rail" = "inline",
-    ) => {
-      const local = resolveImageSource(iconCachePath);
-      const remote = resolveImageSource(iconUrl);
-      const source = local || remote;
-      const className =
-        variant === "rail" ? "mod-card-icon-rail" : "mod-card-icon-inline";
-
-      if (!source) {
-        return (
-          <div className={`${className} mod-card-icon-fallback`}>
-            <Icon name="fas fa-puzzle-piece" />
-          </div>
-        );
-      }
-
-      return (
-        <div className={className}>
-          <img
-            src={source}
-            alt={`${name} icon`}
-            className="mod-card-icon-image"
-            onError={(e) => {
-              if (remote && e.currentTarget.src !== remote) {
-                e.currentTarget.src = remote;
-                return;
-              }
-              e.currentTarget.style.display = "none";
-            }}
-          />
-        </div>
-      );
-    },
-    [],
-  );
-
   const displayedDownloadedGroups = useMemo(() => {
     if (libraryTab === "updates") {
       return filteredDownloadedGroups.filter((group) =>
@@ -8724,14 +8833,6 @@ export function ModLibraryOverlay({
       null
     );
   }, [downloadedGroupForSelectedNexus, getActiveEntryForGroup]);
-  const discoverResultCount = showSearchResults
-    ? searchResults.length
-    : nexusCatalogKind === "collections" && showNexusCollectionsResults
-      ? nexusCollectionsSearchResults.length
-      : showNexusModsResults
-      ? nexusModsSearchResults.length
-      : 0;
-  const activeQueueCount = downloading || installingTargets ? 1 : 0;
 
   useEffect(() => {
     if (
@@ -8812,6 +8913,56 @@ export function ModLibraryOverlay({
     loadingLibrary,
   ]);
 
+  // Updates whose current scan result is an exception (potentially malicious, known threat,
+  // needs review, not scannable) stay out of "Update All"; their own Update action keeps the gate.
+  const isGroupSecurityFlagged = useCallback(
+    (group: DownloadedModGroup): boolean => {
+      const entry = getActiveEntryForGroup(group) || group.entries[0];
+      return Boolean(getSecurityBadgeConfig(entry?.securityScan)?.exception);
+    },
+    [getActiveEntryForGroup],
+  );
+
+  const updatableDownloadedGroups = useMemo(
+    () =>
+      libraryTab === "updates"
+        ? displayedDownloadedGroups.filter((group) => isGroupUpdateAvailable(group))
+        : [],
+    [displayedDownloadedGroups, isGroupUpdateAvailable, libraryTab],
+  );
+  const flaggedUpdateGroupCount = updatableDownloadedGroups.filter(isGroupSecurityFlagged).length;
+  const bulkUpdateGroupCount = updatableDownloadedGroups.length - flaggedUpdateGroupCount;
+  const updateAllGroupsTitle =
+    flaggedUpdateGroupCount === 0
+      ? undefined
+      : bulkUpdateGroupCount === 0
+        ? `Every available update needs a security review. Open ${flaggedUpdateGroupCount === 1 ? "the mod" : "each mod"} and update it from its own page.`
+        : `${flaggedUpdateGroupCount} ${flaggedUpdateGroupCount === 1 ? "update needs" : "updates need"} a security review and ${flaggedUpdateGroupCount === 1 ? "is" : "are"} not included. Open ${flaggedUpdateGroupCount === 1 ? "the mod" : "each mod"} to update it on its own.`;
+
+  const handleUpdateAllGroups = useCallback(async () => {
+    const groups = displayedDownloadedGroups.filter(
+      (group) => isGroupUpdateAvailable(group) && !isGroupSecurityFlagged(group),
+    );
+    if (groups.length === 0) {
+      return;
+    }
+    setUpdatingAllGroups(true);
+    try {
+      for (const group of groups) {
+        try {
+          await handleUpdateAndActivateGroup(group);
+        } catch (error) {
+          logger.warn("Update All skipped a mod that failed to update", {
+            groupKey: group.key,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } finally {
+      setUpdatingAllGroups(false);
+    }
+  }, [displayedDownloadedGroups, handleUpdateAndActivateGroup, isGroupSecurityFlagged, isGroupUpdateAvailable]);
+
   const openContextMenu = useCallback(
     (event: ReactMouseEvent, items: AnchoredContextMenuItem[]) => {
       event.preventDefault();
@@ -8826,7 +8977,7 @@ export function ModLibraryOverlay({
       return [
         {
           key: "install",
-          label: group.installedIn.length > 0 ? "Install to more…" : "Install…",
+          label: "Install to…",
           icon: "fas fa-download",
           disabled: !entry,
           onSelect: () => {
@@ -9011,7 +9162,7 @@ export function ModLibraryOverlay({
           <SimmDialogContent
             nested
             showCloseButton={false}
-            className="collection-conflict-dialog"
+            className="app-dialog collection-conflict-dialog"
           >
             <div className="modal-header">
               <div>
@@ -9029,97 +9180,81 @@ export function ModLibraryOverlay({
                 onClick={() => handleCollectionConflictChoice("cancel")}
                 aria-label="Review this conflict later"
               >
-                ×
+                <Icon name="times" />
               </SimmButton>
             </div>
-            <div className="collection-conflict-dialog__body">
+            <div className="app-dialog__body collection-conflict-dialog__body">
               <button
                 type="button"
-                className="collection-conflict-choice collection-conflict-choice--collection"
+                className="collection-conflict-choice"
                 onClick={() => handleCollectionConflictChoice("collection")}
               >
-                <span className="collection-conflict-choice__eyebrow">
-                  Collection request
+                <strong className="collection-conflict-choice__action">
+                  Use collection version
+                </strong>
+                <span className="collection-conflict-choice__name">
+                  {collectionConflict.file.modName}
+                  <span className="ui-mono"> {collectionConflict.file.fileName}</span>
                 </span>
-                <strong>{collectionConflict.file.modName}</strong>
-                <span>{collectionConflict.file.fileName}</span>
-                <dl>
-                  <div>
-                    <dt>Version</dt>
-                    <dd>{collectionConflict.file.version || "Unknown"}</dd>
-                  </div>
-                  <div>
-                    <dt>Nexus file</dt>
-                    <dd>{collectionConflict.file.fileId}</dd>
-                  </div>
-                  <div>
-                    <dt>Size</dt>
-                    <dd>
-                      {collectionConflict.file.sizeInBytes
-                        ? formatFileSizeShort(
-                            collectionConflict.file.sizeInBytes,
-                          )
-                        : "Unknown"}
-                    </dd>
-                  </div>
+                <dl className="ui-kv collection-conflict-choice__facts">
+                  <dt>Version</dt>
+                  <dd className="ui-mono">{collectionConflict.file.version || "Unknown"}</dd>
+                  <dt>Nexus file</dt>
+                  <dd className="ui-mono">{collectionConflict.file.fileId}</dd>
+                  <dt>Size</dt>
+                  <dd>
+                    {collectionConflict.file.sizeInBytes
+                      ? formatFileSizeShort(collectionConflict.file.sizeInBytes)
+                      : "Unknown"}
+                  </dd>
                 </dl>
                 <span className="collection-conflict-choice__consequence">
-                  Download and install the exact file selected by this
-                  collection. Your current version remains stored in the
-                  library.
-                </span>
-                <span className="collection-conflict-choice__action">
-                  Use collection version
+                  Download and install the exact file selected by this collection.
+                  Your current version remains stored in the library.
                 </span>
               </button>
               <button
                 type="button"
-                className="collection-conflict-choice collection-conflict-choice--existing"
+                className="collection-conflict-choice"
                 onClick={() => handleCollectionConflictChoice("existing")}
               >
-                <span className="collection-conflict-choice__eyebrow">
-                  Current copy
-                </span>
-                <strong>
+                <strong className="collection-conflict-choice__action">
+                  Keep current version
+                </strong>
+                <span className="collection-conflict-choice__name">
                   {collectionConflict.existingEntries[0]?.displayName ||
                     collectionConflict.file.modName}
-                </strong>
-                <div className="collection-conflict-choice__existing-list">
+                </span>
+                <span className="collection-conflict-choice__existing-list">
                   {collectionConflict.existingEntries.map((entry) => (
                     <span key={entry.storageId}>
-                      {formatVersionTag(
-                        entry.sourceVersion || entry.installedVersion,
-                      )}
-                      {` • Nexus file ${entry.nexusFileId || getNexusFileIdFromTags(entry.tags) || "unknown"}`}
+                      {formatVersionTag(entry.sourceVersion || entry.installedVersion)}
+                      {` · Nexus file ${entry.nexusFileId || getNexusFileIdFromTags(entry.tags) || "unknown"}`}
                       {entry.installedIn.length > 0
-                        ? ` • Installed in ${entry.installedIn
+                        ? ` · Installed in ${entry.installedIn
                             .map(
                               (environmentId) =>
                                 environments.find(
-                                  (environment) =>
-                                    environment.id === environmentId,
+                                  (environment) => environment.id === environmentId,
                                 )?.name || environmentId,
                             )
                             .join(", ")}`
-                        : " • Stored in library"}
+                        : " · Stored in library"}
                     </span>
                   ))}
-                </div>
-                <span className="collection-conflict-choice__consequence">
-                  Keep the version you already have. SIMM will skip the
-                  collection file and preserve your current installation.
                 </span>
-                <span className="collection-conflict-choice__action">
-                  Keep current version
+                <span className="collection-conflict-choice__consequence">
+                  SIMM skips the collection file and preserves your current
+                  installation.
                 </span>
               </button>
             </div>
             {collectionConflictQueue.length > 0 && (
-              <div className="collection-conflict-dialog__queue">
+              <p className="collection-conflict-dialog__queue">
                 {collectionConflictQueue.length} more collection{" "}
                 {collectionConflictQueue.length === 1 ? "conflict" : "conflicts"}{" "}
                 queued. Other Premium downloads continue in the background.
-              </div>
+              </p>
             )}
           </SimmDialogContent>
         </Dialog>
@@ -9149,7 +9284,7 @@ export function ModLibraryOverlay({
                   setRuntimePrompt(null);
                 }}
               >
-                ×
+                <Icon name="times" />
               </SimmButton>
             </DialogHeader>
             <div className="app-dialog__body app-runtime-dialog__body app-collection-runtime-dialog__body">
@@ -9200,700 +9335,681 @@ export function ModLibraryOverlay({
         </Dialog>
       )}
 
-      <div className="mods-overlay mods-overlay--library workspace-collection-shell">
-        <WorkspacePageHeader
-          eyebrow="Workspace"
-          title="Mod Library"
-          description="Browse sources, manage downloaded entries, and install library versions into environments."
-        />
-
-        <div className={`workspace-collection${detailPageOpen ? " workspace-collection--detail" : ""}`}>
-          {!detailPageOpen && (
-          <div className="workspace-collection__main">
-            <div className="workspace-collection__header">
-              <div className="workspace-collection__nav">
-                <div className="workspace-collection__rail-group workspace-collection__rail-group--inline workspace-collection__primary-tabs">
-                  {(
-                    [
-                      ["discover", "Discover", "fas fa-compass"],
-                      ["library", "Library", "fas fa-book-open"],
-                      ["updates", "Updates", "fas fa-arrow-up"],
-                    ] as Array<[LibraryTab, string, string]>
-                  ).map(([tab, label, icon]) => (
-                    <SimmButton
-                      key={tab}
-                      type="button"
-                      variant="ghost"
-                      className={`workspace-collection__rail-button ${libraryTab === tab ? "workspace-collection__rail-button--active" : ""}`}
-                      onClick={() => setLibraryTab(tab)}
-                    >
-                      <Icon name={icon} />
-                      <span>{label}</span>
-                    </SimmButton>
-                  ))}
-                </div>
-
-                <div className="workspace-collection__summary">
-                  <div className="workspace-collection__summary-chip">
-                    <span>{libraryTab === "discover" ? "Sources" : "Downloaded"}</span>
-                    <strong>{libraryTab === "discover" ? 2 : downloadedSummary.total}</strong>
-                  </div>
-                  <div className="workspace-collection__summary-chip">
-                    <span>{libraryTab === "discover" ? "Results" : "Updates"}</span>
-                    <strong>{libraryTab === "discover" ? discoverResultCount : downloadedSummary.updates}</strong>
-                  </div>
-                  <div className="workspace-collection__summary-chip">
-                    <span>{libraryTab === "discover" ? "Queue" : "Installed"}</span>
-                    <strong>{libraryTab === "discover" ? activeQueueCount : downloadedSummary.installed}</strong>
-                  </div>
-                </div>
+      <div className="ui-page lib-page">
+        {!detailPageOpen && (
+          <>
+            <header className="lib-header">
+              <div className="ui-page-header__titles">
+                <h1 className="ui-page-title">Mod Library</h1>
+                <p className="ui-page-subtitle">
+                  Download mods once, then install them into any environment.
+                </p>
               </div>
+            </header>
+            <nav
+              className="ui-tabs-line lib-tabs"
+              aria-label="Mod Library sections"
+            >
+              {(
+                [
+                  ["discover", "Discover", "compass", null],
+                  ["library", "Library", "bookOpen", downloadedSummary.total],
+                  ["updates", "Updates", "arrowUp", downloadedSummary.updates],
+                ] as Array<[LibraryTab, string, string, number | null]>
+              ).map(([tab, label, icon, count]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  className="ui-tabs-line__tab"
+                  aria-current={libraryTab === tab ? "page" : undefined}
+                  onClick={() => setLibraryTab(tab)}
+                >
+                  <Icon name={icon} />
+                  {label}
+                  {count !== null && count > 0 && (
+                    <span
+                      className={cn(
+                        "ui-tabs-line__count",
+                        tab === "updates" && "ui-tabs-line__count--attention",
+                      )}
+                      aria-label={
+                        tab === "updates"
+                          ? `${count} ${count === 1 ? "update" : "updates"}`
+                          : `${count} ${count === 1 ? "mod" : "mods"}`
+                      }
+                    >
+                      {count}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </nav>
 
-              {(libraryTab === "library" || libraryTab === "updates") && (
-                <div className="workspace-collection__rail-group workspace-collection__rail-group--inline workspace-collection__filters-row">
-                  {(
-                    [
-                      "all",
-                      "updates",
-                      "managed",
-                      "external",
-                      "installed",
-                    ] as DownloadedFilter[]
-                  ).map((filter) => (
+            <div className="ui-toolbar lib-toolbar">
+              {libraryTab === "discover" ? (
+                <>
+                  <div
+                    className="lib-segmented"
+                    role="group"
+                    aria-label="Search source"
+                  >
+                    {(
+                      [
+                        ["thunderstore", "Thunderstore"],
+                        ["nexusmods", "Nexus Mods"],
+                      ] as const
+                    ).map(([source, label]) => (
+                      <button
+                        key={source}
+                        type="button"
+                        className="lib-segmented__option"
+                        aria-pressed={searchSource === source}
+                        onClick={() => selectSearchSource(source)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {searchSource === "nexusmods" && (
+                    <div
+                      className="lib-segmented"
+                      role="group"
+                      aria-label="Nexus catalog"
+                    >
+                      {(
+                        [
+                          ["mods", "Mods"],
+                          ["collections", "Collections"],
+                        ] as const
+                      ).map(([kind, label]) => (
+                        <button
+                          key={kind}
+                          type="button"
+                          className="lib-segmented__option"
+                          aria-pressed={nexusCatalogKind === kind}
+                          onClick={() => selectNexusCatalogKind(kind)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="lib-search">
+                    <Input
+                      type="search"
+                      className="lib-search__input"
+                      aria-label={
+                        searchSource === "thunderstore"
+                          ? "Search Thunderstore"
+                          : nexusCatalogKind === "collections"
+                            ? "Search Nexus Collections"
+                            : "Search Nexus Mods"
+                      }
+                      placeholder={
+                        searchSource === "thunderstore"
+                          ? "Search or browse Thunderstore mods..."
+                          : nexusCatalogKind === "collections"
+                            ? "Search Nexus Collections..."
+                            : "Search or browse Nexus Mods..."
+                      }
+                      value={
+                        searchSource === "thunderstore"
+                          ? searchQuery
+                          : nexusCatalogKind === "collections"
+                            ? nexusCollectionsSearchQuery
+                            : nexusModsSearchQuery
+                      }
+                      onChange={(event) => {
+                        if (searchSource === "thunderstore") {
+                          setSearchQuery(event.target.value);
+                        } else if (nexusCatalogKind === "collections") {
+                          setNexusCollectionsSearchQuery(event.target.value);
+                        } else {
+                          setNexusModsSearchQuery(event.target.value);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          if (searchSource === "thunderstore") handleSearch();
+                          else if (nexusCatalogKind === "collections")
+                            handleSearchNexusCollections();
+                          else handleSearchNexusMods();
+                        }
+                      }}
+                    />
                     <SimmButton
-                      key={filter}
                       type="button"
                       variant="ghost"
-                      className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${downloadedFilter === filter ? "workspace-collection__rail-button--active" : ""}`}
-                      onClick={() => setDownloadedFilter(filter)}
+                      size="icon-sm"
+                      className="lib-search__submit"
+                      aria-label="Search"
+                      title="Search (Enter)"
+                      onClick={
+                        searchSource === "thunderstore"
+                          ? handleSearch
+                          : nexusCatalogKind === "collections"
+                            ? handleSearchNexusCollections
+                            : handleSearchNexusMods
+                      }
+                      disabled={
+                        searchSource === "thunderstore"
+                          ? searching
+                          : nexusCatalogKind === "collections"
+                            ? searchingNexusCollections
+                            : searchingNexusMods
+                      }
                     >
-                      {filter === "all"
-                        ? "All"
-                        : filter === "updates"
-                          ? "Updates"
-                          : filter === "managed"
-                            ? "Managed"
-                            : filter === "external"
-                              ? "External"
-                              : "Installed"}
+                      <Icon name="search" />
                     </SimmButton>
-                  ))}
-                </div>
-              )}
-
-              <div className="workspace-collection__toolbar">
-                {libraryTab === "discover" ? (
-                  <>
-                    <div className="workspace-collection__catalog-row">
-                      <div className="workspace-collection__toolbar-group workspace-source-toggle workspace-catalog-toggle" aria-label="Search source">
-                        <span className="workspace-control-label">Source</span>
-                        <SimmButton
-                          type="button"
-                          variant={searchSource === "thunderstore" ? "default" : "secondary"}
-                          className={`btn btn-small ${searchSource === "thunderstore" ? "btn-primary" : "btn-secondary"}`}
-                          onClick={() => selectSearchSource("thunderstore")}
-                        >
-                          Thunderstore
-                        </SimmButton>
-                        <SimmButton
-                          type="button"
-                          variant={searchSource === "nexusmods" ? "default" : "secondary"}
-                          className={`btn btn-small ${searchSource === "nexusmods" ? "btn-primary" : "btn-secondary"}`}
-                          onClick={() => selectSearchSource("nexusmods")}
-                        >
-                          Nexus Mods
-                        </SimmButton>
-                      </div>
-                      {searchSource === "nexusmods" && (
-                        <div className="workspace-collection__toolbar-group workspace-source-toggle workspace-catalog-toggle workspace-nexus-catalog-toggle" aria-label="Nexus catalog">
-                          <span className="workspace-control-label">Browse</span>
-                          <SimmButton
-                            type="button"
-                            variant={nexusCatalogKind === "mods" ? "default" : "secondary"}
-                            className={`btn btn-small ${nexusCatalogKind === "mods" ? "btn-primary" : "btn-secondary"}`}
-                            onClick={() => selectNexusCatalogKind("mods")}
-                          >
-                            Mods
-                          </SimmButton>
-                          <SimmButton
-                            type="button"
-                            variant={nexusCatalogKind === "collections" ? "default" : "secondary"}
-                            className={`btn btn-small ${nexusCatalogKind === "collections" ? "btn-primary" : "btn-secondary"}`}
-                            onClick={() => selectNexusCatalogKind("collections")}
-                          >
-                            Collections
-                          </SimmButton>
-                        </div>
+                  </div>
+                  <DiscoverSortSelect
+                    value={discoverSort}
+                    onValueChange={setDiscoverSort}
+                  />
+                  <SimmButton
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Refresh"
+                    title="Refresh results"
+                    onClick={handleRefreshDiscovery}
+                    disabled={
+                      searching || searchingNexusMods || searchingNexusCollections
+                    }
+                  >
+                    <Icon
+                      name="syncAlt"
+                      spin={searching || searchingNexusMods || searchingNexusCollections}
+                    />
+                  </SimmButton>
+                </>
+              ) : (
+                <>
+                  <Input
+                    type="search"
+                    className="lib-filter-input"
+                    aria-label="Filter downloaded mods"
+                    value={downloadedSearch}
+                    onChange={(event) => setDownloadedSearch(event.target.value)}
+                    placeholder="Filter by mod, author, or version"
+                  />
+                  <DownloadedFilterSelect
+                    value={downloadedFilter}
+                    onValueChange={setDownloadedFilter}
+                  />
+                  <div className="ui-toolbar__spacer" />
+                  <SimmButton
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Refresh"
+                    title="Refresh library"
+                    onClick={handleRefreshLibrary}
+                    disabled={loadingLibrary}
+                  >
+                    <Icon name="syncAlt" spin={loadingLibrary} />
+                  </SimmButton>
+                  {libraryTab === "library" ? (
+                    <SimmButton
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="More library actions"
+                      aria-haspopup="menu"
+                      title="More actions"
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setContextMenu({
+                          x: rect.right - 200,
+                          y: rect.bottom + 4,
+                          items: [
+                            {
+                              key: "add-files",
+                              label:
+                                downloading === "library-import"
+                                  ? "Adding files…"
+                                  : "Add Files",
+                              icon: "fas fa-plus",
+                              disabled: downloading === "library-import",
+                              onSelect: () => {
+                                void handleAddFilesClick();
+                              },
+                            },
+                          ],
+                        });
+                      }}
+                    >
+                      <Icon name="ellipsisH" />
+                    </SimmButton>
+                  ) : (
+                    <>
+                      {flaggedUpdateGroupCount > 0 && (
+                        <span className="lib-toolbar__note" title={updateAllGroupsTitle}>
+                          {flaggedUpdateGroupCount} {flaggedUpdateGroupCount === 1 ? "needs" : "need"} review
+                        </span>
                       )}
-                    </div>
-                    <div className="workspace-collection__toolbar-search workspace-collection__toolbar-search--discover">
-                      <Input
-                        type="text"
-                        placeholder={
-                          searchSource === "thunderstore"
-                            ? "Search or browse Thunderstore mods..."
-                            : nexusCatalogKind === "collections"
-                              ? "Search Nexus Collections..."
-                              : "Search or browse Nexus Mods..."
-                        }
-                        value={
-                          searchSource === "thunderstore"
-                            ? searchQuery
-                            : nexusCatalogKind === "collections"
-                              ? nexusCollectionsSearchQuery
-                              : nexusModsSearchQuery
-                        }
-                        onChange={(event) => {
-                          if (searchSource === "thunderstore") {
-                            setSearchQuery(event.target.value);
-                          } else if (nexusCatalogKind === "collections") {
-                            setNexusCollectionsSearchQuery(event.target.value);
-                          } else {
-                            setNexusModsSearchQuery(event.target.value);
-                          }
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            if (searchSource === "thunderstore") handleSearch();
-                            else if (nexusCatalogKind === "collections")
-                              handleSearchNexusCollections();
-                            else handleSearchNexusMods();
-                          }
-                        }}
-                      />
                       <SimmButton
                         type="button"
-                        className="btn btn-primary btn-small"
-                        onClick={
-                          searchSource === "thunderstore"
-                            ? handleSearch
-                            : nexusCatalogKind === "collections"
-                              ? handleSearchNexusCollections
-                              : handleSearchNexusMods
-                        }
-                        disabled={
-                          searchSource === "thunderstore"
-                            ? searching
-                            : nexusCatalogKind === "collections"
-                              ? searchingNexusCollections
-                              : searchingNexusMods
-                        }
+                        onClick={() => void handleUpdateAllGroups()}
+                        disabled={updatingAllGroups || bulkUpdateGroupCount === 0}
+                        title={updateAllGroupsTitle}
                       >
-                        {(
-                          searchSource === "thunderstore"
-                            ? searchQuery.trim()
-                            : nexusCatalogKind === "collections"
-                              ? nexusCollectionsSearchQuery.trim()
-                              : nexusModsSearchQuery.trim()
-                        )
-                          ? "Search"
-                          : "Browse"}
-                      </SimmButton>
-                    </div>
-                    <div className="workspace-collection__sort-row">
-                      <div className="workspace-collection__toolbar-group">
-                        <span className="workspace-control-label">Sort</span>
-                        <div className="workspace-collection__toolbar-select">
-                          <DiscoverSortSelect
-                            value={discoverSort}
-                            onValueChange={setDiscoverSort}
-                          />
-                        </div>
-                      </div>
-                      <SimmButton
-                        type="button"
-                        variant="secondary"
-                        className="btn btn-secondary btn-small"
-                        onClick={handleRefreshDiscovery}
-                        disabled={
-                          searching || searchingNexusMods || searchingNexusCollections
-                        }
-                      >
-                        <Icon name={`fas ${searching || searchingNexusMods || searchingNexusCollections ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
-                         />
-                        <span>Refresh</span>
-                      </SimmButton>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--summary">
-                      <strong>
-                        {libraryTab === "updates"
-                          ? "Available Updates"
-                          : "Downloaded Library"}
-                      </strong>
-                      <span>
-                        {displayedDownloadedGroups.length}{" "}
-                        {displayedDownloadedGroups.length === 1
-                          ? "group"
-                          : "groups"}
-                      </span>
-                    </div>
-                    <div className="workspace-collection__toolbar-search">
-                      <Input
-                        type="text"
-                        value={downloadedSearch}
-                        onChange={(event) =>
-                          setDownloadedSearch(event.target.value)
-                        }
-                        placeholder="Filter by mod, author, or version"
-                      />
-                    </div>
-                    {libraryTab === "library" ? (
-                      <SimmButton
-                        type="button"
-                        className="btn btn-primary btn-small"
-                        onClick={handleAddFilesClick}
-                        disabled={downloading === "library-import"}
-                      >
-                        <Icon name={`fas ${downloading === "library-import" ? "fa-spinner fa-spin" : "fa-plus"}`}
-                         />
+                        <Icon name={updatingAllGroups ? "spinner" : "arrowUp"} spin={updatingAllGroups} />
                         <span>
-                          {downloading === "library-import"
-                            ? "Adding..."
-                            : "Add Files"}
+                          {updatingAllGroups
+                            ? "Updating…"
+                            : `Update All (${bulkUpdateGroupCount})`}
                         </span>
                       </SimmButton>
-                    ) : null}
-                    <SimmButton
-                      type="button"
-                      variant="secondary"
-                      className="btn btn-secondary btn-small"
-                      onClick={handleRefreshLibrary}
-                      disabled={loadingLibrary}
-                    >
-                      <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
-                       />
-                      <span>Refresh</span>
-                    </SimmButton>
-                  </>
-                )}
-              </div>
+                    </>
+                  )}
+                </>
+              )}
             </div>
 
-            <div
-              className="workspace-collection__content"
-              ref={libraryScrollContainerRef}
-            >
+            <div className="lib-body" ref={libraryScrollContainerRef}>
               {libraryTab === "discover" &&
                 searchSource === "thunderstore" &&
                 searchQuery.trim() === "" && (
-                  <section className="workspace-collection__section">
-                    <div className="workspace-collection__section-header">
-                      <h3>Featured</h3>
-                      <span>Core tools and recommended downloads</span>
-                    </div>
-                    <div className="workspace-feature-grid">
-                      <SimmButton
+                  <div
+                    className="lib-recommended"
+                    role="group"
+                    aria-label="Recommended tools"
+                  >
+                    <span className="lib-recommended__label">Recommended tools</span>
+                    {(
+                      [
+                        {
+                          key: "s1api",
+                          name: "S1API",
+                          artwork: lookupArtwork("S1API"),
+                          description: "Shared APIs and interoperability (GitHub release).",
+                          state: s1apiActionLabel,
+                          onClick: handleDownloadS1APIClick,
+                          disabled: false,
+                        },
+                        {
+                          key: "mlvscan",
+                          name: "MLVScan",
+                          artwork: lookupArtwork("MLVScan"),
+                          description: "Library scanning and validation (GitHub release).",
+                          state: mlvscanActionLabel,
+                          onClick: handleDownloadMlvscanClick,
+                          disabled: false,
+                        },
+                        {
+                          key: "meshvault",
+                          name: "MeshVault",
+                          artwork: lookupArtwork("MeshVault") ?? getFeaturedPackageArtwork(meshVaultFeaturedPackage),
+                          description: "Installs its runtime DLLs into Plugins (Thunderstore).",
+                          state: meshVaultActionLabel,
+                          onClick: handleDownloadMeshVaultClick,
+                          disabled: !meshVaultFeaturedPackage,
+                        },
+                        {
+                          key: "s1mapi",
+                          name: "S1MAPI",
+                          artwork: lookupArtwork("S1MAPI") ?? getFeaturedPackageArtwork(s1mapiFeaturedPackage),
+                          description: "Shared Schedule I mapping APIs in UserLibs (Thunderstore).",
+                          state: s1mapiActionLabel,
+                          onClick: handleDownloadS1MapiClick,
+                          disabled: !s1mapiFeaturedPackage,
+                        },
+                        {
+                          key: "steamnetworklib",
+                          name: "SteamNetworkLib",
+                          artwork: lookupArtwork("SteamNetworkLib") ?? getFeaturedPackageArtwork(steamNetworkLibFeaturedPackage),
+                          description: "Shared Steam networking in UserLibs (Thunderstore).",
+                          state: steamNetworkLibActionLabel,
+                          onClick: handleDownloadSteamNetworkLibClick,
+                          disabled: !steamNetworkLibFeaturedPackage,
+                        },
+                      ] as const
+                    ).map((tool) => (
+                      <button
+                        key={tool.key}
                         type="button"
-                        variant="ghost"
-                        className="workspace-feature-card"
-                        onClick={handleDownloadS1APIClick}
+                        className="lib-recommended__item"
+                        title={tool.description}
+                        onClick={tool.onClick}
+                        disabled={tool.disabled}
                       >
-                        <div>
-                          <strong>S1API</strong>
-                          <p>
-                            GitHub release for shared APIs and
-                            interoperability.
-                          </p>
-                        </div>
-                        <span>{s1apiActionLabel}</span>
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className="workspace-feature-card"
-                        onClick={handleDownloadMlvscanClick}
-                      >
-                        <div>
-                          <strong>MLVScan</strong>
-                          <p>
-                            GitHub-hosted library scanning and validation
-                            tooling.
-                          </p>
-                        </div>
-                        <span>{mlvscanActionLabel}</span>
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className="workspace-feature-card"
-                        onClick={handleDownloadMeshVaultClick}
-                        disabled={!meshVaultFeaturedPackage}
-                      >
-                        <div>
-                          <strong>MeshVault</strong>
-                          <p>
-                            Thunderstore package that installs its runtime DLLs
-                            into Plugins.
-                          </p>
-                        </div>
-                        <span>{meshVaultActionLabel}</span>
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className="workspace-feature-card"
-                        onClick={handleDownloadS1MapiClick}
-                        disabled={!s1mapiFeaturedPackage}
-                      >
-                        <div>
-                          <strong>S1MAPI</strong>
-                          <p>
-                            Thunderstore package for shared Schedule I mapping
-                            APIs in UserLibs.
-                          </p>
-                        </div>
-                        <span>{s1mapiActionLabel}</span>
-                      </SimmButton>
-                      <SimmButton
-                        type="button"
-                        variant="ghost"
-                        className="workspace-feature-card"
-                        onClick={handleDownloadSteamNetworkLibClick}
-                        disabled={!steamNetworkLibFeaturedPackage}
-                      >
-                        <div>
-                          <strong>SteamNetworkLib</strong>
-                          <p>
-                            Thunderstore library for shared Steam networking in
-                            UserLibs.
-                          </p>
-                        </div>
-                        <span>{steamNetworkLibActionLabel}</span>
-                      </SimmButton>
-                    </div>
-                  </section>
+                        {tool.artwork && (
+                          <ModThumbnail {...tool.artwork} name={tool.name} size={20} />
+                        )}
+                        <span className="lib-recommended__name">{tool.name}</span>
+                        <span
+                          className={cn(
+                            "lib-recommended__state",
+                            tool.state === "Update" && "lib-recommended__state--update",
+                            tool.state === "Download" && "lib-recommended__state--download",
+                          )}
+                        >
+                          {tool.state}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 )}
 
               {libraryTab === "discover" &&
-                searchSource === "nexusmods" &&
-                ((nexusCatalogKind === "mods" && searchingNexusMods) ||
-                  (nexusCatalogKind === "collections" &&
-                    searchingNexusCollections)) && (
-                  <section className="workspace-collection__section workspace-collection__section--inventory">
-                    <CollectionEmpty>
-                      {`Loading latest updated Nexus ${nexusCatalogKind}…`}
-                    </CollectionEmpty>
-                  </section>
+                ((searchSource === "thunderstore" && searching && !showSearchResults) ||
+                  (searchSource === "nexusmods" &&
+                    ((nexusCatalogKind === "mods" &&
+                      searchingNexusMods &&
+                      !showNexusModsResults) ||
+                      (nexusCatalogKind === "collections" &&
+                        searchingNexusCollections &&
+                        !showNexusCollectionsResults)))) && (
+                  <LibrarySkeletonRows
+                    label={
+                      searchSource === "thunderstore"
+                        ? "Loading Thunderstore mods"
+                        : `Loading Nexus ${nexusCatalogKind}`
+                    }
+                  />
                 )}
 
               {libraryTab === "discover" &&
-                (showSearchResults ||
-                  (nexusCatalogKind === "mods" && showNexusModsResults) ||
-                  (nexusCatalogKind === "collections" &&
-                    showNexusCollectionsResults)) && (
-                  <section className="workspace-collection__section workspace-collection__section--inventory">
-                    <div className="workspace-collection__list workspace-collection__list--inventory">
-                      {nexusCatalogKind === "collections" &&
-                      searchSource === "nexusmods" ? (
-                        <div className="workspace-collection__table-head workspace-collection__table-head--discover workspace-collection__table-head--collections" aria-hidden="true">
-                          <span>Collection</span>
-                          <span>Curator</span>
-                          <span>Mods</span>
-                          <span>Updated</span>
-                        </div>
-                      ) : (
-                        <div className="workspace-collection__table-head workspace-collection__table-head--discover" aria-hidden="true">
-                          <span>Mod</span>
-                          <span>Version</span>
-                          <span>Downloads</span>
-                        </div>
-                      )}
-                      {showSearchResults &&
-                        searchResults.map((pkg) => {
-                          const representative =
-                            pkg.packagesByRuntime.IL2CPP ||
-                            pkg.packagesByRuntime.Mono;
-                          const latestVersion =
-                            getLatestThunderstorePackageVersion(representative);
-                          const runtimeLabel = (
-                            ["IL2CPP", "Mono"] as const
-                          )
-                            .filter((runtime) => pkg.packagesByRuntime[runtime])
-                            .join(" + ");
-                          const categoryLabel =
-                            representative?.categories?.[0];
-                          const versionLabel =
-                            latestVersion?.version_number || "Unknown";
-                          const downloadsLabel = formatCompactNumber(
-                            latestVersion?.downloads,
-                          );
-                          const ratingLabel = formatCompactNumber(
-                            representative?.rating_score,
-                          );
-                          const updatedLabel = formatInspectorDate(
-                            getThunderstorePackageUpdatedAt(representative),
-                          );
-                          const downloadedGroup =
-                            findDownloadedGroupForThunderstorePackage(pkg);
-                          const isSelected =
-                            activeModView?.kind === "thunderstore" &&
-                            activeModView.id === pkg.key;
-                          return (
-                            <div
-                              key={pkg.key}
-                              className={`workspace-collection__row workspace-collection__row--discover ${isSelected ? "workspace-collection__row--selected" : ""}`}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => openThunderstoreModView(pkg)}
-                              onKeyDown={(event) =>
-                                handleCardActivationKeyDown(event, () =>
-                                  openThunderstoreModView(pkg),
-                                )
-                              }
-                            >
-                              {renderCardIcon(
-                                pkg.name,
-                                undefined,
+                searchSource === "thunderstore" &&
+                !searching &&
+                !showSearchResults && (
+                  <LibraryEmpty
+                    icon="compass"
+                    title="Browse Thunderstore"
+                    action={
+                      <SimmButton type="button" variant="outline" onClick={handleSearch}>
+                        Browse
+                      </SimmButton>
+                    }
+                  >
+                    Search by name or author, or load the latest mods for Schedule I.
+                  </LibraryEmpty>
+                )}
+
+              {libraryTab === "discover" &&
+                ((searchSource === "thunderstore" && showSearchResults) ||
+                  (searchSource === "nexusmods" &&
+                    ((nexusCatalogKind === "mods" && showNexusModsResults) ||
+                      (nexusCatalogKind === "collections" &&
+                        showNexusCollectionsResults)))) && (
+                  <div className="lib-table">
+                    {searchSource === "nexusmods" &&
+                    nexusCatalogKind === "collections" ? (
+                      <div
+                        className="lib-table__head lib-grid lib-grid--collections"
+                        aria-hidden="true"
+                      >
+                        <span />
+                        <span>Collection</span>
+                        <span>Curator</span>
+                        <span className="lib-cell--num">Mods</span>
+                        <span>Revision</span>
+                        <span>Updated</span>
+                      </div>
+                    ) : (
+                      <div
+                        className="lib-table__head lib-grid lib-grid--discover"
+                        aria-hidden="true"
+                      >
+                        <span />
+                        <span>Mod</span>
+                        <span>Author</span>
+                        <span>{searchSource === "thunderstore" ? "Runtime" : "Category"}</span>
+                        <span>Version</span>
+                        <span className="lib-cell--num">Downloads</span>
+                        <span>Updated</span>
+                      </div>
+                    )}
+                    {searchSource === "thunderstore" &&
+                      showSearchResults &&
+                      searchResults.map((pkg) => {
+                        const representative =
+                          pkg.packagesByRuntime.IL2CPP ||
+                          pkg.packagesByRuntime.Mono;
+                        const latestVersion =
+                          getLatestThunderstorePackageVersion(representative);
+                        const runtimeLabel = (["IL2CPP", "Mono"] as const)
+                          .filter((runtime) => pkg.packagesByRuntime[runtime])
+                          .join(" + ");
+                        const updatedLabel = formatInspectorDate(
+                          getThunderstorePackageUpdatedAt(representative),
+                        );
+                        const downloadedGroup =
+                          findDownloadedGroupForThunderstorePackage(pkg);
+                        const isSelected =
+                          activeModView?.kind === "thunderstore" &&
+                          activeModView.id === pkg.key;
+                        return (
+                          <div
+                            key={pkg.key}
+                            className={cn(
+                              "lib-row lib-row--discover lib-grid lib-grid--discover",
+                              isSelected && "lib-row--selected",
+                            )}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openThunderstoreModView(pkg)}
+                            onKeyDown={(event) =>
+                              handleCardActivationKeyDown(event, () =>
+                                openThunderstoreModView(pkg),
+                              )
+                            }
+                          >
+                            <ModThumbnail
+                              name={pkg.name}
+                              iconUrl={
                                 latestVersion?.icon ||
-                                  representative?.icon ||
-                                  representative?.icon_url,
-                                "inline",
-                              )}
-                              <div className="workspace-collection__row-body">
-                                <div className="workspace-collection__row-title">
-                                  {pkg.name}
-                                </div>
-                                <div className="workspace-collection__row-meta">
-                                  <span>by {pkg.owner}</span>
-                                  {updatedLabel !== "unknown" && (
-                                    <span>Updated {updatedLabel}</span>
-                                  )}
-                                  {runtimeLabel && <span>{runtimeLabel}</span>}
-                                  {categoryLabel && <span>{categoryLabel}</span>}
-                                  {downloadedGroup &&
-                                    (isGroupUpdateAvailable(downloadedGroup) ? (
-                                      <span className="workspace-collection__status workspace-collection__status--warning">
-                                        Update available
-                                      </span>
-                                    ) : (
-                                      <span className="workspace-collection__status workspace-collection__status--success">
-                                        Downloaded
-                                      </span>
-                                    ))}
-                                </div>
-                                <p className="workspace-collection__row-summary">
-                                  {latestVersion?.description ||
-                                    "No summary provided."}
-                                </p>
-                                <div
-                                  className="workspace-collection__row-facts"
-                                  aria-label="Mod details"
-                                >
-                                  <span>v{versionLabel}</span>
-                                  <span>{downloadsLabel} downloads</span>
-                                  {representative?.rating_score !== undefined && (
-                                    <span>{ratingLabel} rating score</span>
-                                  )}
-                                </div>
+                                representative?.icon ||
+                                representative?.icon_url
+                              }
+                              size={32}
+                            />
+                            <div className="lib-cell lib-cell--name">
+                              <div className="lib-row__title-line">
+                                <span className="lib-row__title">{pkg.name}</span>
+                                {downloadedGroup &&
+                                  (isGroupUpdateAvailable(downloadedGroup) ? (
+                                    <LibraryTag tone="warn">Update available</LibraryTag>
+                                  ) : (
+                                    <LibraryTag>Downloaded</LibraryTag>
+                                  ))}
                               </div>
-                              <div className="workspace-collection__row-cell workspace-collection__row-cell--metric">
-                                <span>v{versionLabel}</span>
-                              </div>
-                              <div className="workspace-collection__row-cell workspace-collection__row-cell--metric">
-                                <span>{downloadsLabel} downloads</span>
-                                {representative?.rating_score !== undefined && (
-                                  <small>{ratingLabel} rating score</small>
-                                )}
-                              </div>
+                              <p className="lib-row__summary">
+                                {latestVersion?.description || "No summary provided."}
+                              </p>
                             </div>
-                          );
-                        })}
+                            <div className="lib-cell lib-cell--text">{pkg.owner}</div>
+                            <div className="lib-cell lib-cell--text">{runtimeLabel || "—"}</div>
+                            <div className="lib-cell lib-cell--version">
+                              {formatVersionTag(latestVersion?.version_number)}
+                            </div>
+                            <div
+                              className="lib-cell lib-cell--num"
+                              title={
+                                representative?.rating_score !== undefined
+                                  ? `${formatCompactNumber(representative.rating_score)} rating score`
+                                  : undefined
+                              }
+                            >
+                              {formatCompactNumber(latestVersion?.downloads)}
+                            </div>
+                            <div className="lib-cell lib-cell--text">
+                              {updatedLabel !== "unknown" ? updatedLabel : "—"}
+                            </div>
+                          </div>
+                        );
+                      })}
 
-                      {nexusCatalogKind === "mods" &&
-                        showNexusModsResults &&
-                        nexusModsSearchResults.map((mod) => {
-                          const updatedLabel = formatInspectorDate(
-                            getNexusModUpdatedAt(mod),
-                          );
-                          const versionLabel = mod.version || "Unknown";
-                          const downloadsLabel = formatCompactNumber(
-                            mod.mod_downloads,
-                          );
-                          const uniqueDownloadsLabel = formatCompactNumber(
-                            mod.unique_downloads,
-                          );
-                          const endorsementsLabel = formatCompactNumber(
-                            mod.endorsement_count,
-                          );
-                          const downloadedGroup =
-                            findDownloadedGroupForNexusMod(mod.mod_id);
-                          const isSelected =
-                            activeModView?.kind === "nexusmods" &&
-                            activeModView.id === String(mod.mod_id);
-                          return (
-                            <div
-                              key={mod.mod_id}
-                              className={`workspace-collection__row workspace-collection__row--discover ${isSelected ? "workspace-collection__row--selected" : ""}`}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => openNexusModView(mod)}
-                              onKeyDown={(event) =>
-                                handleCardActivationKeyDown(event, () =>
-                                  openNexusModView(mod),
-                                )
-                              }
-                            >
-                              {renderCardIcon(
-                                mod.name,
-                                undefined,
-                                mod.picture_url,
-                                "inline",
-                              )}
-                              <div className="workspace-collection__row-body">
-                                <div className="workspace-collection__row-title">
-                                  {mod.name}
-                                </div>
-                                <div className="workspace-collection__row-meta">
-                                  <span>by {getNexusModAttribution(mod)}</span>
-                                  {updatedLabel !== "unknown" && (
-                                    <span>Updated {updatedLabel}</span>
-                                  )}
-                                  {mod.category_name && (
-                                    <span>{mod.category_name}</span>
-                                  )}
-                                  {downloadedGroup &&
-                                    (isGroupUpdateAvailable(downloadedGroup) ? (
-                                      <span className="workspace-collection__status workspace-collection__status--warning">
-                                        Update available
-                                      </span>
-                                    ) : (
-                                      <span className="workspace-collection__status workspace-collection__status--success">
-                                        Downloaded
-                                      </span>
-                                    ))}
-                                </div>
-                                <p className="workspace-collection__row-summary">
-                                  {mod.summary || "No summary provided."}
-                                </p>
-                                <div
-                                  className="workspace-collection__row-facts"
-                                  aria-label="Mod details"
-                                >
-                                  <span>v{versionLabel}</span>
-                                  <span>{downloadsLabel} downloads</span>
-                                  <span>{uniqueDownloadsLabel} unique</span>
-                                  <span
-                                    className="workspace-collection__endorsement-count"
-                                    aria-label={`${endorsementsLabel} endorsements`}
-                                  >
-                                    <Icon name="star" />
-                                    {endorsementsLabel}
-                                  </span>
-                                </div>
+                    {searchSource === "nexusmods" &&
+                      nexusCatalogKind === "mods" &&
+                      showNexusModsResults &&
+                      nexusModsSearchResults.map((mod) => {
+                        const updatedLabel = formatInspectorDate(
+                          getNexusModUpdatedAt(mod),
+                        );
+                        const endorsementsLabel = formatCompactNumber(
+                          mod.endorsement_count,
+                        );
+                        const downloadedGroup =
+                          findDownloadedGroupForNexusMod(mod.mod_id);
+                        const isSelected =
+                          activeModView?.kind === "nexusmods" &&
+                          activeModView.id === String(mod.mod_id);
+                        return (
+                          <div
+                            key={mod.mod_id}
+                            className={cn(
+                              "lib-row lib-row--discover lib-grid lib-grid--discover",
+                              isSelected && "lib-row--selected",
+                            )}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openNexusModView(mod)}
+                            onKeyDown={(event) =>
+                              handleCardActivationKeyDown(event, () =>
+                                openNexusModView(mod),
+                              )
+                            }
+                          >
+                            <ModThumbnail
+                              name={mod.name}
+                              iconUrl={mod.thumbnail_url || mod.picture_url}
+                              size={32}
+                            />
+                            <div className="lib-cell lib-cell--name">
+                              <div className="lib-row__title-line">
+                                <span className="lib-row__title">{mod.name}</span>
+                                {mod.contains_adult_content ? (
+                                  <LibraryTag tone="danger">Adult content</LibraryTag>
+                                ) : downloadedGroup ? (
+                                  isGroupUpdateAvailable(downloadedGroup) ? (
+                                    <LibraryTag tone="warn">Update available</LibraryTag>
+                                  ) : (
+                                    <LibraryTag>Downloaded</LibraryTag>
+                                  )
+                                ) : null}
                               </div>
-                              <div className="workspace-collection__row-cell workspace-collection__row-cell--metric">
-                                <span>v{versionLabel}</span>
-                              </div>
-                              <div className="workspace-collection__row-cell workspace-collection__row-cell--metric">
-                                <span>{downloadsLabel} downloads</span>
-                                <small>{uniqueDownloadsLabel} unique</small>
-                                <small
-                                  className="workspace-collection__endorsement-count"
-                                  aria-label={`${endorsementsLabel} endorsements`}
-                                >
-                                  <Icon name="star" />
-                                  {endorsementsLabel}
-                                </small>
-                              </div>
+                              <p className="lib-row__summary">
+                                {mod.summary || "No summary provided."}
+                              </p>
                             </div>
-                          );
-                        })}
-                      {nexusCatalogKind === "collections" &&
-                        showNexusCollectionsResults &&
-                        nexusCollectionsSearchResults.map((collection) => {
-                          const updatedLabel = formatInspectorDate(
-                            collection.updated_at ||
-                              collection.revision_updated_at,
-                          );
-                          const isSelected =
-                            selectedNexusCollectionSlug === collection.slug;
-                          return (
+                            <div className="lib-cell lib-cell--text">
+                              {getNexusModAttribution(mod)}
+                            </div>
+                            <div className="lib-cell lib-cell--text">
+                              {mod.category_name || "—"}
+                            </div>
+                            <div className="lib-cell lib-cell--version">
+                              {formatVersionTag(mod.version)}
+                            </div>
                             <div
-                              key={collection.slug}
-                              className={`workspace-collection__row workspace-collection__row--discover workspace-collection__row--collections ${isSelected ? "workspace-collection__row--selected" : ""}`}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() =>
-                                openNexusCollectionView(collection)
-                              }
-                              onKeyDown={(event) =>
-                                handleCardActivationKeyDown(event, () =>
-                                  openNexusCollectionView(collection),
-                                )
-                              }
+                              className="lib-cell lib-cell--num"
+                              title={`${formatCompactNumber(mod.unique_downloads)} unique downloads · ${endorsementsLabel} endorsements`}
                             >
-                              {renderCardIcon(
-                                collection.name,
-                                undefined,
-                                collection.tile_image_url,
-                                "inline",
-                              )}
-                              <div className="workspace-collection__row-body">
-                                <div className="workspace-collection__row-title">
-                                  {collection.name}
-                                </div>
-                                <div className="workspace-collection__row-meta">
-                                  <span>by {collection.curator_name}</span>
-                                  <span>
-                                    {collection.mod_count.toLocaleString()} mods
-                                  </span>
-                                  {collection.revision_number !== undefined && (
-                                    <span>Revision {collection.revision_number}</span>
-                                  )}
-                                  {updatedLabel !== "unknown" && (
-                                    <span>Updated {updatedLabel}</span>
-                                  )}
-                                </div>
-                                <p className="workspace-collection__row-summary">
-                                  {collection.summary ||
-                                    "No summary provided."}
-                                </p>
-                              </div>
-                              <div className="workspace-collection__row-cell">
-                                <span>{collection.curator_name}</span>
-                              </div>
-                              <div className="workspace-collection__row-cell">
-                                <span>{collection.mod_count.toLocaleString()}</span>
-                                {collection.revision_number !== undefined && (
-                                  <small>Revision {collection.revision_number}</small>
+                              {formatCompactNumber(mod.mod_downloads)}
+                            </div>
+                            <div className="lib-cell lib-cell--text">
+                              {updatedLabel !== "unknown" ? updatedLabel : "—"}
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                    {searchSource === "nexusmods" &&
+                      nexusCatalogKind === "collections" &&
+                      showNexusCollectionsResults &&
+                      nexusCollectionsSearchResults.map((collection) => {
+                        const updatedLabel = formatInspectorDate(
+                          collection.updated_at || collection.revision_updated_at,
+                        );
+                        const isSelected =
+                          selectedNexusCollectionSlug === collection.slug;
+                        return (
+                          <div
+                            key={collection.slug}
+                            className={cn(
+                              "lib-row lib-row--discover lib-row--collection lib-grid lib-grid--collections",
+                              isSelected && "lib-row--selected",
+                            )}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openNexusCollectionView(collection)}
+                            onKeyDown={(event) =>
+                              handleCardActivationKeyDown(event, () =>
+                                openNexusCollectionView(collection),
+                              )
+                            }
+                          >
+                            <CollectionTile src={collection.tile_image_url} />
+                            <div className="lib-cell lib-cell--name">
+                              <div className="lib-row__title-line">
+                                <span className="lib-row__title">{collection.name}</span>
+                                {collection.contains_adult_content && (
+                                  <LibraryTag tone="danger">Adult content</LibraryTag>
                                 )}
                               </div>
-                              <div className="workspace-collection__row-cell">
-                                <span>{updatedLabel}</span>
-                              </div>
+                              <p className="lib-row__summary">
+                                {collection.summary || "No summary provided."}
+                              </p>
                             </div>
-                          );
-                        })}
-                      {showSearchResults && searchResults.length === 0 && (
-                        <CollectionEmpty>No Thunderstore mods matched this search.</CollectionEmpty>
+                            <div className="lib-cell lib-cell--text">
+                              {collection.curator_name}
+                            </div>
+                            <div className="lib-cell lib-cell--num">
+                              {collection.mod_count.toLocaleString()}
+                            </div>
+                            <div className="lib-cell lib-cell--text">
+                              {collection.revision_number !== undefined
+                                ? `Revision ${collection.revision_number}`
+                                : "—"}
+                            </div>
+                            <div className="lib-cell lib-cell--text">
+                              {updatedLabel !== "unknown" ? updatedLabel : "—"}
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                    {searchSource === "thunderstore" &&
+                      showSearchResults &&
+                      searchResults.length === 0 && (
+                        <LibraryEmpty icon="search" title="No Thunderstore mods found">
+                          Nothing matched this search. Check the spelling or try the
+                          mod author&apos;s name.
+                        </LibraryEmpty>
                       )}
-                      {nexusCatalogKind === "mods" &&
-                        showNexusModsResults &&
-                        nexusModsSearchResults.length === 0 && (
-                          <CollectionEmpty>No Nexus Mods matched this search.</CollectionEmpty>
-                        )}
-                      {nexusCatalogKind === "collections" &&
-                        showNexusCollectionsResults &&
-                        nexusCollectionsSearchResults.length === 0 && (
-                          <CollectionEmpty>
-                            No Nexus Collections matched this search.
-                          </CollectionEmpty>
-                        )}
-                      {nexusCatalogKind === "mods" &&
-                        showNexusModsResults &&
-                        nexusModsSearchResults.length > 0 && (
-                        <div className="workspace-collection__pagination">
+                    {searchSource === "nexusmods" &&
+                      nexusCatalogKind === "mods" &&
+                      showNexusModsResults &&
+                      nexusModsSearchResults.length === 0 && (
+                        <LibraryEmpty icon="search" title="No Nexus Mods found">
+                          Nothing matched this search. Check the spelling or try a
+                          shorter name.
+                        </LibraryEmpty>
+                      )}
+                    {searchSource === "nexusmods" &&
+                      nexusCatalogKind === "collections" &&
+                      showNexusCollectionsResults &&
+                      nexusCollectionsSearchResults.length === 0 && (
+                        <LibraryEmpty icon="search" title="No Nexus Collections found">
+                          Nothing matched this search. Try a broader term.
+                        </LibraryEmpty>
+                      )}
+                    {searchSource === "nexusmods" &&
+                      nexusCatalogKind === "mods" &&
+                      showNexusModsResults &&
+                      nexusModsSearchResults.length > 0 && (
+                        <div className="lib-table__footer">
                           <span>
-                            Showing {nexusModsSearchResults.length.toLocaleString()} of{' '}
+                            Showing {nexusModsSearchResults.length.toLocaleString()} of{" "}
                             {nexusModsTotalCount.toLocaleString()} Nexus Mods
                           </span>
                           {nexusModsHasMore && (
                             <SimmButton
                               type="button"
-                              variant="ghost"
+                              variant="outline"
+                              size="sm"
                               onClick={handleLoadMoreNexusMods}
                               disabled={loadingMoreNexusMods}
                             >
@@ -9902,67 +10018,157 @@ export function ModLibraryOverlay({
                           )}
                         </div>
                       )}
-                      {nexusCatalogKind === "collections" &&
-                        showNexusCollectionsResults &&
-                        nexusCollectionsSearchResults.length > 0 && (
-                          <div className="workspace-collection__pagination">
-                            <span>
-                              Showing {nexusCollectionsSearchResults.length.toLocaleString()} of{" "}
-                              {nexusCollectionsTotalCount.toLocaleString()} Nexus Collections
-                            </span>
-                            {nexusCollectionsHasMore && (
-                              <SimmButton
-                                type="button"
-                                variant="ghost"
-                                onClick={handleLoadMoreNexusCollections}
-                                disabled={loadingMoreNexusCollections}
-                              >
-                                {loadingMoreNexusCollections
-                                  ? "Loading…"
-                                  : "Load more"}
-                              </SimmButton>
-                            )}
-                          </div>
-                        )}
-                    </div>
-                  </section>
-              )}
+                    {searchSource === "nexusmods" &&
+                      nexusCatalogKind === "collections" &&
+                      showNexusCollectionsResults &&
+                      nexusCollectionsSearchResults.length > 0 && (
+                        <div className="lib-table__footer">
+                          <span>
+                            Showing {nexusCollectionsSearchResults.length.toLocaleString()} of{" "}
+                            {nexusCollectionsTotalCount.toLocaleString()} Nexus Collections
+                          </span>
+                          {nexusCollectionsHasMore && (
+                            <SimmButton
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={handleLoadMoreNexusCollections}
+                              disabled={loadingMoreNexusCollections}
+                            >
+                              {loadingMoreNexusCollections ? "Loading…" : "Load more"}
+                            </SimmButton>
+                          )}
+                        </div>
+                      )}
+                  </div>
+                )}
 
               {(libraryTab === "library" || libraryTab === "updates") && (
-                <section className="workspace-collection__section workspace-collection__section--inventory">
-                  {loadingLibrary && (
-                    <CollectionEmpty>Loading mod library...</CollectionEmpty>
-                  )}
+                <>
+                  {loadingLibrary && <LibrarySkeletonRows label="Loading mod library" />}
                   {!loadingLibrary &&
-                    displayedDownloadedGroups.length === 0 && (
-                      <CollectionEmpty>
-                        {libraryTab === "updates"
-                          ? "No downloaded mods currently need updates."
-                          : "No downloaded mods match this filter."}
-                      </CollectionEmpty>
-                  )}
+                    displayedDownloadedGroups.length === 0 &&
+                    (downloadedSearch.trim() !== "" || downloadedFilter !== "all" ? (
+                      <LibraryEmpty
+                        icon="filter"
+                        title="No mods match this filter"
+                        action={
+                          <SimmButton
+                            type="button"
+                            variant="outline"
+                            onClick={() => {
+                              setDownloadedSearch("");
+                              setDownloadedFilter("all");
+                            }}
+                          >
+                            Clear Filter
+                          </SimmButton>
+                        }
+                      >
+                        Clear the filter to see every downloaded mod.
+                      </LibraryEmpty>
+                    ) : libraryTab === "updates" ? (
+                      <LibraryEmpty icon="circleCheck" title="Everything is up to date">
+                        SIMM checks your downloaded mods against Thunderstore, Nexus
+                        Mods and GitHub. New versions show up here.
+                      </LibraryEmpty>
+                    ) : (
+                      <LibraryEmpty
+                        icon="puzzlePiece"
+                        title="No downloaded mods yet"
+                        action={
+                          <div className="lib-empty__actions">
+                            <SimmButton type="button" onClick={() => setLibraryTab("discover")}>
+                              <Icon name="compass" />
+                              <span>Browse Discover</span>
+                            </SimmButton>
+                            <SimmButton
+                              type="button"
+                              variant="outline"
+                              onClick={() => void handleAddFilesClick()}
+                              disabled={downloading === "library-import"}
+                            >
+                              Add Files
+                            </SimmButton>
+                          </div>
+                        }
+                      >
+                        Mods you download are stored here once and can be installed into
+                        any environment.
+                      </LibraryEmpty>
+                    ))}
                   {!loadingLibrary && displayedDownloadedGroups.length > 0 && (
-                    <div className="workspace-collection__list workspace-collection__list--inventory">
-                      <div className="workspace-collection__table-head workspace-collection__table-head--downloaded" aria-hidden="true">
-                        <span>Name</span>
-                        <span>Source</span>
-                        <span>Version</span>
-                        <span>Installed</span>
-                      </div>
+                    <div
+                      className={cn(
+                        "lib-table lib-table--sized",
+                        libraryTab === "updates" ? "lib-table--updates" : "lib-table--library",
+                      )}
+                    >
+                      {libraryTab === "updates" ? (
+                        <div
+                          className="lib-table__head lib-grid lib-grid--updates"
+                          aria-hidden="true"
+                        >
+                          <span />
+                          <span>Mod</span>
+                          <span>Source</span>
+                          <span>Current</span>
+                          <span>Latest</span>
+                          <span>Installed in</span>
+                        </div>
+                      ) : (
+                        <div
+                          className="lib-table__head lib-grid lib-grid--library"
+                          aria-hidden="true"
+                        >
+                          <span />
+                          <span>Mod</span>
+                          <span>Author</span>
+                          <span>Source</span>
+                          <span>Runtime</span>
+                          <span>Version</span>
+                          <span>Installed in</span>
+                        </div>
+                      )}
                       {displayedDownloadedGroups.map((group) => {
                         const activeEntry =
                           getActiveEntryForGroup(group) || group.entries[0];
-                        const securityBadge =
-                          settings?.showSecurityScanBadges !== false
-                            ? getSecurityBadgeConfig(activeEntry?.securityScan)
-                            : null;
+                        const updateAvailable = isGroupUpdateAvailable(group);
+                        const exception = getExceptionTag(
+                          activeEntry?.securityScan,
+                          settings?.showSecurityScanBadges !== false,
+                          libraryTab === "library" && updateAvailable,
+                          // In Updates, an unscannable mod is held out of Update All: say why.
+                          libraryTab === "updates",
+                        );
                         const isSelected =
                           activeModView?.kind === "downloaded" &&
                           activeModView.id === group.key;
+                        const installedNames = group.installedIn.map(
+                          (environmentId) =>
+                            environments.find(
+                              (environment) => environment.id === environmentId,
+                            )?.name || environmentId,
+                        );
+                        const installedLabel =
+                          installedNames.length === 0
+                            ? "—"
+                            : installedNames.length === 1
+                              ? installedNames[0]
+                              : `${installedNames.length} environments`;
+                        const versionLabel = activeEntry
+                          ? formatVersionTag(getEntryVersionLabel(activeEntry))
+                          : "—";
                         return (
                           <div
                             key={group.key}
-                            className={`workspace-collection__row workspace-collection__row--downloaded ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                            className={cn(
+                              "lib-row lib-row--downloaded lib-grid",
+                              libraryTab === "updates"
+                                ? "lib-grid--updates"
+                                : "lib-grid--library",
+                              isSelected && "lib-row--selected",
+                            )}
                             role="button"
                             tabIndex={0}
                             onClick={() => openDownloadedModView(group)}
@@ -9972,691 +10178,146 @@ export function ModLibraryOverlay({
                               )
                             }
                             onContextMenu={(event) =>
-                              openContextMenu(
-                                event,
-                                downloadedContextMenuItems(group),
-                              )
+                              openContextMenu(event, downloadedContextMenuItems(group))
                             }
                           >
-                            {renderCardIcon(
-                              group.displayName,
-                              activeEntry?.iconCachePath,
-                              activeEntry?.iconUrl,
-                              "inline",
-                            )}
-                            <div className="workspace-collection__row-body">
-                              <div className="workspace-collection__row-title">
-                                {group.displayName}
-                              </div>
-                              <div className="workspace-collection__row-meta">
-                                {group.availableRuntimes.map((runtime) => (
-                                  <WorkspaceBadge
-                                    key={`${group.key}-${runtime}`}
-                                  >
-                                    {runtime}
-                                  </WorkspaceBadge>
-                                ))}
-                                {isGroupUpdateAvailable(group) && (
-                                  <WorkspaceBadge tone="warning">
-                                    Update available
-                                  </WorkspaceBadge>
-                                )}
-                                {securityBadge && (
-                                  <WorkspaceBadge
-                                    className="workspace-pill--security"
-                                    style={{
-                                      borderColor: securityBadge.border,
-                                      background: securityBadge.background,
-                                      color: securityBadge.color,
-                                    }}
-                                  >
-                                    {securityBadge.label}
-                                  </WorkspaceBadge>
+                            <ModThumbnail
+                              name={group.displayName}
+                              iconCachePath={activeEntry?.iconCachePath}
+                              iconUrl={activeEntry?.iconUrl}
+                              size={32}
+                            />
+                            <div className="lib-cell lib-cell--name">
+                              <div className="lib-row__title-line">
+                                <span className="lib-row__title">{group.displayName}</span>
+                                {exception && (
+                                  <LibraryTag tone={exception.tone}>{exception.label}</LibraryTag>
                                 )}
                               </div>
-                              <p className="workspace-collection__row-summary">
+                              <p className="lib-row__summary">
                                 {activeEntry?.summary || "No summary provided."}
                               </p>
                             </div>
-                            <div className="workspace-collection__row-cell workspace-collection__row-cell--source">
-                              <span>
-                                {getSourceBadgeLabel(activeEntry?.source)}
-                              </span>
-                              {group.author ? <small>{group.author}</small> : null}
+                            {libraryTab === "library" && (
+                              <div className="lib-cell lib-cell--text">
+                                {group.author || "—"}
+                              </div>
+                            )}
+                            <div className="lib-cell lib-cell--text">
+                              {getSourceBadgeLabel(activeEntry?.source)}
                             </div>
-                            <div className="workspace-collection__row-cell">
-                              <span>
-                                {formatVersionTag(
-                                  getEntryVersionLabel(activeEntry!),
-                                )}
-                              </span>
-                              {group.remoteVersion &&
-                              group.remoteVersion !==
-                                getEntryVersionLabel(activeEntry!) ? (
-                                <small>
-                                  Latest {formatVersionTag(group.remoteVersion)}
-                                </small>
-                              ) : null}
-                            </div>
-                            <div className="workspace-collection__row-cell">
-                              <span>{group.installedIn.length}</span>
-                              <small>
-                                {group.installedIn.length === 1
-                                  ? "environment"
-                                  : "environments"}
-                              </small>
+                            {libraryTab === "library" && (
+                              <div className="lib-cell lib-cell--text">
+                                {group.availableRuntimes.length > 0
+                                  ? group.availableRuntimes.join(" + ")
+                                  : "—"}
+                              </div>
+                            )}
+                            <div className="lib-cell lib-cell--version">{versionLabel}</div>
+                            {libraryTab === "updates" && (
+                              <div className="lib-cell lib-cell--version lib-cell--attention">
+                                {group.remoteVersion
+                                  ? formatVersionTag(group.remoteVersion)
+                                  : "—"}
+                              </div>
+                            )}
+                            <div
+                              className={cn(
+                                "lib-cell lib-cell--text",
+                                installedNames.length === 0 && "lib-cell--empty",
+                              )}
+                              title={
+                                installedNames.length > 0
+                                  ? installedNames.join(", ")
+                                  : "Not installed in any environment"
+                              }
+                            >
+                              {installedLabel}
                             </div>
                           </div>
                         );
                       })}
                     </div>
                   )}
-                </section>
+                </>
               )}
             </div>
-          </div>
-          )}
+          </>
+        )}
 
-          {detailPageOpen && (
-          <main className="workspace-collection__detail-page">
+        {detailPageOpen && (
+          <main className="lib-detail">
             {selectedNexusCollection && (
               <ModLibraryDetailHeader
                 backLabel={detailPageBackLabel}
                 onBack={closeDetailView}
-                icon={renderCardIcon(
-                  selectedNexusCollection.name,
-                  undefined,
-                  selectedNexusCollection.tile_image_url,
-                  "rail",
-                )}
+                media={selectedNexusCollection.tile_image_url}
+                mediaAlt={selectedNexusCollection.tile_image_alt}
+                icon={
+                  <ModThumbnail
+                    className="lib-detail__icon"
+                    name={selectedNexusCollection.name}
+                    iconUrl={selectedNexusCollection.tile_image_url}
+                    size={48}
+                  />
+                }
                 title={selectedNexusCollection.name}
-                subtitle={<>Curated by {selectedNexusCollection.curator_name}</>}
-                tags={
+                meta={
                   <>
-                    <WorkspaceBadge tone="source">Nexus Collection</WorkspaceBadge>
+                    <span>Curated by {selectedNexusCollection.curator_name}</span>
+                    <span>Nexus Collection</span>
                     {selectedNexusCollection.category_name && (
-                      <WorkspaceBadge>{selectedNexusCollection.category_name}</WorkspaceBadge>
+                      <span>{selectedNexusCollection.category_name}</span>
+                    )}
+                    {selectedNexusCollection.revision_number !== undefined && (
+                      <span>Revision {selectedNexusCollection.revision_number}</span>
+                    )}
+                    <span>
+                      {selectedNexusCollection.mod_count.toLocaleString()}{" "}
+                      {selectedNexusCollection.mod_count === 1 ? "mod" : "mods"}
+                    </span>
+                    {selectedNexusCollection.total_downloads !== undefined && (
+                      <span>
+                        {formatCompactNumber(selectedNexusCollection.total_downloads)} downloads
+                      </span>
                     )}
                     {selectedNexusCollection.file_size !== undefined && (
-                      <WorkspaceBadge>
-                        {formatFileSizeShort(selectedNexusCollection.file_size)}
-                      </WorkspaceBadge>
+                      <span>{formatFileSizeShort(selectedNexusCollection.file_size)}</span>
                     )}
-                    {selectedNexusCollection.contains_adult_content && (
-                      <WorkspaceBadge tone="danger">Adult content</WorkspaceBadge>
-                    )}
-                  </>
-                }
-                metrics={[
-                  {
-                    label: "Revision",
-                    value: selectedNexusCollection.revision_number ?? "unknown",
-                  },
-                  {
-                    label: "Mods",
-                    value: selectedNexusCollection.mod_count.toLocaleString(),
-                  },
-                  {
-                    label: "Downloads",
-                    value: formatCompactNumber(selectedNexusCollection.total_downloads),
-                  },
-                  {
-                    label: "Updated",
-                    value: formatInspectorDate(
-                      selectedNexusCollection.updated_at ||
-                        selectedNexusCollection.revision_updated_at,
-                    ),
-                  },
-                ]}
-              />
-            )}
-            {selectedDownloadedGroup && selectedDownloadedEntry && (
-              <ModLibraryDetailHeader
-                backLabel={detailPageBackLabel}
-                onBack={closeDetailView}
-                icon={renderCardIcon(
-                  selectedDownloadedGroup.displayName,
-                  selectedDownloadedEntry.iconCachePath,
-                  selectedDownloadedEntry.iconUrl,
-                  "rail",
-                )}
-                title={selectedDownloadedGroup.displayName}
-                subtitle={
-                  <>
-                    {selectedDownloadedGroup.author
-                      ? `${selectedDownloadedGroup.author} • `
-                      : ""}
-                    {`${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? "" : "s"}`}
-                  </>
-                }
-                tags={
-                  <>
-                    <WorkspaceBadge tone="source">
-                      {getSourceBadgeLabel(selectedDownloadedEntry.source)}
-                    </WorkspaceBadge>
-                    {(selectedDownloadedEntry.availableRuntimes || []).map((runtime) => (
-                      <WorkspaceBadge key={`${selectedDownloadedEntry.storageId}-${runtime}`}>
-                        {runtime}
-                      </WorkspaceBadge>
-                    ))}
-                    {isGroupUpdateAvailable(selectedDownloadedGroup) && (
-                      <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>
-                    )}
-                    {settings?.showSecurityScanBadges !== false && (
-                      <SecurityScanBadge
-                        summary={selectedDownloadedEntry.securityScan}
-                        compact
-                      />
-                    )}
-                  </>
-                }
-                metrics={[
-                  {
-                    label: "Installed",
-                    value: selectedDownloadedGroup.installedIn.length,
-                  },
-                  {
-                    label: "Versions",
-                    value: selectedDownloadedGroupEntries.length,
-                  },
-                  {
-                    label: "Selected version",
-                    value: formatVersionTag(
-                      getEntryVersionLabel(selectedDownloadedEntry),
-                    ),
-                  },
-                  {
-                    label: "Latest",
-                    value: selectedDownloadedGroup.remoteVersion
-                      ? formatVersionTag(selectedDownloadedGroup.remoteVersion)
-                      : "unknown",
-                  },
-                ]}
-              />
-            )}
-            {selectedThunderstorePackage && (
-              <ModLibraryDetailHeader
-                backLabel={detailPageBackLabel}
-                onBack={closeDetailView}
-                icon={renderCardIcon(
-                  selectedThunderstorePackage.name,
-                  undefined,
-                  selectedThunderstoreLatestVersion?.icon ||
-                    selectedThunderstoreRepresentativePackage?.icon ||
-                    selectedThunderstoreRepresentativePackage?.icon_url,
-                  "rail",
-                )}
-                title={selectedThunderstorePackage.name}
-                subtitle={
-                  <>
-                    {selectedThunderstorePackage.owner}
-                    {downloadedGroupForSelectedThunderstore
-                      ? ` • ${downloadedGroupForSelectedThunderstore.installedIn.length} env${downloadedGroupForSelectedThunderstore.installedIn.length === 1 ? "" : "s"}`
-                      : ""}
-                  </>
-                }
-                tags={
-                  <>
-                    <WorkspaceBadge tone="source">Thunderstore</WorkspaceBadge>
-                    {selectedThunderstoreRuntimeLabels.map((runtime) => (
-                      <WorkspaceBadge key={`${selectedThunderstorePackage.key}-${runtime}`}>
-                        {runtime}
-                      </WorkspaceBadge>
-                    ))}
-                    {selectedThunderstoreRuntimeLabels.length === 0 && (
-                      <WorkspaceBadge>Unknown runtime</WorkspaceBadge>
-                    )}
-                    {selectedThunderstoreCategories.slice(0, 6).map((category) => (
-                      <WorkspaceBadge key={`${selectedThunderstorePackage.key}-${category}`}>
-                        {category}
-                      </WorkspaceBadge>
-                    ))}
-                    {downloadedGroupForSelectedThunderstore && (
-                      <WorkspaceBadge tone="success">Downloaded</WorkspaceBadge>
-                    )}
-                    {downloadedGroupForSelectedThunderstore &&
-                      isGroupUpdateAvailable(downloadedGroupForSelectedThunderstore) && (
-                        <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>
+                    <span>
+                      Updated{" "}
+                      {formatInspectorDate(
+                        selectedNexusCollection.updated_at ||
+                          selectedNexusCollection.revision_updated_at,
                       )}
-                    {selectedThunderstoreRepresentativePackage?.is_pinned && (
-                      <WorkspaceBadge>Pinned</WorkspaceBadge>
-                    )}
-                    {selectedThunderstoreRepresentativePackage?.is_deprecated && (
-                      <WorkspaceBadge tone="danger">Deprecated</WorkspaceBadge>
-                    )}
+                    </span>
                   </>
                 }
-                metrics={[
-                  {
-                    label: "Latest",
-                    value: formatVersionTag(
-                      selectedThunderstoreLatestVersion?.version_number,
-                    ),
-                  },
-                  {
-                    label: "Versions",
-                    value: selectedThunderstoreRepresentativePackage?.versions?.length || 0,
-                  },
-                  {
-                    label: "Downloads",
-                    value: formatCompactNumber(
-                      selectedThunderstoreLatestVersion?.downloads,
-                    ),
-                  },
-                  {
-                    label: "Updated",
-                    value: formatInspectorDate(
-                      getThunderstorePackageUpdatedAt(
-                        selectedThunderstoreRepresentativePackage,
-                      ),
-                    ),
-                  },
-                ]}
-              />
-            )}
-            {selectedNexusResult && (
-              <ModLibraryDetailHeader
-                backLabel={detailPageBackLabel}
-                onBack={closeDetailView}
-                icon={renderCardIcon(
-                  selectedNexusResult.name,
-                  undefined,
-                  selectedNexusResult.picture_url,
-                  "rail",
-                )}
-                title={selectedNexusResult.name}
-                subtitle={
+                status={
+                  selectedNexusCollection.contains_adult_content ? (
+                    <LibraryTag tone="danger">Adult content</LibraryTag>
+                  ) : null
+                }
+                actions={
                   <>
-                    {getNexusModAttribution(selectedNexusResult)}
-                    {downloadedGroupForSelectedNexus
-                      ? ` • ${downloadedGroupForSelectedNexus.installedIn.length} env${downloadedGroupForSelectedNexus.installedIn.length === 1 ? "" : "s"}`
-                      : ""}
-                  </>
-                }
-                tags={
-                  <>
-                    <WorkspaceBadge tone="source">Nexus Mods</WorkspaceBadge>
-                    {selectedNexusResult.category_name && (
-                      <WorkspaceBadge>{selectedNexusResult.category_name}</WorkspaceBadge>
-                    )}
-                    {downloadedGroupForSelectedNexus && (
-                      <WorkspaceBadge tone="success">Downloaded</WorkspaceBadge>
-                    )}
-                    {downloadedGroupForSelectedNexus &&
-                      isGroupUpdateAvailable(downloadedGroupForSelectedNexus) && (
-                        <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>
-                      )}
-                    {selectedNexusResult.contains_adult_content && (
-                      <WorkspaceBadge tone="danger">Adult content</WorkspaceBadge>
-                    )}
-                    {selectedNexusResult.status && (
-                      <WorkspaceBadge>{selectedNexusResult.status}</WorkspaceBadge>
-                    )}
-                  </>
-                }
-                metrics={[
-                  {
-                    label: "Latest",
-                    value: formatVersionTag(selectedNexusResult.version),
-                  },
-                  {
-                    label: "Endorsements",
-                    value: formatCompactNumber(selectedNexusResult.endorsement_count),
-                  },
-                  {
-                    label: "Downloads",
-                    value: formatCompactNumber(
-                      selectedNexusResult.mod_downloads ||
-                        selectedNexusResult.unique_downloads,
-                    ),
-                  },
-                  {
-                    label: "Updated",
-                    value: formatInspectorDate(
-                      getNexusModUpdatedAt(selectedNexusResult),
-                    ),
-                  },
-                ]}
-              />
-            )}
-
-            <div className="workspace-collection__detail-content">
-
-            {selectedNexusCollection && (
-              <div className="workspace-inspector-card">
-                <p className="workspace-inspector-card__summary">
-                  {selectedNexusCollection.summary ||
-                    "No summary provided for this collection."}
-                </p>
-                {selectedCollectionPlan && (
-                  <section className="workspace-inspector-card__subsection workspace-collection-runtime-preview">
-                    <div className="workspace-inspector-card__subsection-header">
-                      <div>
-                        <h4>Profile preview</h4>
-                        <p>
-                          Preview which mods SIMM will add to the Mono and IL2CPP
-                          profiles, including any source or availability differences.
-                        </p>
-                      </div>
-                    </div>
-                    <div
-                      className={`workspace-collection-runtime-preview__summary${
-                        collectionRuntimeDifferenceCount > 0
-                          ? " workspace-collection-runtime-preview__summary--different"
-                          : ""
-                      }`}
-                    >
-                      <strong>
-                        {collectionRuntimeDifferenceCount > 0
-                          ? `${collectionRuntimeDifferenceCount.toLocaleString()} ${collectionRuntimeDifferenceCount === 1 ? "mod differs" : "mods differ"} by runtime`
-                          : "Same mods in both profiles"}
-                      </strong>
-                      <span>
-                        {collectionRuntimeDifferenceCount > 0
-                          ? "These mods use a different library copy, download source, or availability state."
-                          : `Both profiles currently add the same ${selectedCollectionPlan.modFiles.length.toLocaleString()} mods from the same known sources.`}
-                      </span>
-                    </div>
-                    <div
-                      className="workspace-collection-runtime-preview__switch"
-                      role="group"
-                      aria-label="Collection profile preview"
-                    >
-                      {(["Mono", "IL2CPP"] as const).map((runtime) => {
-                        const active = collectionRuntimePreview === runtime;
-                        return (
-                          <SimmButton
-                            key={runtime}
-                            type="button"
-                            variant="secondary"
-                            className={`workspace-collection-runtime-preview__switch-button${
-                              active ? " workspace-collection-runtime-preview__switch-button--active" : ""
-                            }`}
-                            aria-label={`${active ? "Hide" : "Show"} ${runtime} profile list`}
-                            aria-pressed={active}
-                            onClick={() =>
-                              setCollectionRuntimePreview((current) =>
-                                current === runtime ? null : runtime,
-                              )
-                            }
-                          >
-                            <span>{runtime}</span>
-                            <small>{collectionRuntimePreviewByRuntime[runtime].length.toLocaleString()}</small>
-                          </SimmButton>
-                        );
-                      })}
-                    </div>
-                    {collectionRuntimePreview && activeCollectionRuntimePreview && (
-                      <div
-                        className="workspace-collection-runtime-preview__list"
-                        role="list"
-                        aria-label={`${collectionRuntimePreview} collection profile mods`}
-                      >
-                        {activeCollectionRuntimePreview.map((item) => (
-                          <div
-                            className="workspace-collection-runtime-preview__item"
-                            key={`${collectionRuntimePreview}-${collectionFileKey(item.file)}`}
-                            role="listitem"
-                          >
-                            <strong>{item.file.modName}</strong>
-                            <div className="workspace-collection-runtime-preview__item-meta">
-                              <span>
-                                {item.file.version || "Version unknown"}
-                                {item.file.optional ? " · Optional" : ""}
-                              </span>
-                              <span
-                                className={`workspace-collection-runtime-preview__status workspace-collection-runtime-preview__status--${item.tone}`}
-                              >
-                                {item.statusLabel}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                )}
-                {(!nexusCollectionAccess?.canDirectDownload || optionalCollectionFiles.length > 0) && (
-                <section className="workspace-inspector-card__subsection workspace-inspector-card__subsection--collection-stage">
-                  <div className="workspace-inspector-card__subsection-header">
-                    <div>
-                      <h4>{nexusCollectionAccess?.canDirectDownload ? "Optional content" : "Collection staging"}</h4>
-                      <p>
-                        {nexusCollectionAccess?.canDirectDownload
-                          ? "Required mods are included automatically. Choose which optional mods SIMM should add before starting the download."
-                          : "Thunderstore alternatives require an exact name, author, and version match. Choose each mod or apply one choice to every match."}
-                      </p>
-                    </div>
-                    {selectedCollectionPlan && (
-                      <WorkspaceBadge
-                        tone={collectionReadyForProfile ? "success" : "warning"}
-                      >
-                        {nexusCollectionAccess?.canDirectDownload
-                          ? `${selectedOptionalCollectionCount.toLocaleString()} / ${optionalCollectionFiles.length.toLocaleString()} selected`
-                          : `${(
-                              stagedRequiredCollectionFiles.length +
-                              keptExistingCollectionFiles.length
-                            ).toLocaleString()} / ${requiredCollectionFiles.length.toLocaleString()} ready`}
-                      </WorkspaceBadge>
-                    )}
-                  </div>
-                  {nexusCollectionPlanState.loading ? (
-                    <InspectorCardEmpty>
-                      Loading the exact files in this revision…
-                    </InspectorCardEmpty>
-                  ) : nexusCollectionPlanState.error ? (
-                    <InspectorCardEmpty>
-                      {nexusCollectionPlanState.error}
-                    </InspectorCardEmpty>
-                  ) : selectedCollectionPlan ? (
-                    <>
-                      {!nexusCollectionAccess?.canDirectDownload && unavailableRequiredCollectionFiles.length > 0 && (
-                        <div className="workspace-collection-stage__notice workspace-collection-stage__notice--danger">
-                          <strong>Revision is incomplete on Nexus</strong>
-                          <span>
-                            {unavailableRequiredCollectionFiles.length} required{" "}
-                            {unavailableRequiredCollectionFiles.length === 1
-                              ? "file is"
-                              : "files are"}{" "}
-                            no longer available. SIMM will not substitute another
-                            file.
-                          </span>
-                        </div>
-                      )}
-                      {!nexusCollectionAccess?.canDirectDownload && requiredExternalCollectionResources.length > 0 && (
-                        <div className="workspace-collection-stage__notice workspace-collection-stage__notice--warning">
-                          <strong>External resources required</strong>
-                          <span>
-                            Add these outside Nexus before installing; SIMM cannot
-                            verify them automatically.
-                          </span>
-                          <div className="workspace-collection-stage__external-links">
-                            {requiredExternalCollectionResources.map((resource) =>
-                              resource.resourceUrl ? (
-                                <a
-                                  key={resource.id}
-                                  href={resource.resourceUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  {resource.name}
-                                </a>
-                              ) : (
-                                <span key={resource.id}>{resource.name}</span>
-                              ),
-                            )}
-                          </div>
-                        </div>
-                      )}
-                      {!nexusCollectionAccess?.canDirectDownload && (
-                        <div className="workspace-collection-stage__source-policy">
-                          <label>
-                            <Checkbox
-                              checked={applyCollectionSourceToAll}
-                              onCheckedChange={(checked) => setApplyCollectionSourceToAll(Boolean(checked))}
-                            />
-                            <span>
-                              <strong>Apply next choice to all matches</strong>
-                              <small>Leave off to choose each mod separately.</small>
-                            </span>
-                          </label>
-                          {collectionMatchesLoading && (
-                            <span className="workspace-collection-stage__matching-status">
-                              <Icon name="spinner" /> Matching exact versions on Thunderstore…
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      <div className="workspace-collection-stage__file-list">
-                        {(nexusCollectionAccess?.canDirectDownload
-                          ? optionalCollectionFiles
-                          : selectedCollectionPlan.modFiles
-                        ).map((file) => {
-                          const key = collectionFileKey(file);
-                          const stagedEntry = getStagedCollectionEntry(file);
-                          const reusableEntry = stagedEntry
-                            || findExactCollectionLibraryEntry(file, library?.downloaded ?? [], 'IL2CPP')
-                            || findExactCollectionLibraryEntry(file, library?.downloaded ?? [], 'Mono');
-                          const matchState = collectionMatchStates[key];
-                          const exactMatches = matchState?.matches ?? [];
-                          const sourceChoice = collectionSourceChoices[key] ?? 'nexusmods';
-                          const optionalSelected = !file.optional || Boolean(collectionOptionalSelections[key]);
-                          const matchRuntimes = Array.from(new Set(exactMatches.map((match) => match.runtime))).join(' + ');
-                          const decision =
-                            collectionFileDecisions[
-                              getCollectionFileDecisionKey(file)
-                            ];
-                          const keptExisting =
-                            decision === "existing" &&
-                            getCollectionConflictingEntries(file).length > 0;
-                          return (
-                            <div
-                              className={`workspace-collection-stage__file${
-                                nexusCollectionAccess?.canDirectDownload
-                                  ? " workspace-collection-stage__file--premium-optional"
-                                  : ""
-                              }`}
-                              key={file.collectionRevisionModId || file.fileId}
-                            >
-                              <div className="workspace-collection-stage__file-copy">
-                                <strong>{file.modName}</strong>
-                                {nexusCollectionAccess?.canDirectDownload ? (
-                                  <>
-                                    <span className="workspace-collection-stage__file-details">
-                                      {file.version && <span>{file.version}</span>}
-                                      {file.author && <span>{file.author}</span>}
-                                      <span>Nexus file {file.fileId}</span>
-                                    </span>
-                                    <small className="workspace-collection-stage__file-name">
-                                      {file.fileName}
-                                    </small>
-                                  </>
-                                ) : (
-                                  <span>
-                                    {file.fileName}
-                                    {file.version ? ` • ${file.version}` : ""}
-                                    {file.author ? ` • ${file.author}` : ""}
-                                    {` • Nexus file ${file.fileId}`}
-                                  </span>
-                                )}
-                                {!nexusCollectionAccess?.canDirectDownload && (
-                                  <small className={matchState?.error ? 'workspace-collection-stage__match-note workspace-collection-stage__match-note--warning' : 'workspace-collection-stage__match-note'}>
-                                    {matchState?.loading
-                                      ? 'Checking Thunderstore for the exact name, author, and version…'
-                                      : exactMatches.length > 0
-                                        ? `Exact Thunderstore version found for ${matchRuntimes}. Runtime-incompatible choices will require individual confirmation.`
-                                        : matchState?.error ?? 'No exact high-confidence Thunderstore match. Keep the Nexus source for this item.'}
-                                  </small>
-                                )}
-                              </div>
-                              <div className="workspace-collection-stage__file-actions">
-                                {file.optional && (
-                                  <label className="workspace-collection-stage__optional-choice">
-                                    <Checkbox
-                                      checked={Boolean(collectionOptionalSelections[key])}
-                                      onCheckedChange={(checked) => setCollectionOptionalSelections((current) => ({
-                                        ...current,
-                                        [key]: Boolean(checked),
-                                      }))}
-                                    />
-                                    <span>
-                                      {nexusCollectionAccess?.canDirectDownload
-                                        ? "Include in download"
-                                        : "Include optional"}
-                                    </span>
-                                  </label>
-                                )}
-                                {nexusCollectionAccess?.canDirectDownload ? (
-                                  <WorkspaceBadge tone={optionalSelected ? (reusableEntry ? "success" : "source") : "warning"}>
-                                    {optionalSelected
-                                      ? reusableEntry
-                                        ? `Reuse from ${getSourceBadgeLabel(reusableEntry.source)}`
-                                        : "Include with download"
-                                      : "Not included"}
-                                  </WorkspaceBadge>
-                                ) : reusableEntry ? (
-                                  <WorkspaceBadge tone="success">Reuse from {getSourceBadgeLabel(reusableEntry.source)}</WorkspaceBadge>
-                                ) : keptExisting ? (
-                                  <WorkspaceBadge tone="source">
-                                    Keeping current
-                                  </WorkspaceBadge>
-                                ) : !file.available || !file.modId ? (
-                                  <WorkspaceBadge tone="danger">
-                                    Unavailable
-                                  </WorkspaceBadge>
-                                ) : (
-                                  <div className="workspace-collection-stage__source-actions" aria-label={`Download source for ${file.modName}`}>
-                                    {exactMatches.length > 0 && (
-                                      <SimmButton
-                                        type="button"
-                                        size="sm"
-                                        variant={sourceChoice === 'thunderstore' ? 'default' : 'secondary'}
-                                        disabled={Boolean(matchState?.loading) || !optionalSelected}
-                                        onClick={() => setCollectionSourceChoice(file, 'thunderstore')}
-                                      >
-                                        Use Thunderstore
-                                      </SimmButton>
-                                    )}
-                                    <SimmButton
-                                      type="button"
-                                      size="sm"
-                                      variant={sourceChoice === 'nexusmods' ? 'default' : 'secondary'}
-                                      disabled={Boolean(matchState?.loading) || !optionalSelected}
-                                      onClick={() => setCollectionSourceChoice(file, 'nexusmods')}
-                                    >
-                                      Keep Nexus
-                                    </SimmButton>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </>
-                  ) : null}
-                </section>
-                )}
-                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped workspace-inspector-card__actions--collection">
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
                     {!nexusCollectionAccess?.connected ? (
                       <SimmButton
                         type="button"
-                        className="btn btn-primary"
                         onClick={onOpenAccounts}
                         disabled={!onOpenAccounts}
                       >
-                        <Icon name="fas fa-user" />
+                        <Icon name="user" />
                         <span>Connect Nexus</span>
                       </SimmButton>
                     ) : (
                       <SimmButton
                         type="button"
-                        className="btn btn-primary"
                         aria-label="Start collection download"
-                        title={nexusCollectionAccess.canDirectDownload
-                          ? "Create and open a collection profile, then download every required mod plus the optional mods selected above."
-                          : "Create and open a collection profile, automatically download selected exact Thunderstore matches, and retain the remaining Nexus downloads for individual completion."}
+                        title={
+                          nexusCollectionAccess.canDirectDownload
+                            ? "Create and open a collection profile, then download every required mod plus the optional mods selected below."
+                            : "Create and open a collection profile, automatically download selected exact Thunderstore matches, and retain the remaining Nexus downloads for individual completion."
+                        }
                         onClick={confirmStageCollection}
                         disabled={
                           nexusCollectionPlanState.loading ||
@@ -10665,20 +10326,17 @@ export function ModLibraryOverlay({
                         }
                       >
                         <Icon
-                          name={`fas ${collectionDownloadBusy ? "fa-spinner fa-spin" : "fa-download"}`}
+                          name={collectionDownloadBusy ? "spinner" : "download"}
+                          spin={collectionDownloadBusy}
                         />
-                        <span>
-                          {collectionDownloadBusy ? "Starting…" : "Start download"}
-                        </span>
+                        <span>{collectionDownloadBusy ? "Starting…" : "Start Download"}</span>
                       </SimmButton>
                     )}
                     <SimmButton
                       type="button"
-                      variant="secondary"
-                      className="btn btn-secondary"
+                      variant="outline"
                       disabled={
-                        creatingCollectionProfile ||
-                        collectionProfiles.length > 0
+                        creatingCollectionProfile || collectionProfiles.length > 0
                       }
                       onClick={() => void createCollectionProfiles()}
                       title={
@@ -10689,9 +10347,6 @@ export function ModLibraryOverlay({
                           : "Create and open the collection profile without starting downloads. Choose individual mod downloads from the profile page."
                       }
                     >
-                      <Icon
-                        name={`fas ${creatingCollectionProfile ? "fa-spinner fa-spin" : "fa-layer-group"}`}
-                      />
                       <span>
                         {creatingCollectionProfile
                           ? "Creating…"
@@ -10702,696 +10357,1231 @@ export function ModLibraryOverlay({
                             : "Create profile & choose mods"}
                       </span>
                     </SimmButton>
-                  </div>
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
-                    <a
-                      className="btn btn-secondary"
-                      aria-label="Open Collection on Nexus Mods"
+                    <ExternalIconLink
+                      label="Open Collection on Nexus Mods"
+                      title="View on Nexus Mods"
                       href={`https://next.nexusmods.com/schedule1/collections/${selectedNexusCollection.slug}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <Icon name="fas fa-arrow-up-right-from-square" />
-                      <span>View on Nexus</span>
-                    </a>
-                  </div>
-                </div>
-              </div>
+                    />
+                  </>
+                }
+              />
             )}
-
-            {selectedDownloadedGroup && selectedDownloadedEntry && (
-              <div className="workspace-inspector-card">
-                <p className="workspace-inspector-card__summary">
-                  {selectedDownloadedEntry.summary || "No summary provided."}
-                </p>
-                {selectedDownloadedEntry.source === "nexusmods" && (
-                  <section
-                    className="workspace-inspector-card__subsection workspace-inspector-card__subsection--dependencies"
-                    aria-labelledby="nexus-downloaded-inspector-dependencies"
-                  >
-                  <div className="workspace-inspector-card__subsection-header">
-                    <div>
-                      <h4 id="nexus-downloaded-inspector-dependencies">
-                        Required dependencies
-                      </h4>
-                      <p>
-                        Compatibility is checked for the selected Nexus file. MelonLoader is managed separately.
-                      </p>
-                    </div>
-                    {visibleSelectedNexusRequirements.length > 0 && (
-                      <WorkspaceBadge className="workspace-inspector-card__subsection-count">
-                        {visibleSelectedNexusRequirements.length} required
-                      </WorkspaceBadge>
-                    )}
-                  </div>
-                  {selectedNexusDependencyKey === nexusDependencyState.key &&
-                  nexusDependencyState.loading ? (
-                    <InspectorCardEmpty>
-                      Checking published Nexus dependencies…
-                    </InspectorCardEmpty>
-                  ) : nexusDependencyState.error &&
-                    selectedNexusDependencyKey === nexusDependencyState.key ? (
-                    <InspectorCardEmpty>
-                      Dependency information is unavailable for this file. Connect Nexus and try again before downloading if you need a compatibility check.
-                    </InspectorCardEmpty>
-                  ) : selectedNexusDependencies ? (
-                    visibleSelectedNexusRequirements.length > 0 ? (
-                      <div className="workspace-dependency-list">
-                        {visibleSelectedNexusRequirements.map((requirement) => {
-                          const isMissing = missingSelectedNexusRequirements.some(
-                            (missingRequirement) =>
-                              missingRequirement.id === requirement.id,
-                          );
-                          return (
-                            <div
-                              className="workspace-dependency-row"
-                              key={requirement.id}
-                            >
-                              <div>
-                                <strong>
-                                  {formatNexusDependencyCandidates(requirement)}
-                                </strong>
-                                <span>
-                                  Any listed version satisfies this requirement.
-                                </span>
-                              </div>
-                              <WorkspaceBadge
-                                tone={isMissing ? "warning" : "success"}
-                              >
-                                {isMissing ? "Missing" : "In library"}
-                              </WorkspaceBadge>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <InspectorCardEmpty>
-                        No additional Nexus mod dependencies are declared for this file.
-                      </InspectorCardEmpty>
-                    )
-                  ) : (
-                    <InspectorCardEmpty>
-                      {selectedNexusStoredFileId !== null
-                        ? "The stored Nexus file is no longer available to inspect."
-                        : "Select a file to check its published dependencies."}
-                    </InspectorCardEmpty>
-                  )}
-                  </section>
-                )}
-                <div className="workspace-inspector-card__field">
-                  <label
-                    htmlFor={`mod-library-version-${selectedDownloadedGroup.key}`}
-                  >
-                    Available versions
-                  </label>
-                  <Select
-                    value={selectedDownloadedEntry.storageId}
-                    onValueChange={(nextStorageId) => {
-                      if (typeof nextStorageId === "string") {
-                        setSelectedStorageByGroup((prev) => ({
-                          ...prev,
-                          [selectedDownloadedGroup.key]: nextStorageId,
-                        }));
-                      }
-                    }}
-                    disabled={selectedDownloadedGroupEntries.length < 2}
-                  >
-                    <SelectTrigger
-                      id={`mod-library-version-${selectedDownloadedGroup.key}`}
-                      className="workspace-inspector-card__select"
-                    >
-                      <SelectValue>
-                        {(selectedStorageId) => {
-                          const selectedEntry =
-                            selectedDownloadedGroupEntries.find(
-                              (entry) => entry.storageId === selectedStorageId,
-                            ) || selectedDownloadedEntry;
-                          return `${formatVersionTag(getEntryVersionLabel(selectedEntry))} - ${selectedEntry.availableRuntimes?.length ? selectedEntry.availableRuntimes.join("/") : "Runtime?"}`;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent className="workspace-inspector-card__select-content" align="start">
-                      <SelectGroup>
-                        {selectedDownloadedGroupEntries.map((entry) => (
-                          <SelectItem
-                            key={entry.storageId}
-                            value={entry.storageId}
-                            onClick={() =>
-                              setSelectedStorageByGroup((prev) => ({
-                                ...prev,
-                                [selectedDownloadedGroup.key]: entry.storageId,
-                              }))
-                            }
-                          >
-                            {`${formatVersionTag(getEntryVersionLabel(entry))} - ${entry.availableRuntimes?.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
-                    {(() => {
-                      const installMoreOnly =
-                        selectedDownloadedGroup.installedIn.length > 0;
-                      const {
-                        installable,
-                        runtimeIncompatible,
-                        blockedBySiblingVersion,
-                        alreadyInstalled,
-                      } = getCompatibleInstallSummary(
-                        selectedDownloadedEntry,
-                        installMoreOnly,
-                      );
-                      const installDisabled = installable.length === 0;
-                      const installTitle = installDisabled
-                        ? buildInstallNoOpNotice(
-                            {
-                              installEntry: selectedDownloadedEntry,
-                              runtimeIncompatible,
-                              blockedBySiblingVersion,
-                              alreadyInstalled,
-                              installable,
-                              compatible: installable,
-                              excluded: runtimeIncompatible,
-                            },
+            {selectedDownloadedGroup && selectedDownloadedEntry && (() => {
+              const updateAvailable = isGroupUpdateAvailable(selectedDownloadedGroup);
+              const installMoreOnly = selectedDownloadedGroup.installedIn.length > 0;
+              const {
+                installable,
+                runtimeIncompatible,
+                blockedBySiblingVersion,
+                alreadyInstalled,
+              } = getCompatibleInstallSummary(selectedDownloadedEntry, installMoreOnly);
+              const installDisabled = installable.length === 0;
+              const installTitle = installDisabled
+                ? buildInstallNoOpNotice(
+                    {
+                      installEntry: selectedDownloadedEntry,
+                      runtimeIncompatible,
+                      blockedBySiblingVersion,
+                      alreadyInstalled,
+                      installable,
+                      compatible: installable,
+                      excluded: runtimeIncompatible,
+                    },
+                    installMoreOnly,
+                  ).message
+                : undefined;
+              const exception = getExceptionTag(
+                selectedDownloadedEntry.securityScan,
+                settings?.showSecurityScanBadges !== false,
+                updateAvailable,
+              );
+              const sourceUrl = safeExternalUrl(selectedDownloadedEntry.sourceUrl);
+              const selectedVersionLabel = formatVersionTag(
+                getEntryVersionLabel(selectedDownloadedEntry),
+              );
+              return (
+                <ModLibraryDetailHeader
+                  backLabel={detailPageBackLabel}
+                  onBack={closeDetailView}
+                  icon={
+                    <ModThumbnail
+                      className="lib-detail__icon"
+                      name={selectedDownloadedGroup.displayName}
+                      iconCachePath={selectedDownloadedEntry.iconCachePath}
+                      iconUrl={selectedDownloadedEntry.iconUrl}
+                      size={48}
+                    />
+                  }
+                  title={selectedDownloadedGroup.displayName}
+                  meta={
+                    <>
+                      {selectedDownloadedGroup.author && (
+                        <span>{selectedDownloadedGroup.author}</span>
+                      )}
+                      <span>{getSourceBadgeLabel(selectedDownloadedEntry.source)}</span>
+                      <span className="ui-mono">{selectedVersionLabel}</span>
+                      {selectedDownloadedGroup.remoteVersion &&
+                        formatVersionTag(selectedDownloadedGroup.remoteVersion) !==
+                          selectedVersionLabel && (
+                          <span>
+                            Latest{" "}
+                            <span className="ui-mono">
+                              {formatVersionTag(selectedDownloadedGroup.remoteVersion)}
+                            </span>
+                          </span>
+                        )}
+                      <span>
+                        {selectedDownloadedGroupEntries.length}{" "}
+                        {selectedDownloadedGroupEntries.length === 1
+                          ? "version"
+                          : "versions"}{" "}
+                        downloaded
+                      </span>
+                    </>
+                  }
+                  status={
+                    exception ? (
+                      <LibraryTag tone={exception.tone}>{exception.label}</LibraryTag>
+                    ) : null
+                  }
+                  actions={
+                    <>
+                      {/* Same rule on every detail page: downloaded → Install to… is primary. */}
+                      <SimmButton
+                        type="button"
+                        onClick={() =>
+                          void promptInstallTargets(
+                            selectedDownloadedEntry,
+                            `Install ${selectedDownloadedEntry.displayName}`,
                             installMoreOnly,
-                          ).message
-                        : undefined;
-                      return (
+                          )
+                        }
+                        disabled={installDisabled}
+                        title={installTitle ?? `Install ${selectedVersionLabel} to environments`}
+                      >
+                        <span>Install to…</span>
+                      </SimmButton>
+                      {updateAvailable && (
                         <SimmButton
                           type="button"
-                          className="btn btn-primary"
+                          variant="outline"
                           onClick={() =>
-                            void promptInstallTargets(
-                              selectedDownloadedEntry,
-                              `Install ${selectedDownloadedEntry.displayName}`,
-                              installMoreOnly,
-                            )
-                          }
-                          disabled={installDisabled}
-                          title={installTitle}
-                        >
-                          <Icon name="fas fa-download" />
-                          <span>{installMoreOnly ? "Install to more…" : "Install…"}</span>
-                        </SimmButton>
-                      );
-                    })()}
-                    <SimmButton
-                      type="button"
-                      variant="secondary"
-                      className="btn btn-secondary"
-                      onClick={() =>
-                        void handleUpdateAndActivateGroup(selectedDownloadedGroup)
-                      }
-                      disabled={!isGroupUpdateAvailable(selectedDownloadedGroup)}
-                    >
-                      <Icon name="fas fa-arrow-up" />
-                      <span>Update and activate</span>
-                    </SimmButton>
-                  </div>
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
-                    {selectedDownloadedEntry.storageId &&
-                      selectedDownloadedEntry.securityScan && (
-                        <SimmButton
-                          type="button"
-                          variant="secondary"
-                          className="btn btn-secondary"
-                          aria-label="Security Report"
-                          onClick={() =>
-                            void openStoredSecurityReport(
-                              selectedDownloadedEntry.storageId,
-                              `Security Findings - ${selectedDownloadedEntry.displayName}`,
-                            )
+                            void handleUpdateAndActivateGroup(selectedDownloadedGroup)
                           }
                         >
-                          <Icon name="fas fa-shield-halved" />
-                          <span>Report</span>
+                          <Icon name="arrowUp" />
+                          <span>Update and Activate</span>
                         </SimmButton>
                       )}
-                    <SimmButton
-                      type="button"
-                      variant="secondary"
-                      className="btn btn-secondary"
-                      aria-label="Activate selected version"
-                      onClick={() =>
-                        void handleSelectVersion(
-                          selectedDownloadedGroup,
-                          selectedDownloadedEntry.storageId,
-                        )
+                      {sourceUrl && (
+                        <ExternalIconLink
+                          label="Open Source Page"
+                          title="Open source page"
+                          href={sourceUrl}
+                        />
+                      )}
+                    </>
+                  }
+                />
+              );
+            })()}
+            {selectedThunderstorePackage && (() => {
+              const downloadedGroup = downloadedGroupForSelectedThunderstore;
+              const updateAvailable = downloadedGroup
+                ? isGroupUpdateAvailable(downloadedGroup)
+                : false;
+              const hasLibraryVersion = Boolean(
+                downloadedGroup && selectedThunderstoreDownloadedEntry,
+              );
+              const selectedThunderstoreVersionLabel = formatVersionTag(
+                selectedThunderstoreVersion?.versionNumber ??
+                  selectedThunderstoreLatestVersion?.version_number,
+              );
+              const runtimeNames = new Set(
+                selectedThunderstoreRuntimeLabels.map((runtime) => runtime.toLowerCase()),
+              );
+              runtimeNames.add("il2cpp");
+              runtimeNames.add("mono");
+              const categories = selectedThunderstoreCategories
+                .filter((category) => !runtimeNames.has(category.trim().toLowerCase()))
+                .slice(0, 4);
+              const packageUrl = safeExternalUrl(selectedThunderstorePackage.packageUrl);
+              return (
+                <ModLibraryDetailHeader
+                  backLabel={detailPageBackLabel}
+                  onBack={closeDetailView}
+                  icon={
+                    // Thunderstore has no banners: the package icon is the artwork.
+                    <ModThumbnail
+                      className="lib-detail__icon"
+                      name={selectedThunderstorePackage.name}
+                      iconUrl={
+                        selectedThunderstoreLatestVersion?.icon ||
+                        selectedThunderstoreRepresentativePackage?.icon ||
+                        selectedThunderstoreRepresentativePackage?.icon_url
                       }
-                      disabled={
-                        selectedDownloadedGroup.installedIn.length === 0 ||
-                        selectedDownloadedGroupEntries.length < 2 ||
-                        activatingGroup === selectedDownloadedGroup.key
-                      }
-                    >
-                      <Icon name={activatingGroup === selectedDownloadedGroup.key ? "fas fa-spinner fa-spin" : "fas fa-check"} />
+                      size={96}
+                    />
+                  }
+                  title={selectedThunderstorePackage.name}
+                  meta={
+                    <>
+                      <span>by {selectedThunderstorePackage.owner}</span>
+                      <span>Thunderstore</span>
                       <span>
-                        {activatingGroup === selectedDownloadedGroup.key
-                          ? "Activating…"
-                          : "Activate"}
+                        {selectedThunderstoreRuntimeLabels.length > 0
+                          ? selectedThunderstoreRuntimeLabels.join(" + ")
+                          : "Unknown runtime"}
                       </span>
-                    </SimmButton>
-                  </div>
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--danger">
-                    <SimmButton
-                      type="button"
-                      variant="destructive"
-                      className="btn btn-danger"
-                      onClick={() =>
-                        void handleDeleteDownloadedGroup(selectedDownloadedGroup)
-                      }
-                    >
-                      <Icon name="fas fa-trash" />
-                      <span>Delete downloaded files</span>
-                    </SimmButton>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {selectedThunderstorePackage && (
-              <div className="workspace-inspector-card">
-                <p className="workspace-inspector-card__summary">
-                  {selectedThunderstoreLatestVersion?.description ||
-                    "No description provided for this package."}
-                </p>
-                <section
-                  className="workspace-inspector-card__subsection"
-                  aria-labelledby="thunderstore-inspector-dependencies"
-                >
-                  <div className="workspace-inspector-card__subsection-header">
-                    <div>
-                      <h4 id="thunderstore-inspector-dependencies">
-                        Required dependencies
-                      </h4>
-                      <p>
-                        Checked against the selected version in your library.
-                        MelonLoader is managed separately.
-                      </p>
-                    </div>
-                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
-                      {selectedThunderstoreDependencies.length} required
-                    </WorkspaceBadge>
-                  </div>
-                  {!selectedThunderstoreVersion ? (
-                    <p className="workspace-inspector-card__empty">
-                      Select a version to review its dependencies.
-                    </p>
-                  ) : selectedThunderstoreDependencies.length === 0 ? (
-                    <p className="workspace-inspector-card__empty">
-                      No additional Thunderstore dependencies are declared for
-                      this version.
-                    </p>
-                  ) : (
-                    <div className="workspace-dependency-list">
-                      {selectedThunderstoreDependencies.map((dependency) => {
-                        const isMissing =
-                          missingSelectedThunderstoreDependencies.some(
-                            (missing) => missing.raw === dependency.raw,
-                          );
-                        return (
-                          <div
-                            key={dependency.raw}
-                            className="workspace-dependency-row"
-                          >
-                            <div>
-                              <strong>
-                                {dependency.packageKey}
-                                {dependency.minimumVersion
-                                  ? ` ${formatVersionTag(dependency.minimumVersion)}`
-                                  : ""}
-                              </strong>
-                              <span>
-                                {dependency.minimumVersion
-                                  ? "Requires this version or newer."
-                                  : "Version requirement unavailable."}
-                              </span>
-                            </div>
-                            <WorkspaceBadge
-                              tone={isMissing ? "warning" : "success"}
-                            >
-                              {isMissing ? "Missing" : "In library"}
-                            </WorkspaceBadge>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
-                    <SimmButton
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() =>
-                        void handleDownloadThunderstore(
-                          selectedThunderstorePackage,
-                          selectedThunderstoreVersion,
-                        )
-                      }
-                    >
-                      <Icon name="fas fa-download" />
-                      <span>Download selected version</span>
-                    </SimmButton>
-                    {downloadedGroupForSelectedThunderstore &&
-                      selectedThunderstoreDownloadedEntry && (
+                      {categories.length > 0 && <span>{categories.join(", ")}</span>}
+                      <span className="ui-mono">
+                        {formatVersionTag(selectedThunderstoreLatestVersion?.version_number)}
+                      </span>
+                      <span>
+                        {formatCompactNumber(selectedThunderstoreLatestVersion?.downloads)}{" "}
+                        downloads
+                      </span>
+                      <span>
+                        Updated{" "}
+                        {formatInspectorDate(
+                          getThunderstorePackageUpdatedAt(
+                            selectedThunderstoreRepresentativePackage,
+                          ),
+                        )}
+                      </span>
+                    </>
+                  }
+                  status={
+                    selectedThunderstoreRepresentativePackage?.is_deprecated ? (
+                      <LibraryTag tone="danger">Deprecated</LibraryTag>
+                    ) : updateAvailable ? (
+                      <LibraryTag tone="warn">Update available</LibraryTag>
+                    ) : downloadedGroup ? (
+                      <LibraryTag>Downloaded</LibraryTag>
+                    ) : null
+                  }
+                  actions={
+                    <>
+                      {/* Same rule on every detail page: not downloaded → Download is primary,
+                          downloaded → Install to… is primary and Download secondary. */}
+                      {downloadedGroup && selectedThunderstoreDownloadedEntry && (
                         <SimmButton
                           type="button"
-                          variant="secondary"
-                          className="btn btn-secondary"
                           onClick={() =>
                             void promptInstallTargets(
                               selectedThunderstoreDownloadedEntry,
                               `Install ${selectedThunderstoreDownloadedEntry.displayName}`,
-                              downloadedGroupForSelectedThunderstore.installedIn
-                                .length > 0,
+                              downloadedGroup.installedIn.length > 0,
                             )
                           }
+                          title={`Install ${formatVersionTag(getEntryVersionLabel(selectedThunderstoreDownloadedEntry))} from your library to environments`}
                         >
-                          <Icon name="fas fa-box-archive" />
-                          <span>
-                            {downloadedGroupForSelectedThunderstore.installedIn
-                              .length > 0
-                              ? "Install library version…"
-                              : "Install library version"}
-                          </span>
+                          <span>Install to…</span>
                         </SimmButton>
                       )}
-                  </div>
-                  {safeExternalUrl(selectedThunderstorePackage.packageUrl) && (
-                    <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
-                      <a
-                        className="btn btn-secondary"
-                        aria-label="Open Source Page"
-                        href={
-                          safeExternalUrl(selectedThunderstorePackage.packageUrl)!
+                      <SimmButton
+                        type="button"
+                        variant={hasLibraryVersion ? "outline" : "default"}
+                        onClick={() =>
+                          void handleDownloadThunderstore(
+                            selectedThunderstorePackage,
+                            selectedThunderstoreVersion,
+                          )
                         }
-                        target="_blank"
-                        rel="noopener noreferrer"
+                        title={`Download ${selectedThunderstoreVersionLabel} to your library`}
                       >
-                        <Icon name="fas fa-arrow-up-right-from-square" />
-                        <span>Source</span>
-                      </a>
-                    </div>
-                  )}
-                </div>
-                <section
-                  className="workspace-inspector-card__subsection"
-                  aria-labelledby="thunderstore-inspector-versions"
-                >
-                  <div className="workspace-inspector-card__subsection-header">
-                    <div>
-                      <h4 id="thunderstore-inspector-versions">
-                        Available versions
-                      </h4>
-                      <p>
-                        Pick the package version you want to add to the library.
-                      </p>
-                    </div>
-                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
-                      {selectedThunderstoreVersionOptions.length} available
-                    </WorkspaceBadge>
-                  </div>
-                  <div
-                    className="workspace-version-list"
-                    role="listbox"
-                    aria-label="Thunderstore available versions"
-                  >
-                    {selectedThunderstoreVersionOptions.map((versionOption) => {
-                      const isActive =
-                        selectedThunderstoreVersion?.key === versionOption.key;
-                      return (
-                        <SimmButton
-                          key={versionOption.key}
-                          type="button"
-                          variant="ghost"
-                          role="option"
-                          aria-selected={isActive}
-                          className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
-                          onClick={() =>
-                            setSelectedThunderstoreVersionByPackage((prev) => ({
-                              ...prev,
-                              [selectedThunderstorePackage.key]:
-                                versionOption.key,
-                            }))
-                          }
-                        >
-                          <div className="workspace-version-row__header">
-                            <div className="workspace-version-row__title">
-                              {formatVersionTag(versionOption.versionNumber)}
-                            </div>
-                            <div className="workspace-version-row__badges">
-                              {versionOption.runtimes.map((runtime) => (
-                                <WorkspaceBadge
-                                  key={`${versionOption.key}-${runtime}`}
-                                >
-                                  {runtime}
-                                </WorkspaceBadge>
-                              ))}
-                            </div>
-                          </div>
-                          <div className="workspace-version-row__meta">
-                            <span>
-                              Updated{" "}
-                              {formatInspectorDate(versionOption.updatedAt)}
-                            </span>
-                            <span>
-                              {formatCompactNumber(versionOption.downloads)}{" "}
-                              downloads
-                            </span>
-                          </div>
-                          {versionOption.description && (
-                            <p className="workspace-version-row__summary">
-                              {versionOption.description}
-                            </p>
-                          )}
-                        </SimmButton>
-                      );
-                    })}
-                  </div>
-                </section>
-              </div>
-            )}
-
-            {selectedNexusResult && (
-              <div className="workspace-inspector-card">
-                <div className="workspace-inspector-card__summary">
-                  <NexusDescription key={selectedNexusResult.mod_id}>
-                    {selectedNexusResult.description ||
-                      selectedNexusResult.summary ||
-                      "No description provided for this mod."}
-                  </NexusDescription>
-                </div>
-                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
-                    <SimmButton
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() =>
-                        void handleDownloadNexusMod(
-                          selectedNexusResult.mod_id,
-                          selectedNexusFile,
-                        )
+                        {!hasLibraryVersion && <Icon name="download" />}
+                        <span>Download</span>
+                      </SimmButton>
+                      {packageUrl && (
+                        <ExternalIconLink
+                          label="Open Source Page"
+                          title="Open on Thunderstore"
+                          href={packageUrl}
+                        />
+                      )}
+                    </>
+                  }
+                />
+              );
+            })()}
+            {selectedNexusResult && (() => {
+              const downloadedGroup = downloadedGroupForSelectedNexus;
+              const updateAvailable = downloadedGroup
+                ? isGroupUpdateAvailable(downloadedGroup)
+                : false;
+              const hasLibraryVersion = Boolean(
+                downloadedGroup && selectedNexusDownloadedEntry,
+              );
+              return (
+                <ModLibraryDetailHeader
+                  backLabel={detailPageBackLabel}
+                  onBack={closeDetailView}
+                  media={selectedNexusResult.picture_url}
+                  icon={
+                    <ModThumbnail
+                      className="lib-detail__icon"
+                      name={selectedNexusResult.name}
+                      iconUrl={
+                        selectedNexusResult.thumbnail_url ||
+                        selectedNexusResult.picture_url
                       }
-                      disabled={selectedNexusFiles.length === 0}
-                    >
-                      <Icon name="fas fa-download" />
-                      <span>Download selected file</span>
-                    </SimmButton>
-                    {downloadedGroupForSelectedNexus &&
-                      selectedNexusDownloadedEntry &&
-                      (() => {
-                        const installMoreOnly =
-                          downloadedGroupForSelectedNexus.installedIn.length > 0;
-                        const {
-                          installable,
-                          runtimeIncompatible,
-                          blockedBySiblingVersion,
-                          alreadyInstalled,
-                        } = getCompatibleInstallSummary(
-                          selectedNexusDownloadedEntry,
-                          installMoreOnly,
-                        );
-                        const installDisabled = installable.length === 0;
-                        const installTitle = installDisabled
-                          ? buildInstallNoOpNotice(
-                              {
-                                installEntry: selectedNexusDownloadedEntry,
-                                runtimeIncompatible,
-                                blockedBySiblingVersion,
-                                alreadyInstalled,
-                                installable,
-                                compatible: installable,
-                                excluded: runtimeIncompatible,
-                              },
-                              installMoreOnly,
-                            ).message
-                          : undefined;
-                        return (
-                          <SimmButton
-                            type="button"
-                            variant="secondary"
-                            className="btn btn-secondary"
-                            onClick={() =>
-                              void promptInstallTargets(
-                                selectedNexusDownloadedEntry,
-                                `Install ${selectedNexusDownloadedEntry.displayName}`,
+                      size={48}
+                    />
+                  }
+                  title={selectedNexusResult.name}
+                  meta={
+                    <>
+                      <span>{getNexusModAttribution(selectedNexusResult)}</span>
+                      <span>Nexus Mods</span>
+                      {selectedNexusResult.category_name && (
+                        <span>{selectedNexusResult.category_name}</span>
+                      )}
+                      <span className="ui-mono">
+                        {formatVersionTag(selectedNexusResult.version)}
+                      </span>
+                      <span>
+                        {formatCompactNumber(selectedNexusResult.endorsement_count)}{" "}
+                        endorsements
+                      </span>
+                      <span>
+                        {formatCompactNumber(
+                          selectedNexusResult.mod_downloads ||
+                            selectedNexusResult.unique_downloads,
+                        )}{" "}
+                        downloads
+                      </span>
+                      <span>
+                        Updated{" "}
+                        {formatInspectorDate(getNexusModUpdatedAt(selectedNexusResult))}
+                      </span>
+                      {selectedNexusResult.status &&
+                        selectedNexusResult.status !== "published" && (
+                          <span>{selectedNexusResult.status}</span>
+                        )}
+                    </>
+                  }
+                  status={
+                    selectedNexusResult.contains_adult_content ? (
+                      <LibraryTag tone="danger">Adult content</LibraryTag>
+                    ) : updateAvailable ? (
+                      <LibraryTag tone="warn">Update available</LibraryTag>
+                    ) : downloadedGroup ? (
+                      <LibraryTag>Downloaded</LibraryTag>
+                    ) : null
+                  }
+                  actions={
+                    <>
+                      {/* Same rule on every detail page: not downloaded → Download is primary,
+                          downloaded → Install to… is primary and Download secondary. */}
+                      {downloadedGroup &&
+                        selectedNexusDownloadedEntry &&
+                        (() => {
+                          const installMoreOnly =
+                            downloadedGroup.installedIn.length > 0;
+                          const {
+                            installable,
+                            runtimeIncompatible,
+                            blockedBySiblingVersion,
+                            alreadyInstalled,
+                          } = getCompatibleInstallSummary(
+                            selectedNexusDownloadedEntry,
+                            installMoreOnly,
+                          );
+                          const installDisabled = installable.length === 0;
+                          const installTitle = installDisabled
+                            ? buildInstallNoOpNotice(
+                                {
+                                  installEntry: selectedNexusDownloadedEntry,
+                                  runtimeIncompatible,
+                                  blockedBySiblingVersion,
+                                  alreadyInstalled,
+                                  installable,
+                                  compatible: installable,
+                                  excluded: runtimeIncompatible,
+                                },
                                 installMoreOnly,
-                              )
-                            }
-                            disabled={installDisabled}
-                            title={installTitle}
+                              ).message
+                            : undefined;
+                          return (
+                            <SimmButton
+                              type="button"
+                              onClick={() =>
+                                void promptInstallTargets(
+                                  selectedNexusDownloadedEntry,
+                                  `Install ${selectedNexusDownloadedEntry.displayName}`,
+                                  installMoreOnly,
+                                )
+                              }
+                              disabled={installDisabled}
+                              title={
+                                installTitle ??
+                                `Install ${formatVersionTag(getEntryVersionLabel(selectedNexusDownloadedEntry))} from your library to environments`
+                              }
+                            >
+                              <span>Install to…</span>
+                            </SimmButton>
+                          );
+                        })()}
+                      <SimmButton
+                        type="button"
+                        variant={hasLibraryVersion ? "outline" : "default"}
+                        onClick={() =>
+                          void handleDownloadNexusMod(
+                            selectedNexusResult.mod_id,
+                            selectedNexusFile,
+                          )
+                        }
+                        disabled={selectedNexusFiles.length === 0}
+                        title={
+                          selectedNexusFile
+                            ? `Download ${selectedNexusFile.name || selectedNexusFile.file_name || "the selected file"} to your library`
+                            : undefined
+                        }
+                      >
+                        {!hasLibraryVersion && <Icon name="download" />}
+                        <span>Download</span>
+                      </SimmButton>
+                      <ExternalIconLink
+                        label="Open Source Page"
+                        title="Open on Nexus Mods"
+                        href={`https://www.nexusmods.com/schedule1/mods/${selectedNexusResult.mod_id}`}
+                      />
+                    </>
+                  }
+                />
+              );
+            })()}
+
+            <div className="lib-detail__body">
+              {selectedNexusCollection && (
+                <>
+                  <p className="lib-detail__summary">
+                    {selectedNexusCollection.summary ||
+                      "No summary provided for this collection."}
+                  </p>
+                  {selectedCollectionPlan && (
+                    <LibrarySection id="collection-profile-preview" title="Profile preview">
+                      <SectionNote>
+                        {collectionRuntimeDifferenceCount > 0 ? (
+                          <>
+                            <strong className="lib-text-warn">
+                              {`${collectionRuntimeDifferenceCount.toLocaleString()} ${collectionRuntimeDifferenceCount === 1 ? "mod differs" : "mods differ"} by runtime`}
+                            </strong>
+                            {" "}
+                            These mods use a different library copy, download source, or
+                            availability state in the Mono and IL2CPP profiles.
+                          </>
+                        ) : (
+                          <>
+                            <strong>Same mods in both profiles</strong>{" "}
+                            {`Both profiles currently add the same ${selectedCollectionPlan.modFiles.length.toLocaleString()} mods from the same known sources.`}
+                          </>
+                        )}
+                      </SectionNote>
+                      <div
+                        className="lib-segmented lib-segmented--inline"
+                        role="group"
+                        aria-label="Collection profile preview"
+                      >
+                        {(["Mono", "IL2CPP"] as const).map((runtime) => {
+                          const active = collectionRuntimePreview === runtime;
+                          return (
+                            <button
+                              key={runtime}
+                              type="button"
+                              className="lib-segmented__option"
+                              aria-label={`${active ? "Hide" : "Show"} ${runtime} profile list`}
+                              aria-pressed={active}
+                              onClick={() =>
+                                setCollectionRuntimePreview((current) =>
+                                  current === runtime ? null : runtime,
+                                )
+                              }
+                            >
+                              {runtime}
+                              <span className="lib-segmented__count">
+                                {collectionRuntimePreviewByRuntime[runtime].length.toLocaleString()}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {collectionRuntimePreview && activeCollectionRuntimePreview && (
+                        <div
+                          className="lib-list"
+                          role="list"
+                          aria-label={`${collectionRuntimePreview} collection profile mods`}
+                        >
+                          {activeCollectionRuntimePreview.map((item) => (
+                            <div
+                              className="lib-list__row"
+                              key={`${collectionRuntimePreview}-${collectionFileKey(item.file)}`}
+                              role="listitem"
+                            >
+                              <span className="lib-list__name lib-list__name--thumb">
+                                <ModThumbnail
+                                  {...lookupArtwork(item.file.modName)}
+                                  name={item.file.modName}
+                                  size={24}
+                                />
+                                <span className="ui-truncate">{item.file.modName}</span>
+                              </span>
+                              <span className="lib-list__meta">
+                                <span className="ui-mono">
+                                  {item.file.version || "Version unknown"}
+                                </span>
+                                {item.file.optional ? " · Optional" : ""}
+                              </span>
+                              <span
+                                className={cn(
+                                  "lib-list__status",
+                                  `lib-list__status--${item.tone}`,
+                                )}
+                              >
+                                {item.statusLabel}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </LibrarySection>
+                  )}
+                  {(!nexusCollectionAccess?.canDirectDownload ||
+                    optionalCollectionFiles.length > 0) && (
+                    <LibrarySection
+                      id="collection-staging"
+                      title={
+                        nexusCollectionAccess?.canDirectDownload
+                          ? "Optional content"
+                          : "Collection staging"
+                      }
+                      aside={
+                        selectedCollectionPlan ? (
+                          <span
+                            className={cn(
+                              "lib-section__count",
+                              !collectionReadyForProfile && "lib-text-warn",
+                            )}
                           >
-                            <Icon name="fas fa-box-archive" />
-                            <span>
-                              {installMoreOnly
-                                ? "Install library version…"
-                                : "Install library version"}
+                            {nexusCollectionAccess?.canDirectDownload
+                              ? `${selectedOptionalCollectionCount.toLocaleString()} / ${optionalCollectionFiles.length.toLocaleString()} selected`
+                              : `${(
+                                  stagedRequiredCollectionFiles.length +
+                                  keptExistingCollectionFiles.length
+                                ).toLocaleString()} / ${requiredCollectionFiles.length.toLocaleString()} ready`}
+                          </span>
+                        ) : null
+                      }
+                    >
+                      <SectionNote>
+                        {nexusCollectionAccess?.canDirectDownload
+                          ? "Required mods are included automatically. Choose which optional mods SIMM should add before starting the download."
+                          : "Thunderstore alternatives require an exact name, author, and version match. Choose each mod or apply one choice to every match."}
+                      </SectionNote>
+                      {nexusCollectionPlanState.loading ? (
+                        <LibrarySkeletonRows label="Loading collection files" />
+                      ) : nexusCollectionPlanState.error ? (
+                        <div className="ui-callout ui-callout--danger">
+                          {nexusCollectionPlanState.error}
+                        </div>
+                      ) : selectedCollectionPlan ? (
+                        <>
+                          {!nexusCollectionAccess?.canDirectDownload &&
+                            unavailableRequiredCollectionFiles.length > 0 && (
+                              <div className="ui-callout ui-callout--danger lib-callout">
+                                <strong>Revision is incomplete on Nexus</strong>
+                                <span>
+                                  {unavailableRequiredCollectionFiles.length} required{" "}
+                                  {unavailableRequiredCollectionFiles.length === 1
+                                    ? "file is"
+                                    : "files are"}{" "}
+                                  no longer available. SIMM will not substitute another
+                                  file.
+                                </span>
+                              </div>
+                            )}
+                          {!nexusCollectionAccess?.canDirectDownload &&
+                            requiredExternalCollectionResources.length > 0 && (
+                              <div className="ui-callout ui-callout--warn lib-callout">
+                                <strong>External resources required</strong>
+                                <span>
+                                  Add these outside Nexus before installing; SIMM cannot
+                                  verify them automatically.
+                                </span>
+                                <span className="lib-callout__links">
+                                  {requiredExternalCollectionResources.map((resource) =>
+                                    resource.resourceUrl ? (
+                                      <a
+                                        key={resource.id}
+                                        href={resource.resourceUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                      >
+                                        {resource.name}
+                                      </a>
+                                    ) : (
+                                      <span key={resource.id}>{resource.name}</span>
+                                    ),
+                                  )}
+                                </span>
+                              </div>
+                            )}
+                          {!nexusCollectionAccess?.canDirectDownload && (
+                            <div className="lib-stage-policy">
+                              <label className="lib-check">
+                                <Checkbox
+                                  checked={applyCollectionSourceToAll}
+                                  onCheckedChange={(checked) =>
+                                    setApplyCollectionSourceToAll(Boolean(checked))
+                                  }
+                                />
+                                <span>
+                                  Apply next choice to all matches
+                                  <small>Leave off to choose each mod separately.</small>
+                                </span>
+                              </label>
+                              {collectionMatchesLoading && (
+                                <span className="lib-stage-policy__status">
+                                  <Icon name="spinner" spin /> Matching exact versions on
+                                  Thunderstore…
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          <div className="lib-list">
+                            {(nexusCollectionAccess?.canDirectDownload
+                              ? optionalCollectionFiles
+                              : selectedCollectionPlan.modFiles
+                            ).map((file) => {
+                              const key = collectionFileKey(file);
+                              const stagedEntry = getStagedCollectionEntry(file);
+                              const reusableEntry =
+                                stagedEntry ||
+                                findExactCollectionLibraryEntry(
+                                  file,
+                                  library?.downloaded ?? [],
+                                  "IL2CPP",
+                                ) ||
+                                findExactCollectionLibraryEntry(
+                                  file,
+                                  library?.downloaded ?? [],
+                                  "Mono",
+                                );
+                              const matchState = collectionMatchStates[key];
+                              const exactMatches = matchState?.matches ?? [];
+                              const sourceChoice =
+                                collectionSourceChoices[key] ?? "nexusmods";
+                              const optionalSelected =
+                                !file.optional ||
+                                Boolean(collectionOptionalSelections[key]);
+                              const matchRuntimes = Array.from(
+                                new Set(exactMatches.map((match) => match.runtime)),
+                              ).join(" + ");
+                              const decision =
+                                collectionFileDecisions[
+                                  getCollectionFileDecisionKey(file)
+                                ];
+                              const keptExisting =
+                                decision === "existing" &&
+                                getCollectionConflictingEntries(file).length > 0;
+                              return (
+                                <div
+                                  className="lib-stage-file"
+                                  key={file.collectionRevisionModId || file.fileId}
+                                >
+                                  <div className="lib-stage-file__copy">
+                                    <span className="lib-list__name">{file.modName}</span>
+                                    <span className="ui-meta lib-stage-file__meta">
+                                      {file.version && (
+                                        <span className="ui-mono">{file.version}</span>
+                                      )}
+                                      {file.author && <span>{file.author}</span>}
+                                      <span>Nexus file {file.fileId}</span>
+                                      <span className="ui-mono ui-truncate">{file.fileName}</span>
+                                    </span>
+                                    {!nexusCollectionAccess?.canDirectDownload && (
+                                      <small
+                                        className={cn(
+                                          "lib-stage-file__note",
+                                          matchState?.error && "lib-text-warn",
+                                        )}
+                                      >
+                                        {matchState?.loading
+                                          ? "Checking Thunderstore for the exact name, author, and version…"
+                                          : exactMatches.length > 0
+                                            ? `Exact Thunderstore version found for ${matchRuntimes}. Runtime-incompatible choices will require individual confirmation.`
+                                            : matchState?.error ??
+                                              "No exact high-confidence Thunderstore match. Keep the Nexus source for this item."}
+                                      </small>
+                                    )}
+                                  </div>
+                                  <div className="lib-stage-file__actions">
+                                    {file.optional && (
+                                      <label className="lib-check">
+                                        <Checkbox
+                                          checked={Boolean(collectionOptionalSelections[key])}
+                                          onCheckedChange={(checked) =>
+                                            setCollectionOptionalSelections((current) => ({
+                                              ...current,
+                                              [key]: Boolean(checked),
+                                            }))
+                                          }
+                                        />
+                                        <span>
+                                          {nexusCollectionAccess?.canDirectDownload
+                                            ? "Include in download"
+                                            : "Include optional"}
+                                        </span>
+                                      </label>
+                                    )}
+                                    {nexusCollectionAccess?.canDirectDownload ? (
+                                      <span
+                                        className={cn(
+                                          "lib-stage-file__state",
+                                          !optionalSelected && "lib-stage-file__state--muted",
+                                        )}
+                                      >
+                                        {optionalSelected
+                                          ? reusableEntry
+                                            ? `Reuse from ${getSourceBadgeLabel(reusableEntry.source)}`
+                                            : "Include with download"
+                                          : "Not included"}
+                                      </span>
+                                    ) : reusableEntry ? (
+                                      <span className="lib-stage-file__state lib-stage-file__state--ok">
+                                        Reuse from {getSourceBadgeLabel(reusableEntry.source)}
+                                      </span>
+                                    ) : keptExisting ? (
+                                      <span className="lib-stage-file__state">
+                                        Keeping current
+                                      </span>
+                                    ) : !file.available || !file.modId ? (
+                                      <LibraryTag tone="danger">Unavailable</LibraryTag>
+                                    ) : (
+                                      <div
+                                        className="lib-segmented"
+                                        role="group"
+                                        aria-label={`Download source for ${file.modName}`}
+                                      >
+                                        {exactMatches.length > 0 && (
+                                          <button
+                                            type="button"
+                                            className="lib-segmented__option"
+                                            aria-pressed={sourceChoice === "thunderstore"}
+                                            disabled={
+                                              Boolean(matchState?.loading) ||
+                                              !optionalSelected
+                                            }
+                                            onClick={() =>
+                                              setCollectionSourceChoice(file, "thunderstore")
+                                            }
+                                          >
+                                            Use Thunderstore
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          className="lib-segmented__option"
+                                          aria-pressed={sourceChoice === "nexusmods"}
+                                          disabled={
+                                            Boolean(matchState?.loading) ||
+                                            !optionalSelected
+                                          }
+                                          onClick={() =>
+                                            setCollectionSourceChoice(file, "nexusmods")
+                                          }
+                                        >
+                                          Keep Nexus
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      ) : null}
+                    </LibrarySection>
+                  )}
+                </>
+              )}
+
+              {selectedDownloadedGroup && selectedDownloadedEntry && (() => {
+                const installedNames = selectedDownloadedGroup.installedIn.map(
+                  (environmentId) =>
+                    environments.find((environment) => environment.id === environmentId)
+                      ?.name || environmentId,
+                );
+                const securityConfig = getSecurityBadgeConfig(
+                  selectedDownloadedEntry.securityScan,
+                );
+                const canActivate =
+                  selectedDownloadedGroup.installedIn.length > 0 &&
+                  selectedDownloadedGroupEntries.length > 1 &&
+                  selectedDownloadedEntry.installedIn.length <
+                    selectedDownloadedGroup.installedIn.length;
+                return (
+                  <>
+                    <p className="lib-detail__summary">
+                      {selectedDownloadedEntry.summary || "No summary provided."}
+                    </p>
+                    <LibrarySection id="downloaded-details" title="Details">
+                      <dl className="ui-kv lib-kv">
+                        <dt>
+                          <label htmlFor={`mod-library-version-${selectedDownloadedGroup.key}`}>
+                            Version
+                          </label>
+                        </dt>
+                        <dd className="lib-kv__control">
+                          <Select
+                            value={selectedDownloadedEntry.storageId}
+                            onValueChange={(nextStorageId) => {
+                              if (typeof nextStorageId === "string") {
+                                setSelectedStorageByGroup((prev) => ({
+                                  ...prev,
+                                  [selectedDownloadedGroup.key]: nextStorageId,
+                                }));
+                              }
+                            }}
+                            disabled={selectedDownloadedGroupEntries.length < 2}
+                          >
+                            <SelectTrigger
+                              id={`mod-library-version-${selectedDownloadedGroup.key}`}
+                              aria-label="Available versions"
+                              className="lib-select-trigger lib-select-trigger--version"
+                            >
+                              <SelectValue>
+                                {(selectedStorageId) => {
+                                  const selectedEntry =
+                                    selectedDownloadedGroupEntries.find(
+                                      (entry) => entry.storageId === selectedStorageId,
+                                    ) || selectedDownloadedEntry;
+                                  return `${formatVersionTag(getEntryVersionLabel(selectedEntry))} - ${selectedEntry.availableRuntimes?.length ? selectedEntry.availableRuntimes.join("/") : "Runtime?"}`;
+                                }}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent align="start">
+                              <SelectGroup>
+                                {selectedDownloadedGroupEntries.map((entry) => (
+                                  <SelectItem
+                                    key={entry.storageId}
+                                    value={entry.storageId}
+                                    onClick={() =>
+                                      setSelectedStorageByGroup((prev) => ({
+                                        ...prev,
+                                        [selectedDownloadedGroup.key]: entry.storageId,
+                                      }))
+                                    }
+                                  >
+                                    {`${formatVersionTag(getEntryVersionLabel(entry))} - ${entry.availableRuntimes?.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            </SelectContent>
+                          </Select>
+                          {canActivate && (
+                            <SimmButton
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              aria-label="Activate selected version"
+                              title="Install this version in place of the active one"
+                              onClick={() =>
+                                void handleSelectVersion(
+                                  selectedDownloadedGroup,
+                                  selectedDownloadedEntry.storageId,
+                                )
+                              }
+                              disabled={activatingGroup === selectedDownloadedGroup.key}
+                            >
+                              {activatingGroup === selectedDownloadedGroup.key && (
+                                <Icon name="spinner" spin />
+                              )}
+                              <span>
+                                {activatingGroup === selectedDownloadedGroup.key
+                                  ? "Activating…"
+                                  : "Activate"}
+                              </span>
+                            </SimmButton>
+                          )}
+                        </dd>
+                        <dt>Runtime</dt>
+                        <dd>
+                          {selectedDownloadedEntry.availableRuntimes?.length
+                            ? selectedDownloadedEntry.availableRuntimes.join(" + ")
+                            : "Unknown"}
+                        </dd>
+                        <dt>Installed in</dt>
+                        <dd>
+                          {installedNames.length > 0
+                            ? installedNames.join(", ")
+                            : "Not installed in any environment"}
+                        </dd>
+                        {selectedDownloadedEntry.securityScan && (
+                          <>
+                            <dt>Security scan</dt>
+                            <dd className="lib-kv__control">
+                              {securityConfig && (
+                                <span className={`ui-status ui-status--${securityConfig.tone}`}>
+                                  {securityConfig.label}
+                                </span>
+                              )}
+                              {selectedDownloadedEntry.storageId && (
+                                <SimmButton
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  aria-label="Security Report"
+                                  onClick={() =>
+                                    void openStoredSecurityReport(
+                                      selectedDownloadedEntry.storageId,
+                                      `Security Findings - ${selectedDownloadedEntry.displayName}`,
+                                    )
+                                  }
+                                >
+                                  View report
+                                </SimmButton>
+                              )}
+                            </dd>
+                          </>
+                        )}
+                      </dl>
+                    </LibrarySection>
+                    {selectedDownloadedEntry.source === "nexusmods" && (
+                      <LibrarySection
+                        id="nexus-downloaded-inspector-dependencies"
+                        title="Required dependencies"
+                        aside={
+                          visibleSelectedNexusRequirements.length > 0 ? (
+                            <span className="lib-section__count">
+                              {visibleSelectedNexusRequirements.length} required
                             </span>
-                          </SimmButton>
-                        );
-                      })()}
-                  </div>
-                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
-                    <a
-                      className="btn btn-secondary"
-                      aria-label="Open Source Page"
-                      href={`https://www.nexusmods.com/schedule1/mods/${selectedNexusResult.mod_id}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <Icon name="fas fa-arrow-up-right-from-square" />
-                      <span>Source</span>
-                    </a>
-                  </div>
-                </div>
-                <section
-                  className="workspace-inspector-card__subsection"
-                  aria-labelledby="nexus-inspector-versions"
-                >
-                  <div className="workspace-inspector-card__subsection-header">
-                    <div>
-                      <h4 id="nexus-inspector-versions">Available files</h4>
-                      <p>
-                        Pick the file you want to add to the library before
-                        downloading.
+                          ) : null
+                        }
+                      >
+                        {selectedNexusDependencyKey === nexusDependencyState.key &&
+                        nexusDependencyState.loading ? (
+                          <SectionNote>Checking published Nexus dependencies…</SectionNote>
+                        ) : nexusDependencyState.error &&
+                          selectedNexusDependencyKey === nexusDependencyState.key ? (
+                          <SectionNote>
+                            Dependency information is unavailable for this file. Connect
+                            Nexus and try again before downloading if you need a
+                            compatibility check.
+                          </SectionNote>
+                        ) : selectedNexusDependencies ? (
+                          visibleSelectedNexusRequirements.length > 0 ? (
+                            <div className="lib-list">
+                              {visibleSelectedNexusRequirements.map((requirement) => {
+                                const isMissing = missingSelectedNexusRequirements.some(
+                                  (missingRequirement) =>
+                                    missingRequirement.id === requirement.id,
+                                );
+                                return (
+                                  <div className="lib-list__row" key={requirement.id}>
+                                    <span className="lib-list__name">
+                                      {formatNexusDependencyCandidates(requirement)}
+                                    </span>
+                                    <span className="lib-list__meta">
+                                      Any listed version satisfies this requirement.
+                                    </span>
+                                    {isMissing ? (
+                                      <LibraryTag tone="warn">Missing</LibraryTag>
+                                    ) : (
+                                      <span className="lib-list__status lib-list__status--success">
+                                        In library
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <SectionNote>
+                              No additional Nexus mod dependencies are declared for this
+                              file. MelonLoader is managed separately.
+                            </SectionNote>
+                          )
+                        ) : (
+                          <SectionNote>
+                            {selectedNexusStoredFileId !== null
+                              ? "The stored Nexus file is no longer available to inspect."
+                              : "Select a file to check its published dependencies."}
+                          </SectionNote>
+                        )}
+                      </LibrarySection>
+                    )}
+                    <div className="ui-danger-zone lib-danger-zone">
+                      <p className="lib-danger-zone__copy">
+                        Removes every stored version of {selectedDownloadedGroup.displayName}{" "}
+                        from the library. SIMM asks before touching environments where it is
+                        installed.
                       </p>
+                      <SimmButton
+                        type="button"
+                        variant="destructive"
+                        onClick={() =>
+                          void handleDeleteDownloadedGroup(selectedDownloadedGroup)
+                        }
+                      >
+                        <Icon name="trash" />
+                        <span>Delete downloaded files</span>
+                      </SimmButton>
                     </div>
-                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
-                      {selectedNexusFiles.length} available
-                    </WorkspaceBadge>
-                  </div>
-                  {selectedNexusFiles.length > 0 ? (
+                  </>
+                );
+              })()}
+
+              {selectedThunderstorePackage && (
+                <>
+                  <p className="lib-detail__summary">
+                    {selectedThunderstoreLatestVersion?.description ||
+                      "No description provided for this package."}
+                  </p>
+                  <LibrarySection
+                    id="thunderstore-inspector-versions"
+                    title="Versions"
+                    aside={
+                      <span className="lib-section__count">
+                        {selectedThunderstoreVersionOptions.length} available
+                      </span>
+                    }
+                  >
                     <div
-                      className="workspace-version-list"
+                      className="lib-versions"
                       role="listbox"
-                      aria-label="Nexus available files"
+                      aria-label="Thunderstore available versions"
                     >
-                      {selectedNexusFiles.map((file) => {
-                        const displayKind = getNexusFileDisplayKind(file);
-                        const versionLabel =
-                          file.version || file.mod_version || "unknown";
-                        const versionTag = formatVersionTag(versionLabel);
-                        const fileTitle = getNexusFileRowTitle(
-                          file,
-                          selectedNexusResult.name,
-                        );
-                        const fileSizeLabel = formatFileSizeShort(file.size);
+                      {selectedThunderstoreVersionOptions.map((versionOption) => {
                         const isActive =
-                          selectedNexusFile?.file_id === file.file_id;
-                        const detailLabel = getNexusVersionRowDetail(
-                          file,
-                          selectedNexusResult.name,
-                          versionLabel,
-                        );
-                        const summaryLabel = getNexusVersionRowSummary(
-                          file,
-                          selectedNexusResult.name,
-                          versionLabel,
-                        );
-                        const effectiveSummaryLabel =
-                          summaryLabel &&
-                          normalizeNexusVersionRowLabel(summaryLabel) !==
-                            normalizeNexusVersionRowLabel(fileTitle)
-                            ? summaryLabel
+                          selectedThunderstoreVersion?.key === versionOption.key;
+                        const description =
+                          versionOption.description &&
+                          versionOption.description !==
+                            selectedThunderstoreLatestVersion?.description
+                            ? versionOption.description
                             : null;
                         return (
-                          <SimmButton
-                            key={file.file_id}
+                          <button
+                            key={versionOption.key}
                             type="button"
-                            variant="ghost"
                             role="option"
                             aria-selected={isActive}
-                            className={`workspace-version-row workspace-version-row--nexus-file${isActive ? " workspace-version-row--active" : ""}`}
+                            className="lib-version"
                             onClick={() =>
-                              setSelectedNexusFileByModId((prev) => ({
+                              setSelectedThunderstoreVersionByPackage((prev) => ({
                                 ...prev,
-                                [selectedNexusResult.mod_id]: file.file_id,
+                                [selectedThunderstorePackage.key]: versionOption.key,
                               }))
                             }
                           >
-                            <div className="workspace-version-row__header workspace-version-row__header--nexus-file">
-                              <div
-                                className="workspace-version-row__file-title"
-                                title={fileTitle}
-                              >
-                                {fileTitle}
-                              </div>
-                              <div className="workspace-version-row__badges workspace-version-row__badges--nexus-file">
-                                <WorkspaceBadge>{versionTag}</WorkspaceBadge>
-                                <WorkspaceBadge>{displayKind}</WorkspaceBadge>
-                                {file.is_primary && (
-                                  <WorkspaceBadge tone="success">
-                                    Primary
-                                  </WorkspaceBadge>
-                                )}
-                                {file.category_name && (
-                                  <WorkspaceBadge tone="source">
-                                    {file.category_name}
-                                  </WorkspaceBadge>
-                                )}
-                              </div>
-                            </div>
-                            <div className="workspace-version-row__meta">
-                              <span>
-                                Uploaded{" "}
-                                {formatInspectorDate(
-                                  getNexusFileUpdatedAt(file) ||
-                                  getNexusModUpdatedAt(selectedNexusResult),
-                                )}
-                              </span>
-                              {fileSizeLabel && <span>{fileSizeLabel}</span>}
-                              {detailLabel &&
-                                normalizeNexusVersionRowLabel(detailLabel) !==
-                                  normalizeNexusVersionRowLabel(fileTitle) && (
-                                  <span>{detailLabel}</span>
-                                )}
-                            </div>
-                            {effectiveSummaryLabel && (
-                              <p className="workspace-version-row__summary">
-                                {effectiveSummaryLabel}
-                              </p>
+                            <span className="lib-version__check" aria-hidden="true">
+                              {isActive && <Icon name="check" />}
+                            </span>
+                            <span className="lib-version__name ui-mono">
+                              {formatVersionTag(versionOption.versionNumber)}
+                            </span>
+                            <span className="lib-version__cell">
+                              {versionOption.runtimes.join(" + ")}
+                            </span>
+                            <span className="lib-version__cell">
+                              {formatInspectorDate(versionOption.updatedAt)}
+                            </span>
+                            <span className="lib-version__cell lib-cell--num">
+                              {formatCompactNumber(versionOption.downloads)} downloads
+                            </span>
+                            {description && (
+                              <span className="lib-version__summary">{description}</span>
                             )}
-                          </SimmButton>
+                          </button>
                         );
                       })}
                     </div>
-                  ) : (
-                    <InspectorCardEmpty>
-                      No downloadable files were returned for this Nexus mod
-                      yet.
-                    </InspectorCardEmpty>
-                  )}
-                </section>
-              </div>
-            )}
+                  </LibrarySection>
+                  <LibrarySection
+                    id="thunderstore-inspector-dependencies"
+                    title="Required dependencies"
+                    aside={
+                      selectedThunderstoreDependencies.length > 0 ? (
+                        <span className="lib-section__count">
+                          {selectedThunderstoreDependencies.length} required
+                        </span>
+                      ) : null
+                    }
+                  >
+                    {!selectedThunderstoreVersion ? (
+                      <SectionNote>Select a version to review its dependencies.</SectionNote>
+                    ) : selectedThunderstoreDependencies.length === 0 ? (
+                      <SectionNote>
+                        No additional Thunderstore dependencies are declared for this
+                        version. MelonLoader is managed separately.
+                      </SectionNote>
+                    ) : (
+                      <div className="lib-list">
+                        {selectedThunderstoreDependencies.map((dependency) => {
+                          const isMissing = missingSelectedThunderstoreDependencies.some(
+                            (missing) => missing.raw === dependency.raw,
+                          );
+                          return (
+                            <div key={dependency.raw} className="lib-list__row">
+                              <span className="lib-list__name lib-list__name--thumb">
+                                <ModThumbnail
+                                  {...lookupArtwork(
+                                    dependency.packageKey.split("-").pop() ||
+                                      dependency.packageKey,
+                                  )}
+                                  name={
+                                    dependency.packageKey.split("-").pop() ||
+                                    dependency.packageKey
+                                  }
+                                  size={24}
+                                />
+                                <span className="ui-truncate">
+                                  {dependency.packageKey}
+                                  {dependency.minimumVersion && (
+                                    <span className="ui-mono">
+                                      {" "}
+                                      {formatVersionTag(dependency.minimumVersion)}
+                                    </span>
+                                  )}
+                                </span>
+                              </span>
+                              <span className="lib-list__meta">
+                                {dependency.minimumVersion
+                                  ? "This version or newer"
+                                  : "Version requirement unavailable"}
+                              </span>
+                              {isMissing ? (
+                                <LibraryTag tone="warn">Missing</LibraryTag>
+                              ) : (
+                                <span className="lib-list__status lib-list__status--success">
+                                  In library
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </LibrarySection>
+                </>
+              )}
+
+              {selectedNexusResult && (
+                <>
+                  <div className="lib-detail__summary lib-detail__summary--rich">
+                    <NexusDescription key={selectedNexusResult.mod_id}>
+                      {selectedNexusResult.description ||
+                        selectedNexusResult.summary ||
+                        "No description provided for this mod."}
+                    </NexusDescription>
+                  </div>
+                  <LibrarySection
+                    id="nexus-inspector-versions"
+                    title="Files"
+                    aside={
+                      <span className="lib-section__count">
+                        {selectedNexusFiles.length} available
+                      </span>
+                    }
+                  >
+                    {selectedNexusFiles.length > 0 ? (
+                      <div
+                        className="lib-versions"
+                        role="listbox"
+                        aria-label="Nexus available files"
+                      >
+                        {selectedNexusFiles.map((file) => {
+                          const displayKind = getNexusFileDisplayKind(file);
+                          const versionLabel =
+                            file.version || file.mod_version || "unknown";
+                          const fileTitle = getNexusFileRowTitle(
+                            file,
+                            selectedNexusResult.name,
+                          );
+                          const fileSizeLabel = formatFileSizeShort(file.size);
+                          const isActive = selectedNexusFile?.file_id === file.file_id;
+                          const detailLabel = getNexusVersionRowDetail(
+                            file,
+                            selectedNexusResult.name,
+                            versionLabel,
+                          );
+                          const summaryLabel = getNexusVersionRowSummary(
+                            file,
+                            selectedNexusResult.name,
+                            versionLabel,
+                          );
+                          const effectiveSummaryLabel =
+                            summaryLabel &&
+                            normalizeNexusVersionRowLabel(summaryLabel) !==
+                              normalizeNexusVersionRowLabel(fileTitle)
+                              ? summaryLabel
+                              : null;
+                          return (
+                            <button
+                              key={file.file_id}
+                              type="button"
+                              role="option"
+                              aria-selected={isActive}
+                              className="lib-version lib-version--file"
+                              onClick={() =>
+                                setSelectedNexusFileByModId((prev) => ({
+                                  ...prev,
+                                  [selectedNexusResult.mod_id]: file.file_id,
+                                }))
+                              }
+                            >
+                              <span className="lib-version__check" aria-hidden="true">
+                                {isActive && <Icon name="check" />}
+                              </span>
+                              <span className="lib-version__file">
+                                <span className="lib-version__file-title" title={fileTitle}>
+                                  {fileTitle}
+                                </span>
+                                <span className="ui-meta lib-version__meta">
+                                  <span className="ui-mono">{formatVersionTag(versionLabel)}</span>
+                                  <span>{displayKind}</span>
+                                  {file.is_primary && <span>Primary</span>}
+                                  {file.category_name && (
+                                    <span>{formatNexusFileCategory(file.category_name)}</span>
+                                  )}
+                                  <span>
+                                    Uploaded{" "}
+                                    {formatInspectorDate(
+                                      getNexusFileUpdatedAt(file) ||
+                                        getNexusModUpdatedAt(selectedNexusResult),
+                                    )}
+                                  </span>
+                                  {fileSizeLabel && <span>{fileSizeLabel}</span>}
+                                  {detailLabel &&
+                                    normalizeNexusVersionRowLabel(detailLabel) !==
+                                      normalizeNexusVersionRowLabel(fileTitle) && (
+                                      <span>{detailLabel}</span>
+                                    )}
+                                </span>
+                                {effectiveSummaryLabel && (
+                                  <span className="lib-version__summary">
+                                    {effectiveSummaryLabel}
+                                  </span>
+                                )}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <SectionNote>
+                        No downloadable files were returned for this Nexus mod yet.
+                      </SectionNote>
+                    )}
+                  </LibrarySection>
+                </>
+              )}
             </div>
           </main>
-          )}
-        </div>
+        )}
       </div>
 
       {contextMenu && (

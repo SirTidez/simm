@@ -1,0 +1,143 @@
+.environment-status {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--simm-text);
+  background: var(--simm-bg);
+  font-size: 14px;
+}
+.environment-status-header { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--simm-line); }
+.environment-status-title { flex: 1; min-width: 0; }
+.environment-status-title > span { font-size: 12px; color: var(--simm-text-2); }
+.environment-status-title h1 { font-size: 18px; line-height: 1.4; margin: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.environment-status-state { display: flex; align-items: center; gap: 7px; font-size: 13px; white-space: nowrap; }
+.environment-status-state i { width: 7px; height: 7px; background: var(--simm-text-2); border-radius: 50%; }
+.environment-status-state.is-running i { background: var(--simm-ok); }
+.environment-status-time { font-variant-numeric: tabular-nums; }
+.native-console-workspace { display: grid; grid-template-columns: minmax(160px, 1fr) min(var(--console-sidebar-width, 360px), 48%); min-height: 0; min-width: 0; overflow: hidden; }
+.environment-status-console { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+.environment-status-content { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; min-width: 0; overflow: hidden; }
+.environment-status-tabs { display: flex; gap: 0; padding: 0 12px; border-bottom: 1px solid var(--simm-line); }
+.environment-status-tabs .environment-status-tab {
+  position: relative;
+  height: 40px;
+  min-width: 0;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--simm-text-2);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: none;
+  transform: none;
+}
+.environment-status-tabs .environment-status-tab:hover:not(:disabled),
+.environment-status-tabs .environment-status-tab[aria-selected='true'] { color: var(--simm-text); }
+.environment-status-tabs .environment-status-tab[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  right: 16px;
+  bottom: 0;
+  left: 16px;
+  height: 2px;
+  background: var(--simm-accent);
+}
+.environment-status-tabs .environment-status-tab:focus-visible { outline: 2px solid var(--simm-accent); outline-offset: -4px; }
+.environment-status-console[hidden], .environment-status-logs[hidden], .environment-status-log-details[hidden] { display: none; }
+.environment-status-logs { min-height: 0; min-width: 0; overflow: hidden; }
+.environment-status-logs .logs-panel--embedded { width: 100%; height: 100%; min-height: 0; padding: 0; border: 0; border-radius: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+.environment-status-logs .logs-panel__shell { grid-template-columns: minmax(150px, 190px) minmax(0, 1fr); min-width: 0; min-height: 0; }
+.environment-status-logs .logs-panel__viewer-header { flex-wrap: wrap; gap: 8px; }
+.environment-status-logs .logs-panel__header-actions { flex-wrap: wrap; }
+.environment-status-logs .logs-panel__rail { min-width: 0; }
+.environment-status-logs .logs-panel__toolbar { flex-wrap: wrap; }
+.environment-status-logs .logs-panel__session-label { font-size: 11px; color: var(--simm-text-2); margin: 4px 0; }
+.environment-status-log-details .logs-panel__inspector { border: 0; padding: 14px 0; background: transparent; overflow: visible; }
+.environment-status-log-details .logs-panel__inspector-card { padding: 8px 0; border: 0; border-radius: 0; background: transparent; }
+.environment-status-log-details .logs-panel__inspector-toolbar { font-size: 13px; }
+@media (max-width: 1100px) {
+  .environment-status-logs .logs-panel__shell { grid-template-columns: minmax(120px, 155px) minmax(0, 1fr); }
+}
+.native-console-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--simm-line); }
+.native-console-toolbar strong { font-weight: 500; }
+.native-console-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.native-console-toolbar-actions > span { color: var(--simm-text-2); }
+.native-console-toolbar > span, .native-console-caption { color: var(--simm-text-2); }
+.native-console-caption { font-size: 11px; padding: 6px 14px; border-top: 1px solid var(--simm-line); }
+.native-console-pane { min-width: 0; min-height: 0; background: #0c0c0c; color: #ddd; overflow: hidden; }
+.native-console-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; height: 100%; padding: 24px; text-align: center; color: #a6adb8; }
+.native-console-placeholder > svg { font-size: 24px; }
+.native-console-placeholder strong { font-size: 14px; font-weight: 400; }
+.native-console-sidebar { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; min-width: 0; border-left: 1px solid var(--simm-line); }
+.native-console-details { overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0; padding: 0 16px; scrollbar-width: auto; }
+.native-console-details section, .native-console-preferences { padding: 16px 0; border-bottom: 1px solid var(--simm-line); }
+.native-console-details section:last-child { border-bottom: 0; }
+.native-console-details h2 { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 13px; font-weight: 650; margin: 0 0 12px; }
+.native-console-details small, .native-console-note { font-size: 11px; font-weight: 400; color: var(--simm-text-2); }
+.native-console-details p { margin: 8px 0; overflow-wrap: anywhere; }
+.native-console-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; margin: 0; font-size: 12px; }
+.native-console-details dt { color: var(--simm-text-2); }
+.native-console-details dd { text-align: right; margin: 0; overflow-wrap: anywhere; }
+.environment-status-inventory { display: grid; gap: 8px; padding-top: 16px; }
+.environment-status-inventory label { font-size: 12px; font-weight: 600; }
+.environment-status-inventory input { width: 100%; min-width: 0; background: var(--simm-sunken); color: inherit; border: 1px solid var(--simm-line); border-radius: 4px; padding: 8px; font-size: 12px; }
+.native-console-mods { list-style: none; padding: 0; margin: 0; }
+.native-console-mods li { display: grid; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--simm-line); }
+.native-console-mods li:last-child { border-bottom: 0; }
+.native-console-mod-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.native-console-mods strong { font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.native-console-mods span { font-size: 11px; color: var(--simm-text-2); overflow-wrap: anywhere; }
+.native-console-mod-title > span { flex-shrink: 0; max-width: 45%; text-align: right; }
+.native-console-mods .is-disabled strong { color: var(--simm-text-2); }
+.native-console-path { font-family: var(--simm-font-mono); font-size: 11px; overflow-wrap: anywhere; }
+.native-console-actions { display: grid; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--simm-line); }
+.native-console-actions p { font-size: 12px; margin: 0; color: var(--simm-text-2); }
+.native-console-actions [role='alertdialog'] { display: grid; gap: 10px; }
+.native-console-button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.native-console-error { color: var(--simm-danger-text); overflow-wrap: anywhere; font-size: 12px; }
+.native-console-diagnostic { padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
+.native-console-preferences { display: grid; gap: 10px; min-width: 0; }
+.native-console-preferences legend { font-size: 13px; font-weight: 600; padding-top: 12px; }
+.native-console-preferences label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.native-console-preferences input { accent-color: var(--simm-accent); }
+.native-console-preferences__width { flex-wrap: wrap; justify-content: space-between; }
+.native-console-preferences select { padding: 6px; max-width: 100%; background: var(--simm-sunken); color: inherit; border: 1px solid var(--simm-line); border-radius: 4px; }
+.native-console-message-counts { display: flex; flex-wrap: wrap; gap: 8px; }
+.native-console-message-counts button { flex: 1; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.native-console-message-counts button[aria-pressed='true'] { border-color: var(--simm-accent); }
+.native-console-message-source { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.native-console-message-viewer { display: grid; gap: 10px; margin-top: 12px; min-width: 0; }
+.native-console-message-viewer label { display: grid; gap: 4px; font-size: 11px; }
+.native-console-message-viewer select { width: 100%; min-width: 0; padding: 6px; background: var(--simm-sunken); color: inherit; border: 1px solid var(--simm-line); border-radius: 4px; font-size: 12px; }
+.native-console-message-list { list-style: none; padding: 0; margin: 0; max-height: 360px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid var(--simm-line); }
+.native-console-message-list li { border-bottom: 1px solid var(--simm-line); }
+.native-console-message-list summary { padding: 10px 2px; cursor: pointer; overflow-wrap: anywhere; font-size: 12px; }
+.native-console-message-list summary strong { display: block; margin: 4px 0; font-weight: 600; }
+.native-console-message-meta { display: inline-flex; gap: 12px; font-size: 11px; color: var(--simm-text-2); }
+.native-console-message-preview { display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.native-console-message-body { padding: 0 2px 8px; min-width: 0; }
+.native-console-message-body pre { margin: 8px 0; font-size: 11px; line-height: 1.5; font-family: var(--simm-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: inherit; }
+.native-console-entry-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.native-console-entry-counts button { flex: 1; justify-content: space-between; min-width: 100px; height: 26px; padding: 3px 8px; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* The environment page owns the title and tab bar. */
+.env-workspace__body--console,
+.env-workspace__body--logs { overflow: hidden; }
+.environment-status--embedded { padding: 0; border: 0; border-radius: 0; }
+.environment-status--embedded .environment-status-header { padding: var(--simm-space-2) var(--simm-space-3); gap: var(--simm-space-3); }
+.environment-status--embedded .environment-status-header > button { margin-left: auto; }
+.environment-status--embedded .environment-status-content { grid-template-rows: minmax(0, 1fr); }
+.environment-status--embedded .native-console-sidebar { background: var(--simm-bg); }
+.environment-status--embedded .native-console-toolbar { padding: var(--simm-space-2) var(--simm-space-3); }
+.environment-status--embedded .native-console-details h2 { font-size: var(--simm-text-sm); font-weight: 600; }
+.environment-status-log-details .logs-panel__inspector { grid-area: auto; min-height: auto; max-height: none; }
+.environment-status-log-details .logs-panel__inspector-content { max-height: 20rem; }
+@container (max-width: 700px) {
+  .environment-status--embedded .native-console-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(220px, 1fr) minmax(180px, 0.8fr); }
+  .environment-status--embedded .native-console-sidebar { border-left: 0; border-top: 1px solid var(--simm-line); }
+}

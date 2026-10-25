@@ -19,18 +19,15 @@ export function MelonLoaderUpdateToast({
 
   return (
     <section
-      className="melonloader-update-toast"
+      className="melonloader-update-toast notice-toast"
       role="status"
       aria-live="polite"
       aria-labelledby="melonloader-update-toast-title"
     >
-      <header className="melonloader-update-toast__header">
-        <div>
-          <span className="melonloader-update-toast__eyebrow">Stable release available</span>
-          <strong id="melonloader-update-toast-title">MelonLoader {notice.latestVersion}</strong>
-        </div>
+      <header className="notice-toast__header">
+        <strong id="melonloader-update-toast-title" className="notice-toast__title">MelonLoader {notice.latestVersion}</strong>
         <SimmIconButton
-          className="window-control-btn melonloader-update-toast__dismiss"
+          className="notice-toast__dismiss"
           onClick={onDismiss}
           aria-label="Dismiss MelonLoader update notice"
           title="Dismiss this release"
@@ -39,20 +36,17 @@ export function MelonLoaderUpdateToast({
         </SimmIconButton>
       </header>
 
-      <p>
-        A newer stable MelonLoader release is available for{' '}
-        {notice.targets.length === 1 ? '1 environment' : `${notice.targets.length} environments`}.
-        Nightly builds are not included in this notification.
+      <p className="notice-toast__body">
+        New stable release for{' '}
+        <span>
+          {visibleNames.join(', ')}
+        </span>
+        {remainingCount > 0 ? ` and ${remainingCount} more` : ''}.
       </p>
 
-      <div className="melonloader-update-toast__targets" aria-label="Environments with an available MelonLoader update">
-        {visibleNames.join(', ')}
-        {remainingCount > 0 ? `, and ${remainingCount} more` : ''}
-      </div>
-
-      <footer className="melonloader-update-toast__actions">
-        <SimmButton type="button" className="btn btn-primary btn-small" onClick={onReview}>
-          Review environments
+      <footer className="notice-toast__actions">
+        <SimmButton type="button" size="sm" onClick={onReview}>
+          Review Environments
         </SimmButton>
       </footer>
     </section>

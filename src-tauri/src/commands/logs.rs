@@ -112,6 +112,7 @@ pub async fn export_logs(
     filter_category: Option<String>,
     search_query: Option<String>,
     filter_mod_tag: Option<String>,
+    filter_mod_tags: Option<Vec<String>>,
     time_period: Option<String>,
     custom_time_start: Option<String>,
     custom_time_end: Option<String>,
@@ -129,6 +130,7 @@ pub async fn export_logs(
             custom_time_start.as_deref(),
             custom_time_end.as_deref(),
             &output_path,
+            filter_mod_tags.as_deref(),
         )
         .await
         .map_err(|e| e.to_string())

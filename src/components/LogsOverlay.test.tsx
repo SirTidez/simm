@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 import { LogsOverlay } from './LogsOverlay';
 import type { Environment } from '../types';
@@ -15,7 +15,7 @@ const apiMocks = vi.hoisted(() => ({
   revealPath: vi.fn(),
 }));
 
-const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
+const listenMock = vi.hoisted(() => vi.fn(async (_name?: string, _handler?: unknown) => () => {}));
 const saveMock = vi.hoisted(() => vi.fn());
 const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
@@ -127,6 +127,99 @@ describe('LogsOverlay', () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it('opens the latest log for a DLL source and severity, merges aliases, and shares its inspector', async () => {
+    const latest = makeLogFile({ name: 'Latest.log', path: 'C:/Games/Schedule I/MelonLoader/Latest.log', isLatest: true });
+    const archive = makeLogFile({ name: 'Older.log', path: 'C:/Games/Schedule I/MelonLoader/Logs/Older.log' });
+    apiMocks.getLogFiles.mockResolvedValue([latest, archive]);
+    apiMocks.readLogFile.mockResolvedValue([
+      makeLogLine({ lineNumber: 1, modTag: 'Test_mod', level: 'ERROR', content: 'First alias failure' }),
+      makeLogLine({ lineNumber: 2, modTag: 'TestMod', level: 'ERROR', content: 'Second alias failure' }),
+      makeLogLine({ lineNumber: 3, modTag: 'TestMod', level: 'WARN', content: 'Mod warning' }),
+      makeLogLine({ lineNumber: 4, modTag: 'Plugin', level: 'ERROR', content: 'Plugin failure' }),
+    ]);
+    const sidebar = document.createElement('div'); document.body.append(sidebar);
+    const view = render(<LogsOverlay isOpen active embedded sidebarTarget={sidebar} onClose={() => {}} environmentId="env-1" environment={environment}
+      focus={{ id: 1, severity: 'ERROR', source: { label: 'Mod · Test mod', tags: ['Test_mod', 'TestMod'] } }} />);
+    expect(await screen.findByText('First alias failure')).toBeInTheDocument();
+    expect(screen.getByText('Second alias failure')).toBeInTheDocument();
+    expect(screen.queryByText('Plugin failure')).not.toBeInTheDocument();
+    expect(screen.queryByText('Mod warning')).not.toBeInTheDocument();
+    fireEvent.click(view.container.querySelector('.logs-panel__line') as HTMLElement);
+    expect(sidebar.querySelector('.logs-panel__inspector')).not.toBeNull();
+    expect(view.container.querySelector('.logs-panel__inspector')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Logs' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Older.log/ }));
+    await waitFor(() => expect(apiMocks.readLogFile).toHaveBeenCalledWith(archive.path, 4000));
+    view.rerender(<LogsOverlay isOpen active embedded sidebarTarget={sidebar} onClose={() => {}} environmentId="env-1" environment={environment}
+      focus={{ id: 2, severity: 'WARN', source: { label: 'Mod · Test mod', tags: ['Test_mod', 'TestMod'] } }} />);
+    expect(await screen.findByText('Mod warning')).toBeInTheDocument();
+    expect(view.container.querySelector('.logs-panel__viewer-header h3')).toHaveTextContent('Latest.log');
+    expect(screen.queryByText('First alias failure')).not.toBeInTheDocument();
+    view.unmount(); sidebar.remove();
+  });
+
+  it('refreshes complete live messages and retains filters while the Logs tab is hidden', async () => {
+    const latest = makeLogFile({ name: 'Latest.log', path: 'C:/Games/Schedule I/MelonLoader/Latest.log', isLatest: true });
+    const initial = makeLogLine({ level: 'ERROR', modTag: 'TestMod', content: 'Failure from mod' });
+    apiMocks.getLogFiles.mockResolvedValue([latest]);
+    apiMocks.readLogFile.mockResolvedValue([initial]);
+    let update: ((event: { payload: unknown }) => void) | undefined;
+    listenMock.mockImplementation(async (name, handler) => { if (name === 'log-update') update = handler as typeof update; return () => {}; });
+    const props = { isOpen: true, embedded: true, environmentId: 'env-1', environment, onClose: () => {} };
+    const view = render(<LogsOverlay {...props} active />);
+    await screen.findByText('Failure from mod');
+    await waitFor(() => expect(update).toBeDefined());
+    apiMocks.readLogFile.mockResolvedValue([{ ...initial, content: 'Failure from mod\n  at TestMod.Load()' }]);
+    update?.({ payload: { sourcePath: latest.path, sessionId: 1, lines: [makeLogLine({ content: '  at TestMod.Load()' })] } });
+    expect(await screen.findByText(/Failure from mod.*at TestMod.Load\(\)/s)).toBeInTheDocument();
+    const input = view.container.querySelector('.logs-panel__search input')!;
+    fireEvent.change(input, { target: { value: 'Failure' } });
+    view.rerender(<LogsOverlay {...props} active={false} />);
+    await waitFor(() => expect(apiMocks.stopWatchingLog).toHaveBeenCalledWith(1));
+    view.rerender(<LogsOverlay {...props} active />);
+    expect(input).toHaveValue('Failure');
+    await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledTimes(2));
+  });
+
+  it.each(['before', 'after'] as const)('keeps loaded history when a live refresh finishes %s pagination', async (finish) => {
+    const latest = makeLogFile({ name: 'Latest.log', path: 'C:/Games/Schedule I/MelonLoader/Latest.log', isLatest: true });
+    const tail = Array.from({ length: 4000 }, (_, index) => makeLogLine({ lineNumber: index + 101, content: `History line ${index + 101}` }));
+    const expanded = Array.from({ length: 4100 }, (_, index) => makeLogLine({ lineNumber: index + 1, content: `History line ${index + 1}` }));
+    const older = createDeferred<typeof expanded>();
+    const live = createDeferred<typeof tail>();
+    apiMocks.getLogFiles.mockResolvedValue([latest]);
+    apiMocks.readLogFile.mockResolvedValueOnce(tail)
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => live.promise)
+      .mockResolvedValue(expanded);
+    let update: ((event: { payload: unknown }) => void) | undefined;
+    listenMock.mockImplementation(async (name, handler) => { if (name === 'log-update') update = handler as typeof update; return () => {}; });
+    const { container } = render(<LogsOverlay isOpen active embedded environmentId="env-1" environment={environment} onClose={() => {}} />);
+    await screen.findByText('History line 101');
+    await waitFor(() => expect(update).toBeDefined());
+    const stream = container.querySelector('.logs-panel__stream') as HTMLDivElement;
+    Object.defineProperties(stream, {
+      scrollHeight: { configurable: true, value: 240000 },
+      clientHeight: { configurable: true, value: 720 },
+      scrollTop: { configurable: true, value: 100, writable: true },
+    });
+    fireEvent.scroll(stream);
+    await waitFor(() => expect(apiMocks.readLogFile).toHaveBeenLastCalledWith(latest.path, 8000));
+    await act(async () => { update?.({ payload: { sourcePath: latest.path, sessionId: 1, lines: [] } }); });
+    expect(apiMocks.readLogFile).toHaveBeenLastCalledWith(latest.path, 4000);
+
+    if (finish === 'before') await act(async () => { live.resolve(tail); });
+    await act(async () => { older.resolve(expanded); });
+    expect(screen.getByText('4,100 lines')).toBeInTheDocument();
+    if (finish === 'after') await act(async () => { live.resolve(tail); });
+
+    // A smaller in-flight live response must not evict the history just read.
+    expect(screen.getByText('4,100 lines')).toBeInTheDocument();
+    await act(async () => { update?.({ payload: { sourcePath: latest.path, sessionId: 1, lines: [] } }); });
+    expect(apiMocks.readLogFile).toHaveBeenLastCalledWith(latest.path, 8000);
+    expect(screen.getByText('4,100 lines')).toBeInTheDocument();
   });
 
   it('prefers the latest environment log when selecting the initial source', async () => {
@@ -662,12 +755,12 @@ describe('LogsOverlay', () => {
 
     expect(await screen.findByText('CoolMod loaded successfully')).toBeTruthy();
     const modActivitySection = [...container.querySelectorAll('.logs-panel__rail-card, .logs-panel__rail-section')]
-      .find((card) => card.textContent?.includes('Mod Activity'));
+      .find((card) => card.textContent?.includes('Mod activity'));
     expect(modActivitySection).toBeTruthy();
     fireEvent.click(within(modActivitySection as HTMLElement).getByRole('button', { name: /CoolMod/i }));
 
     await waitFor(() => {
-      expect(screen.getByText('Mod: CoolMod')).toBeTruthy();
+      expect(screen.getByText('Source: CoolMod')).toBeTruthy();
     });
     expect(screen.queryByText('AnotherMod threw an error')).toBeNull();
     expect(screen.queryByText('MelonLoader bootstrap finished')).toBeNull();
@@ -923,7 +1016,9 @@ describe('LogsOverlay', () => {
     expect(await screen.findByText(/Merged IL2CPP exception/)).toBeTruthy();
     const spacers = Array.from(container.querySelectorAll('.logs-panel__virtual-spacer')) as HTMLDivElement[];
     const spacerHeights = spacers.map((spacer) => Number.parseFloat(spacer.style.height || '0'));
-    expect(Math.max(...spacerHeights)).toBeGreaterThan(4800);
+    // 100 single-line rows alone would leave a spacer of roughly 3,200px; the
+    // merged 81-line entry must push the estimate well past that.
+    expect(Math.max(...spacerHeights)).toBeGreaterThan(3600);
   });
 
   it('loads an older log chunk when scrolling near the top of a tailed file', async () => {
@@ -989,7 +1084,7 @@ describe('LogsOverlay', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getAllByText('4100').length).toBeGreaterThan(0);
+      expect(screen.getByText('4,100 lines')).toBeTruthy();
     });
   });
 
@@ -1080,14 +1175,7 @@ describe('LogsOverlay', () => {
     expect(modChip?.textContent).toBe('ExtremelyVerbosePackRatDebugInstrumentationSuite');
   });
 
-  it('collapses the inspector at tighter widths, shows a mini summary, and auto-expands on selection', async () => {
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      writable: true,
-      value: 1100,
-    });
-    window.dispatchEvent(new Event('resize'));
-
+  it('shows the inspector only while a line is selected and closes it again', async () => {
     apiMocks.getLogFiles.mockResolvedValue([
       makeLogFile({
         name: 'Session-latest.log',
@@ -1121,20 +1209,31 @@ describe('LogsOverlay', () => {
 
     await screen.findByText('CoolMod loaded successfully');
 
-    expect(screen.getByRole('button', { name: 'Expand Inspector' })).toBeTruthy();
-    const collapsedInspector = container.querySelector('.logs-panel__inspector--collapsed');
-    expect(collapsedInspector).toBeTruthy();
-    expect(within(collapsedInspector as HTMLElement).getByText('No selection')).toBeTruthy();
-    expect(within(collapsedInspector as HTMLElement).getByText('Errors')).toBeTruthy();
-    expect(within(collapsedInspector as HTMLElement).getByText('Warnings')).toBeTruthy();
+    expect(container.querySelector('.logs-panel__inspector')).toBeNull();
+    expect(screen.getByText('2 lines')).toBeTruthy();
+    expect(screen.getByText('0 errors')).toBeTruthy();
 
     const logRows = container.querySelectorAll('.logs-panel__line');
     fireEvent.click(logRows[0] as HTMLElement);
 
     await waitFor(() => {
-      expect(container.querySelector('.logs-panel__inspector--collapsed')).toBeNull();
+      expect(container.querySelector('.logs-panel__inspector')).toBeTruthy();
       expect(screen.getByRole('heading', { name: 'Line 21' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Collapse Inspector' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Filter to Mod' })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Inspector' }));
+
+    await waitFor(() => {
+      expect(container.querySelector('.logs-panel__inspector')).toBeNull();
+    });
+
+    fireEvent.click(container.querySelectorAll('.logs-panel__line')[1] as HTMLElement);
+    expect(await screen.findByRole('heading', { name: 'Line 22' })).toBeTruthy();
+    fireEvent.keyDown(container.querySelector('.logs-panel__stream') as HTMLElement, { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(container.querySelector('.logs-panel__inspector')).toBeNull();
     });
   });
 });

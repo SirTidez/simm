@@ -46,9 +46,9 @@ describe('AuthenticationModal', () => {
     );
 
     fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
-    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
-    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
-    fireEvent.change(screen.getByLabelText(/Steam Guard Code/), { target: { value: 'ABCDE' } });
+    fireEvent.change(screen.getByLabelText('Steam username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam password'), { target: { value: 'secret-pass' } });
+    fireEvent.change(screen.getByLabelText(/Steam Guard code/), { target: { value: 'ABCDE' } });
     fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
 
     await waitFor(() => {
@@ -77,9 +77,9 @@ describe('AuthenticationModal', () => {
     );
 
     fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
-    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
-    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
-    fireEvent.change(screen.getByLabelText(/Steam Guard Code/), { target: { value: '   ' } });
+    fireEvent.change(screen.getByLabelText('Steam username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam password'), { target: { value: 'secret-pass' } });
+    fireEvent.change(screen.getByLabelText(/Steam Guard code/), { target: { value: '   ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
 
     await waitFor(() => {
@@ -101,8 +101,8 @@ describe('AuthenticationModal', () => {
     );
 
     fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
-    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
-    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
+    fireEvent.change(screen.getByLabelText('Steam username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam password'), { target: { value: 'secret-pass' } });
     fireEvent.click(screen.getByText('Remember credentials securely'));
     fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
 
@@ -274,8 +274,8 @@ describe('AuthenticationModal', () => {
     );
 
     fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
-    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
-    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
+    fireEvent.change(screen.getByLabelText('Steam username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam password'), { target: { value: 'secret-pass' } });
     fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
 
     expect(
