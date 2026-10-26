@@ -23,6 +23,7 @@ const apiMocks = vi.hoisted(() => ({
   installDepotDownloader: vi.fn(),
   createSteamEnvironment: vi.fn(),
   importLocalEnvironment: vi.fn(),
+  openExternalUrl: vi.fn(),
 }));
 
 vi.mock('../stores/environmentStore', () => ({
@@ -112,6 +113,7 @@ describe('EnvironmentCreationWizard', () => {
     apiMocks.installDepotDownloader.mockResolvedValue(undefined);
     apiMocks.createSteamEnvironment.mockResolvedValue(undefined);
     apiMocks.importLocalEnvironment.mockResolvedValue(undefined);
+    apiMocks.openExternalUrl.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -254,6 +256,104 @@ describe('EnvironmentCreationWizard', () => {
     await waitFor(() => {
       expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it.each([
+    'Winget install failed (code 37). Source unavailable.',
+    new Error('Winget install failed (code 37). Source unavailable.'),
+  ])('displays the actual automatic installation error: %s', async (error) => {
+    apiMocks.detectDepotDownloader.mockResolvedValue({ installed: false });
+    apiMocks.installDepotDownloader.mockRejectedValueOnce(error);
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+
+    expect(await screen.findByText('Winget install failed (code 37). Source unavailable.')).toBeVisible();
+    expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
+  it('displays string detection errors and offers another check', async () => {
+    apiMocks.detectDepotDownloader.mockRejectedValueOnce('Configured DepotDownloader executable does not exist: C:/Tools/DepotDownloader.exe');
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+
+    expect(await screen.findByText('Configured DepotDownloader executable does not exist: C:/Tools/DepotDownloader.exe')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Check Again' })).toBeVisible();
+    expect(apiMocks.installDepotDownloader).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed post-install detection visible instead of marking the tool ready', async () => {
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: false });
+    apiMocks.detectDepotDownloader.mockRejectedValueOnce('Cannot read the configured executable.');
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+
+    expect(await screen.findByText(/DepotDownloader installed, but SIMM could not refresh its status: Cannot read the configured executable\./)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Check Again' })).toBeVisible();
+  });
+
+  it('shows actionable Windows recovery steps after installation fails and opens official downloads', async () => {
+    apiMocks.detectDepotDownloader.mockResolvedValue({ installed: false });
+    apiMocks.installDepotDownloader.mockRejectedValueOnce('Winget source unavailable.');
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+
+    expect(await screen.findByRole('heading', { name: 'Install DepotDownloader manually' })).toBeVisible();
+    expect(screen.getByText('DepotDownloader-windows-x64.zip')).toBeVisible();
+    expect(screen.getByText('%LOCALAPPDATA%\\SIMM\\tools\\DepotDownloader')).toBeVisible();
+    expect(screen.getByText('Winget source unavailable.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Open official downloads' }));
+    await waitFor(() => expect(apiMocks.openExternalUrl).toHaveBeenCalledWith('https://github.com/SteamRE/DepotDownloader/releases/latest'));
+    expect(screen.getByRole('button', { name: 'Retry automatic install' })).toBeVisible();
+  });
+
+  it('checks for a manual installation without repeating the failed installer', async () => {
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: false });
+    apiMocks.installDepotDownloader.mockRejectedValueOnce('Winget source unavailable.');
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+    expect(await screen.findByText('Winget source unavailable.')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check Again' }));
+    await waitFor(() => expect(screen.queryByText('Winget source unavailable.')).toBeNull());
+    expect(screen.queryByRole('heading', { name: 'Install DepotDownloader manually' })).toBeNull();
+    expect(apiMocks.detectDepotDownloader).toHaveBeenCalledTimes(2);
+    expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps actual detection errors visible after a manual recheck', async () => {
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: false });
+    apiMocks.installDepotDownloader.mockRejectedValueOnce('Winget source unavailable.');
+    apiMocks.detectDepotDownloader.mockRejectedValueOnce('The selected executable cannot be read.');
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+    expect(await screen.findByText('Winget source unavailable.')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check Again' }));
+    expect(await screen.findByText('The selected executable cannot be read.')).toBeVisible();
+    expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows Linux archive, location, and permission instructions after installation fails', async () => {
+    const store = settingsStoreMocks.useSettingsStore();
+    settingsStoreMocks.useSettingsStore.mockReturnValue({ ...store, settings: { ...store.settings, platform: 'linux' } });
+    apiMocks.detectDepotDownloader.mockResolvedValue({ installed: false, canAutoInstall: true });
+    apiMocks.installDepotDownloader.mockRejectedValueOnce('GitHub download unavailable.');
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+    await chooseSource(/download separate branch/i);
+
+    expect(await screen.findByRole('heading', { name: 'Install DepotDownloader manually' })).toBeVisible();
+    expect(screen.getByText('DepotDownloader-linux-x64.zip')).toBeVisible();
+    expect(screen.getByText('~/.local/bin')).toBeVisible();
+    expect(screen.getByText('chmod +x ~/.local/bin/DepotDownloader')).toBeVisible();
+    expect(screen.queryByText('DepotDownloader-windows-x64.zip')).toBeNull();
   });
 
   it('refreshes the auto-derived name when switching branches but preserves user edits', async () => {

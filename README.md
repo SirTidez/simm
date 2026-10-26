@@ -104,11 +104,32 @@ See the [toolchain upgrade plan](docs/superpowers/plans/2026-10-21-node-toolchai
 Windows releases now ship as an `NSIS` installer with a prerequisite step. Before SIMM installs, the setup wizard detects, installs, and verifies:
 
 - Microsoft Visual C++ Redistributable x64
-- .NET Desktop Runtime 6 x64
 - DepotDownloader
 
 If `winget` cannot install DepotDownloader automatically, the installer blocks and asks the user to install it manually before continuing.
 Managed mod installs use copied files instead of symlinks, so normal launch paths do not need administrator elevation for link creation.
+
+### DepotDownloader Recovery
+
+If automatic installation fails, SIMM shows the original error and manual installation steps. Windows setup also offers to open the official download page. After completing either method below, click **Retry** in Windows setup or **Check Again** in SIMM. **Check Again** only checks for the executable; use **Retry automatic install** to repeat the automatic installation.
+
+On Windows, if WinGet is available, open Windows Terminal and run the [official installation command](https://github.com/SteamRE/DepotDownloader#via-windows-package-manager-cli-aka-winget):
+
+```powershell
+winget install --exact --id SteamRE.DepotDownloader
+```
+
+If WinGet is unavailable or fails:
+
+1. Open the [official DepotDownloader downloads](https://github.com/SteamRE/DepotDownloader/releases/latest) and download **DepotDownloader-windows-x64.zip**.
+2. Extract **all** files into `%LOCALAPPDATA%\SIMM\tools\DepotDownloader`, creating the folder if needed. The executable must be at `%LOCALAPPDATA%\SIMM\tools\DepotDownloader\DepotDownloader.exe`, with the other archive files beside it.
+3. Return to setup or SIMM and check again. SIMM detects this user-local folder directly; administrator access, PATH edits, and restarting SIMM are not required.
+
+On Linux or Steam Deck:
+
+1. Download **DepotDownloader-linux-x64.zip** from the same official downloads page.
+2. Extract all files into `~/.local/bin`, creating the directory if needed, so the executable is `~/.local/bin/DepotDownloader`.
+3. Make it runnable with `chmod +x ~/.local/bin/DepotDownloader`, then click **Check Again** in SIMM. This folder is detected directly without PATH edits.
 
 ## Linux Packages
 

@@ -83,10 +83,7 @@ async fn resolve_winget_path() -> Result<PathBuf, String> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut message = format!(
-        "winget was not found. Install DepotDownloader manually with: winget install --exact --id {}",
-        DEPOTDOWNLOADER_WINGET_ID
-    );
+    let mut message = "winget was not found. Install DepotDownloader from its official ZIP using the manual installation instructions.".to_string();
 
     if !detail.is_empty() {
         message.push_str("\n");
@@ -286,23 +283,31 @@ pub async fn install_depot_downloader() -> Result<DepotDownloaderInfo, String> {
             )
         })?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let details = [stdout.trim(), stderr.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
         if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
-                "Winget install failed (code {:?}).\n{}\n{}",
+                "Winget install failed (code {:?}).\n{}",
                 output.status.code(),
-                stdout.trim(),
-                stderr.trim()
+                details
             ));
         }
 
         let info = crate::utils::depot_downloader_detector::detect_depot_downloader()
             .await
-            .map_err(|e| format!("Install finished but detection failed: {}", e))?;
+            .map_err(|e| format!("Install finished but detection failed: {}\n{}", e, details))?;
 
         if !info.installed {
-            return Err("Install command completed but DepotDownloader is still not detected. Please try manual install.".to_string());
+            return Err(format!(
+                "WinGet completed but DepotDownloader was not found in PATH or its user/machine installation locations.\n{}",
+                details
+            ));
         }
 
         Ok(info)

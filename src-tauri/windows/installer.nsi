@@ -86,6 +86,7 @@ Var PrereqAllVerified
 Var PrereqCacheDir
 Var PrereqConsole
 Var PrereqLogBuffer
+Var PrereqDepotDownloaderOutput
 Var PrereqConsoleFont
 
 Name "${PRODUCTNAME}"
@@ -1043,6 +1044,19 @@ FunctionEnd
 Function AppendPrereqLog
   Exch $0
   Push $1
+  Push $2
+  ; Keep the recent messages when the NSIS string buffer fills up. Appending
+  ; to a full buffer would otherwise silently discard the actual failure/help.
+  StrLen $1 $0
+  IntOp $2 ${NSIS_MAX_STRLEN} - $1
+  IntOp $2 $2 - 3
+  StrLen $1 $PrereqLogBuffer
+  ${If} $2 <= 0
+    StrCpy $PrereqLogBuffer ""
+  ${ElseIf} $1 > $2
+    IntOp $2 0 - $2
+    StrCpy $PrereqLogBuffer $PrereqLogBuffer "" $2
+  ${EndIf}
   DetailPrint "$0"
   ${If} $PrereqLogBuffer == ""
     StrCpy $PrereqLogBuffer "$0"
@@ -1058,6 +1072,7 @@ Function AppendPrereqLog
     SendMessage $PrereqConsole ${EM_SCROLLCARET} 0 0
   ${EndIf}
   Call FlushInstallerWindow
+  Pop $2
   Pop $1
   Pop $0
 FunctionEnd
@@ -1223,6 +1238,24 @@ Function VerifyVCRedistSignature
   ${EndIf}
 FunctionEnd
 
+Function ShowDepotDownloaderInstallHelp
+  Exch $0
+  Push $1
+  StrCpy $1 "Download DepotDownloader-windows-x64.zip from:$\r$\nhttps://github.com/SteamRE/DepotDownloader/releases/latest$\r$\n$\r$\nExtract ALL files into this folder (create it if needed):$\r$\n$LOCALAPPDATA\SIMM\tools\DepotDownloader$\r$\n$\r$\nDepotDownloader.exe must be directly inside that folder. Then return here and click Retry. No PATH changes or SIMM restart are needed."
+  Push $0
+  Call AppendPrereqLog
+  Push $1
+  Call AppendPrereqLog
+  ${If} $PassiveMode != 1
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$0"
+    MessageBox MB_YESNO|MB_ICONINFORMATION "$1$\r$\n$\r$\nOpen the official download page now?" IDNO depot_help_done
+    ExecShell "open" "https://github.com/SteamRE/DepotDownloader/releases/latest"
+  ${EndIf}
+  depot_help_done:
+  Pop $1
+  Pop $0
+FunctionEnd
+
 Function EnsureDepotDownloader
   Push "Checking DepotDownloader installation..."
   Call AppendPrereqLog
@@ -1240,11 +1273,10 @@ Function EnsureDepotDownloader
   Call GetWingetPath
   Pop $1
   ${If} $1 == ""
-    Push "winget was not found. Manual install required: winget install --exact --id ${PREREQ_DEPOTDOWNLOADER_WINGET_ID}"
+    Push "winget was not found. Use the official ZIP installation instructions below."
     Call AppendPrereqLog
-    ${If} $PassiveMode != 1
-      MessageBox MB_ICONEXCLAMATION "winget is not available on this system. Install DepotDownloader manually with:$\r$\n$\r$\nwinget install --exact --id ${PREREQ_DEPOTDOWNLOADER_WINGET_ID}$\r$\n$\r$\nThen click Retry."
-    ${EndIf}
+    Push "winget is not available on this system. You can install DepotDownloader from its official ZIP instead."
+    Call ShowDepotDownloaderInstallHelp
     Push "DepotDownloader CLI: Failed"
     Call SetDepotDownloaderText
     Push 0
@@ -1258,14 +1290,14 @@ Function EnsureDepotDownloader
   nsExec::ExecToStack '$1 ${PREREQ_DEPOTDOWNLOADER_WINGET_ARGS}'
   Pop $0
   Pop $2
+  StrCpy $PrereqDepotDownloaderOutput $2
   Push "winget output: $2"
   Call AppendPrereqLog
   ${If} $0 <> 0
     Push "winget install failed with code $0"
     Call AppendPrereqLog
-    ${If} $PassiveMode != 1
-      MessageBox MB_ICONEXCLAMATION "winget could not install DepotDownloader automatically.$\r$\n$\r$\nOutput:$\r$\n$2$\r$\n$\r$\nInstall DepotDownloader manually, then click Retry."
-    ${EndIf}
+    Push "winget could not install DepotDownloader (code $0).$\r$\n$\r$\nOutput:$\r$\n$PrereqDepotDownloaderOutput"
+    Call ShowDepotDownloaderInstallHelp
     Push "DepotDownloader CLI: Failed"
     Call SetDepotDownloaderText
     Push 0
@@ -1287,6 +1319,10 @@ Function EnsureDepotDownloader
 
   Push "DepotDownloader installation completed but verification failed."
   Call AppendPrereqLog
+  Push "winget output: $PrereqDepotDownloaderOutput"
+  Call AppendPrereqLog
+  Push "winget completed, but DepotDownloader could not be found.$\r$\n$\r$\nOutput:$\r$\n$PrereqDepotDownloaderOutput"
+  Call ShowDepotDownloaderInstallHelp
   Push "DepotDownloader CLI: Failed"
   Call SetDepotDownloaderText
   Push 0
@@ -1329,6 +1365,47 @@ Function DetectVCRedist
   Push $3
 FunctionEnd
 
+; Probe the WinGet links and package directories directly. The current process
+; may still have the PATH from before WinGet installed its portable executable.
+Function FindDepotDownloaderInWinGetRoot
+  Exch $R0
+  Push $R1
+  Push $R2
+
+  IfFileExists "$R0\Links\DepotDownloader.exe\*.*" winget_root_packages 0
+  IfFileExists "$R0\Links\DepotDownloader.exe" winget_root_link_found winget_root_packages
+  winget_root_packages:
+    ClearErrors
+    FindFirst $R1 $R2 "$R0\Packages\SteamRE.DepotDownloader_*"
+    IfErrors winget_root_missing
+  winget_root_package_loop:
+    StrCmp $R2 "" winget_root_packages_missing
+    IfFileExists "$R0\Packages\$R2\DepotDownloader.exe\*.*" winget_root_next_package 0
+    IfFileExists "$R0\Packages\$R2\DepotDownloader.exe" winget_root_package_found winget_root_next_package
+  winget_root_next_package:
+    FindNext $R1 $R2
+    Goto winget_root_package_loop
+  winget_root_package_found:
+    Push "Matched DepotDownloader in WinGet package directory: $R0\Packages\$R2"
+    Call AppendPrereqLog
+    FindClose $R1
+    StrCpy $R0 1
+    Goto winget_root_done
+  winget_root_packages_missing:
+    FindClose $R1
+  winget_root_missing:
+    StrCpy $R0 0
+    Goto winget_root_done
+  winget_root_link_found:
+    Push "Matched DepotDownloader in WinGet links directory: $R0\Links"
+    Call AppendPrereqLog
+    StrCpy $R0 1
+  winget_root_done:
+    Pop $R2
+    Pop $R1
+    Exch $R0
+FunctionEnd
+
 Function DetectDepotDownloader
   StrCpy $2 0
 
@@ -1347,13 +1424,42 @@ Function DetectDepotDownloader
     Goto detect_depot_done
   ${EndIf}
 
-  IfFileExists "$LOCALAPPDATA\Microsoft\WinGet\Packages\SteamRE.DepotDownloader_Microsoft.Winget.Source_8wekyb3d8bbwe\DepotDownloader.exe" 0 +3
-    Push "Matched DepotDownloader in WinGet package directory."
+  Push "$LOCALAPPDATA\Microsoft\WinGet"
+  Call FindDepotDownloaderInWinGetRoot
+  Pop $2
+  ${If} $2 = 1
+    Goto detect_depot_done
+  ${EndIf}
+
+  IfFileExists "$LOCALAPPDATA\SIMM\tools\DepotDownloader\DepotDownloader.exe\*.*" detect_depot_machine 0
+  IfFileExists "$LOCALAPPDATA\SIMM\tools\DepotDownloader\DepotDownloader.exe" detect_depot_user_manual_found detect_depot_machine
+  detect_depot_user_manual_found:
+    Push "Matched DepotDownloader in the user tools directory."
     Call AppendPrereqLog
     StrCpy $2 1
     Goto detect_depot_done
 
-  IfFileExists "$PROGRAMFILES\DepotDownloader\DepotDownloader.exe" 0 detect_depot_done
+  detect_depot_machine:
+  Push "$PROGRAMFILES64\WinGet"
+  Call FindDepotDownloaderInWinGetRoot
+  Pop $2
+  ${If} $2 = 1
+    Goto detect_depot_done
+  ${EndIf}
+
+  Push "$PROGRAMFILES32\WinGet"
+  Call FindDepotDownloaderInWinGetRoot
+  Pop $2
+  ${If} $2 = 1
+    Goto detect_depot_done
+  ${EndIf}
+
+  IfFileExists "$PROGRAMFILES64\DepotDownloader\DepotDownloader.exe\*.*" detect_depot_manual_32 0
+  IfFileExists "$PROGRAMFILES64\DepotDownloader\DepotDownloader.exe" detect_depot_manual_found detect_depot_manual_32
+  detect_depot_manual_32:
+    IfFileExists "$PROGRAMFILES32\DepotDownloader\DepotDownloader.exe\*.*" detect_depot_done 0
+    IfFileExists "$PROGRAMFILES32\DepotDownloader\DepotDownloader.exe" detect_depot_manual_found detect_depot_done
+  detect_depot_manual_found:
   Push "Matched DepotDownloader in Program Files."
   Call AppendPrereqLog
   StrCpy $2 1

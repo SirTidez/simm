@@ -2,7 +2,7 @@ use crate::types::{DepotDownloaderInfo, DetectionMethod};
 #[cfg(all(test, target_os = "windows"))]
 use anyhow::Context;
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Detects if DepotDownloader is installed and returns its path
@@ -64,14 +64,11 @@ pub async fn detect_depot_downloader_with_override(
         if let Ok(output) = output {
             if output.status.success() {
                 let path_str = String::from_utf8_lossy(&output.stdout);
-                let path = path_str.lines().next().and_then(|line| {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() && Path::new(trimmed).exists() {
-                        Some(trimmed.to_string())
-                    } else {
-                        None
-                    }
-                });
+                let path = path_str
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && Path::new(line).is_file())
+                    .map(str::to_string);
 
                 if let Some(path) = path {
                     return Ok(depot_downloader_info(
@@ -88,7 +85,7 @@ pub async fn detect_depot_downloader_with_override(
     let common_paths = get_common_paths(&executable_names);
 
     for (path, method) in common_paths {
-        if Path::new(&path).exists() {
+        if Path::new(&path).is_file() {
             return Ok(depot_downloader_info(true, Some(path), Some(method)));
         }
     }
@@ -122,6 +119,92 @@ fn depot_downloader_install_hint() -> String {
     }
 }
 
+fn windows_common_paths(
+    local_app_data: Option<&Path>,
+    program_files_roots: &[PathBuf],
+    current_dir: Option<&Path>,
+    executable_name: &str,
+) -> Vec<(String, DetectionMethod)> {
+    let mut paths = Vec::new();
+    if let Some(local_app_data) = local_app_data {
+        add_winget_paths(
+            &mut paths,
+            &local_app_data.join("Microsoft").join("WinGet"),
+            executable_name,
+        );
+        paths.push((
+            local_app_data
+                .join("SIMM/tools/DepotDownloader")
+                .join(executable_name)
+                .to_string_lossy()
+                .into_owned(),
+            DetectionMethod::Manual,
+        ));
+    }
+    let mut seen_roots = Vec::new();
+    for root in program_files_roots {
+        if seen_roots.contains(&root) {
+            continue;
+        }
+        seen_roots.push(root);
+        add_winget_paths(&mut paths, &root.join("WinGet"), executable_name);
+        paths.push((
+            root.join("DepotDownloader")
+                .join(executable_name)
+                .to_string_lossy()
+                .into_owned(),
+            DetectionMethod::Manual,
+        ));
+    }
+    if let Some(current_dir) = current_dir {
+        paths.push((
+            current_dir
+                .join("DepotDownloader")
+                .join(executable_name)
+                .to_string_lossy()
+                .into_owned(),
+            DetectionMethod::Manual,
+        ));
+    }
+    paths
+}
+
+fn add_winget_paths(
+    paths: &mut Vec<(String, DetectionMethod)>,
+    root: &Path,
+    executable_name: &str,
+) {
+    // WinGet updates the persistent PATH, not the environment of an already
+    // running SIMM. Probe its links and portable package roots independently.
+    paths.push((
+        root.join("Links")
+            .join(executable_name)
+            .to_string_lossy()
+            .into_owned(),
+        DetectionMethod::Winget,
+    ));
+    if let Ok(entries) = std::fs::read_dir(root.join("Packages")) {
+        let mut packages: Vec<PathBuf> = entries
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("steamre.depotdownloader_")
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            })
+            .map(|entry| entry.path().join(executable_name))
+            .collect();
+        packages.sort();
+        paths.extend(
+            packages
+                .into_iter()
+                .map(|path| (path.to_string_lossy().into_owned(), DetectionMethod::Winget)),
+        );
+    }
+}
+
 fn get_common_paths(executable_names: &[&str]) -> Vec<(String, DetectionMethod)> {
     let mut paths = Vec::new();
 
@@ -130,28 +213,18 @@ fn get_common_paths(executable_names: &[&str]) -> Vec<(String, DetectionMethod)>
             .first()
             .copied()
             .unwrap_or("DepotDownloader.exe");
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            paths.push((
-                format!("{}\\Microsoft\\WinGet\\Packages\\SteamRE.DepotDownloader_Microsoft.Winget.Source_8wekyb3d8bbwe\\{}",
-                    local_app_data, executable_name),
-                DetectionMethod::Winget,
-            ));
-        }
-        if let Ok(program_files) = std::env::var("PROGRAMFILES") {
-            paths.push((
-                format!("{}\\DepotDownloader\\{}", program_files, executable_name),
-                DetectionMethod::Manual,
-            ));
-        }
-        if let Ok(cwd) = std::env::current_dir() {
-            paths.push((
-                cwd.join("DepotDownloader")
-                    .join(executable_name)
-                    .to_string_lossy()
-                    .to_string(),
-                DetectionMethod::Manual,
-            ));
-        }
+        let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let roots: Vec<PathBuf> = ["ProgramW6432", "PROGRAMFILES", "ProgramFiles(x86)"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .collect();
+        return windows_common_paths(
+            local_app_data.as_deref(),
+            &roots,
+            std::env::current_dir().ok().as_deref(),
+            executable_name,
+        );
     } else if cfg!(target_os = "macos") {
         for executable_name in executable_names {
             paths.push((
@@ -288,6 +361,14 @@ mod tests {
             "PROGRAMFILES",
             program_files_nonexistent.to_string_lossy().as_ref(),
         );
+        let _program_w6432_guard = EnvVarGuard::set(
+            "ProgramW6432",
+            program_files_nonexistent.to_string_lossy().as_ref(),
+        );
+        let _program_files_x86_guard = EnvVarGuard::set(
+            "ProgramFiles(x86)",
+            program_files_nonexistent.to_string_lossy().as_ref(),
+        );
 
         let result = detect_depot_downloader().await?;
         assert!(result.installed);
@@ -321,6 +402,104 @@ mod tests {
             .await
             .expect_err("invalid explicit path must not fall back to another executable");
         assert!(error.to_string().contains("does not exist"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn user_and_machine_installs_are_found_without_depot_downloader_on_path() -> Result<()> {
+        for relative in [
+            "local/SIMM/tools/DepotDownloader/DepotDownloader.exe",
+            "local/Microsoft/WinGet/Links/DepotDownloader.exe",
+            "local/Microsoft/WinGet/Packages/SteamRE.DepotDownloader_alternate-source/DepotDownloader.exe",
+            "program64/WinGet/Links/DepotDownloader.exe",
+            "program64/WinGet/Packages/SteamRE.DepotDownloader_Microsoft.Winget.Source_8wekyb3d8bbwe/DepotDownloader.exe",
+            "program32/WinGet/Links/DepotDownloader.exe",
+            "program32/WinGet/Packages/SteamRE.DepotDownloader_alternate-source/DepotDownloader.exe",
+            "program64/DepotDownloader/DepotDownloader.exe",
+            "program32/DepotDownloader/DepotDownloader.exe",
+        ] {
+            let temp = tempfile::Builder::new().prefix("depot paths with spaces ").tempdir()?;
+            let executable = temp.path().join(relative);
+            fs::create_dir_all(executable.parent().unwrap()).await?;
+            fs::write(&executable, b"presence fixture; never executed").await?;
+            let _dir_guard = CurrentDirGuard::new(temp.path())?;
+            let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+            let _path_guard = EnvVarGuard::set("PATH", system32.to_str().unwrap());
+            let _local_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().join("local").to_str().unwrap());
+            let _program_guard = EnvVarGuard::set("PROGRAMFILES", temp.path().join("program64").to_str().unwrap());
+            let _program64_guard = EnvVarGuard::set("ProgramW6432", temp.path().join("program64").to_str().unwrap());
+            let _program32_guard = EnvVarGuard::set("ProgramFiles(x86)", temp.path().join("program32").to_str().unwrap());
+
+            let info = detect_depot_downloader().await?;
+            assert!(info.installed, "did not detect {relative}");
+            assert_eq!(Path::new(info.path.as_deref().unwrap()), executable);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn missing_tool_or_directory_named_like_executable_is_not_installed() -> Result<()> {
+        let temp = tempdir()?;
+        let _dir_guard = CurrentDirGuard::new(temp.path())?;
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let _path_guard = EnvVarGuard::set("PATH", system32.to_str().unwrap());
+        let _local_guard =
+            EnvVarGuard::set("LOCALAPPDATA", temp.path().join("local").to_str().unwrap());
+        let _program_guard = EnvVarGuard::set(
+            "PROGRAMFILES",
+            temp.path().join("program64").to_str().unwrap(),
+        );
+        let _program64_guard = EnvVarGuard::set(
+            "ProgramW6432",
+            temp.path().join("program64").to_str().unwrap(),
+        );
+        let _program32_guard = EnvVarGuard::set(
+            "ProgramFiles(x86)",
+            temp.path().join("program32").to_str().unwrap(),
+        );
+
+        assert!(!detect_depot_downloader().await?.installed);
+        fs::create_dir_all(
+            temp.path()
+                .join("local/Microsoft/WinGet/Links/DepotDownloader.exe"),
+        )
+        .await?;
+        assert!(!detect_depot_downloader().await?.installed);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod portable_path_tests {
+    use super::*;
+
+    #[test]
+    fn only_depot_downloader_packages_are_candidates_in_either_scope() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let local = temp.path().join("local");
+        let machine = temp.path().join("program64");
+        for root in [local.join("Microsoft/WinGet"), machine.join("WinGet")] {
+            for package in [
+                "SteamRE.DepotDownloader_new-source",
+                "Other.DepotDownloader_source",
+            ] {
+                let folder = root.join("Packages").join(package);
+                std::fs::create_dir_all(&folder)?;
+                std::fs::write(folder.join("DepotDownloader.exe"), b"fixture")?;
+            }
+        }
+        let candidates =
+            windows_common_paths(Some(&local), &[machine], None, "DepotDownloader.exe");
+        let package_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|(path, _)| Path::new(path).is_file())
+            .collect();
+        assert_eq!(package_candidates.len(), 2);
+        assert!(package_candidates.iter().all(|(path, method)| path
+            .contains("SteamRE.DepotDownloader_new-source")
+            && matches!(method, DetectionMethod::Winget)));
         Ok(())
     }
 }

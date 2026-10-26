@@ -131,6 +131,12 @@ jobs:
       - name: Cargo test on Windows
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Install NSIS for installer regression tests
+        run: choco install nsis --yes --no-progress --limit-output
+
+      - name: Test DepotDownloader installer execution
+        run: pwsh -NoProfile -File scripts/test-depotdownloader-installer.ps1
+
   rust-coverage:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

@@ -82,6 +82,46 @@
   border-radius: var(--simm-radius-sm);
 }
 
+.wizard__manual-install {
+  display: grid;
+  gap: var(--simm-space-3);
+  min-width: 0;
+  border-top: 1px solid var(--simm-border);
+  padding-top: var(--simm-space-4);
+  color: var(--simm-text-2);
+  font-size: var(--simm-text-sm);
+}
+
+.wizard__manual-install h3,
+.wizard__manual-install p {
+  margin: 0;
+}
+
+.wizard__manual-install h3 {
+  color: var(--simm-text);
+  font-weight: 600;
+}
+
+.wizard__manual-install ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.wizard__manual-install li + li {
+  margin-top: var(--simm-space-2);
+}
+
+.wizard__manual-install code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.wizard__manual-install-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--simm-space-2);
+}
+
 .wizard__footer {
   display: flex;
   align-items: center;

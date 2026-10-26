@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.10]
+
+- Fixed Windows setup incorrectly reporting DepotDownloader as installed and skipping its installation.
+- Added DepotDownloader discovery in WinGet user and machine link/package directories, including alternate package sources, without requiring PATH changes or a SIMM restart.
+- Preserved actual installation and detection errors in the environment wizard, including WinGet output when installation completes without a detectable executable.
+- Added executable installer regression tests to Windows CI and coverage for local executable discovery and wizard error handling.
+- Added step-by-step manual installation guidance in Windows setup, the environment wizard, and the README, with official download links and platform-specific archive names and extraction paths.
+- Added a user-local DepotDownloader recovery folder on Windows so manually extracted installations can be detected without administrator access or PATH changes.
+- Added a Check Again action for manual recovery that rechecks the executable without repeating the failed installation.
+- Kept recent prerequisite errors and recovery steps visible when the Windows installer's log buffer fills up, and separated error details from the manual instruction prompt.
+
 ## [0.8.9]
 
 - Added a Windows Console tab within each environment page, with a shared Console/Logs session sidebar, per-environment View options, automatic opening after launch, native console pop-out/redock, and a confirmed Close Game action while preserving Steam launch ownership and game survival after SIMM closes.

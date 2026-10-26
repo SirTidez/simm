@@ -4,6 +4,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { ApiService } from '../services/api';
 import type { AppConfig, BranchConfig } from '../types';
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from '../utils/uxSettings';
+import { getErrorMessage } from '../utils/errors';
 import { Icon } from './Icon';
 import { GameArt } from './media/GameArt';
 import {
@@ -25,6 +26,31 @@ type WizardMode = 'landing' | 'steam-configure' | 'download-select' | 'download-
 type WizardSource = 'steam' | 'import' | 'download';
 type DirectoryPurpose = 'download' | 'import';
 type SteamInstallation = { path: string; executablePath: string; appId: string };
+
+const DEPOTDOWNLOADER_RELEASES_URL = 'https://github.com/SteamRE/DepotDownloader/releases/latest';
+
+function DepotDownloaderManualHelp({ platform, onOpenDownloads, onRetryInstall, installing }: { platform: string; onOpenDownloads: () => void; onRetryInstall?: () => void; installing: boolean }) {
+  const linux = platform === 'linux';
+  return (
+    <section className="wizard__manual-install" aria-labelledby="depot-manual-install-title">
+      <h3 id="depot-manual-install-title">Install DepotDownloader manually</h3>
+      <ol>
+        <li>Open the official downloads and choose <code>{linux ? 'DepotDownloader-linux-x64.zip' : 'DepotDownloader-windows-x64.zip'}</code>.</li>
+        <li>
+          Extract all files into <code>{linux ? '~/.local/bin' : '%LOCALAPPDATA%\\SIMM\\tools\\DepotDownloader'}</code>, creating the folder if needed.
+          {' '}<code>{linux ? 'DepotDownloader' : 'DepotDownloader.exe'}</code> must be directly inside that folder.
+        </li>
+        {linux && <li>Make the executable runnable: <code>chmod +x ~/.local/bin/DepotDownloader</code>.</li>}
+        <li>Return to SIMM and click <strong>Check Again</strong>. No PATH changes or restart are needed.</li>
+      </ol>
+      <div className="wizard__manual-install-actions">
+        <SimmButton type="button" variant="outline" size="sm" onClick={onOpenDownloads}>Open official downloads</SimmButton>
+        {onRetryInstall && <SimmButton type="button" variant="ghost" size="sm" onClick={onRetryInstall} disabled={installing}>Retry automatic install</SimmButton>}
+      </div>
+      {!linux && <p>If WinGet is available, you can also install from Windows Terminal: <code>winget install --exact --id SteamRE.DepotDownloader</code></p>}
+    </section>
+  );
+}
 
 function deriveBranchName(branch: BranchConfig): string {
   return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
@@ -109,12 +135,13 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [depotDownloaderInstalled, setDepotDownloaderInstalled] = useState<boolean | null>(null);
   const [depotDownloaderCanAutoInstall, setDepotDownloaderCanAutoInstall] = useState<boolean | null>(null);
   const [depotDownloaderInstallHint, setDepotDownloaderInstallHint] = useState<string | null>(null);
-  const [depotDownloaderInstallHelpUrl, setDepotDownloaderInstallHelpUrl] = useState('https://github.com/SteamRE/DepotDownloader#installation');
+  const [showDepotDownloaderInstructions, setShowDepotDownloaderInstructions] = useState(false);
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
   const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
   const previousDerivedNameRef = useRef('');
   const autoDepotInstallAttemptedRef = useRef(false);
+  const depotDownloaderDetectionInFlightRef = useRef(false);
 
   const hasSteamEnvironment = environments.some(
     env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
@@ -126,6 +153,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const canDownloadBranches = experienceMode === 'powerUser' && showAdvancedGameTools;
   const platform = settings?.platform ?? 'windows';
   const canAutoInstallDepotDownloader = depotDownloaderCanAutoInstall ?? (platform === 'windows' || platform === 'linux');
+  const shouldRecheckDepotDownloader = Boolean(depotDownloaderDetectionError || depotDownloaderPromptError || showDepotDownloaderInstructions || !canAutoInstallDepotDownloader);
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -291,10 +319,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     setDepotDownloaderPromptError(null);
     try {
       await ApiService.installDepotDownloader();
-      setDepotDownloaderInstalled(true);
       setDepotDownloaderDetectionError(null);
     } catch (err) {
-      setDepotDownloaderPromptError(err instanceof Error ? err.message : 'Failed to install DepotDownloader automatically.');
+      setDepotDownloaderPromptError(getErrorMessage(err, 'Failed to install DepotDownloader automatically.'));
+      setShowDepotDownloaderInstructions(true);
       setInstallingDepotDownloader(false);
       return;
     }
@@ -305,24 +333,31 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       setDepotDownloaderInstalled(!!depotInfo.installed);
       setDepotDownloaderCanAutoInstall(depotInfo.canAutoInstall ?? null);
       setDepotDownloaderInstallHint(depotInfo.installHint ?? null);
-      setDepotDownloaderInstallHelpUrl(depotInfo.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
       setDepotDownloaderDetectionError(null);
     } catch (err) {
-      setDepotDownloaderPromptError(
-        err instanceof Error
-          ? `DepotDownloader installed, but SIMM could not refresh its status: ${err.message}`
-          : 'DepotDownloader installed, but SIMM could not refresh its status.'
-      );
+      setDepotDownloaderInstalled(null);
+      setDepotDownloaderDetectionError(`DepotDownloader installed, but SIMM could not refresh its status: ${getErrorMessage(err, 'Unable to detect DepotDownloader right now.')}`);
+      setShowDepotDownloaderInstructions(true);
     }
 
     setInstallingDepotDownloader(false);
   }, [canAutoInstallDepotDownloader, depotDownloaderInstallHint, refreshDepotDownloader]);
 
   const handleOpenDepotDownloaderInstructions = () => {
-    window.open(depotDownloaderInstallHelpUrl, '_blank', 'noopener,noreferrer');
+    setShowDepotDownloaderInstructions((visible) => !visible);
+  };
+
+  const handleOpenDepotDownloaderDownloads = async () => {
+    try {
+      await ApiService.openExternalUrl(DEPOTDOWNLOADER_RELEASES_URL);
+    } catch (err) {
+      setDepotDownloaderPromptError(`Could not open the official downloads: ${getErrorMessage(err, 'Open the link in your browser.')}\n${DEPOTDOWNLOADER_RELEASES_URL}`);
+    }
   };
 
   const refreshDepotDownloaderStatus = useCallback(async () => {
+    if (depotDownloaderDetectionInFlightRef.current) return;
+    depotDownloaderDetectionInFlightRef.current = true;
     setDepotDownloaderInstalled(null);
     setDepotDownloaderDetectionError(null);
     try {
@@ -330,14 +365,20 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       setDepotDownloaderInstalled(!!depotInfo.installed);
       setDepotDownloaderCanAutoInstall(depotInfo.canAutoInstall ?? null);
       setDepotDownloaderInstallHint(depotInfo.installHint ?? null);
-      setDepotDownloaderInstallHelpUrl(depotInfo.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
+      if (depotInfo.installed) {
+        setDepotDownloaderPromptError(null);
+        await refreshDepotDownloader();
+      }
     } catch (err) {
       setDepotDownloaderInstalled(null);
       setDepotDownloaderDetectionError(
-        err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
+        getErrorMessage(err, 'Unable to detect DepotDownloader right now.')
       );
+      setShowDepotDownloaderInstructions(true);
+    } finally {
+      depotDownloaderDetectionInFlightRef.current = false;
     }
-  }, []);
+  }, [refreshDepotDownloader]);
 
   useEffect(() => {
     if (wizardMode !== 'download-select') {
@@ -497,24 +538,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     } else {
       setWizardMode('import-configure');
     }
-  };
-
-  const retryDepotDownloaderDetection = () => {
-    setDepotDownloaderInstalled(null);
-    void ApiService.detectDepotDownloader()
-      .then((info) => {
-        setDepotDownloaderInstalled(!!info.installed);
-        setDepotDownloaderCanAutoInstall(info.canAutoInstall ?? null);
-        setDepotDownloaderInstallHint(info.installHint ?? null);
-        setDepotDownloaderInstallHelpUrl(info.installHelpUrl ?? 'https://github.com/SteamRE/DepotDownloader#installation');
-        setDepotDownloaderDetectionError(null);
-      })
-      .catch((err) => {
-        setDepotDownloaderInstalled(null);
-        setDepotDownloaderDetectionError(
-          err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
-        );
-      });
   };
 
   const steamOptionDescription = hasSteamEnvironment
@@ -713,7 +736,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           ? 'SIMM can install it for you, or you can follow the manual instructions.'
                           : depotDownloaderInstallHint || 'Install it manually, then check again.'}
                     </span>
-                    {depotDownloaderPromptError && <span>{depotDownloaderPromptError}</span>}
+                    {depotDownloaderPromptError && <span className="whitespace-pre-wrap break-words">{depotDownloaderPromptError}</span>}
                   </div>
                   <div className="wizard__callout-actions">
                     <SimmButton type="button" variant="ghost" size="sm" onClick={handleOpenDepotDownloaderInstructions}>
@@ -724,11 +747,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       variant="secondary"
                       size="sm"
                       onClick={() => {
-                        if (depotDownloaderDetectionError) {
-                          retryDepotDownloaderDetection();
-                          return;
-                        }
-                        if (!canAutoInstallDepotDownloader) {
+                        if (shouldRecheckDepotDownloader) {
                           void refreshDepotDownloaderStatus();
                           return;
                         }
@@ -743,12 +762,16 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           ? 'Checking…'
                           : installingDepotDownloader
                             ? 'Installing…'
-                            : canAutoInstallDepotDownloader
-                              ? 'Install Automatically'
-                              : 'Check Again'}
+                            : shouldRecheckDepotDownloader
+                              ? 'Check Again'
+                              : 'Install Automatically'}
                     </SimmButton>
                   </div>
                 </div>
+              )}
+
+              {showDepotDownloaderInstructions && depotDownloaderInstalled !== true && (
+                <DepotDownloaderManualHelp platform={platform} onOpenDownloads={() => void handleOpenDepotDownloaderDownloads()} onRetryInstall={canAutoInstallDepotDownloader ? () => void handleAutoInstallDepotDownloader() : undefined} installing={installingDepotDownloader} />
               )}
 
               {appConfig ? (
