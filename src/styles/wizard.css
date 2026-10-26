@@ -86,7 +86,7 @@
   display: grid;
   gap: var(--simm-space-3);
   min-width: 0;
-  border-top: 1px solid var(--simm-border);
+  border-top: 1px solid var(--simm-line);
   padding-top: var(--simm-space-4);
   color: var(--simm-text-2);
   font-size: var(--simm-text-sm);
