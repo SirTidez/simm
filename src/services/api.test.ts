@@ -301,6 +301,13 @@ describe('ApiService', () => {
     });
   });
 
+  it('reads external profile files with an explicit runtime through the registered command', async () => {
+    const preview = { format: 'Vortex state backup', profiles: [], warnings: [], omittedFiles: [] };
+    invokeMock.mockResolvedValueOnce(preview);
+    await expect(ApiService.readExternalModProfilesFile('C:/backup.json', 'Mono')).resolves.toEqual(preview);
+    expect(invokeMock).toHaveBeenCalledWith('read_external_mod_profiles_file', { source: 'C:/backup.json', runtime: 'Mono' });
+  });
+
   it('uses a Steam account and game slot for explicit Schedule I save management', async () => {
     const restorePreview = {
       steamId: '76561198000000000',

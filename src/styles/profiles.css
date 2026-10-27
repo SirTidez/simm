@@ -592,6 +592,32 @@
 
 /* ----------------------------------------------- Export profile dialog */
 
+.profile-import-dialog {
+  width: min(48rem, calc(100vw - 2rem));
+  max-width: 48rem;
+  max-height: calc(100dvh - 4rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.profile-import-dialog__body {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--simm-space-3);
+}
+
+.profile-import-dialog__body p { margin: 0; }
+.profile-import-dialog__path { overflow-wrap: anywhere; }
+.profile-import-dialog__warnings { color: var(--simm-warn-text); padding-left: 1.25rem; }
+.profile-import-dialog__items { max-height: 20rem; min-height: 6rem; overflow: auto; flex-shrink: 0; }
+.profile-import-dialog__items td { overflow-wrap: anywhere; }
+.profile-import-dialog__items small { display: block; color: var(--simm-text-2); }
+.profile-import-dialog__select-layer { z-index: 10002; }
+.profile-source-downloads { padding: var(--simm-space-3); border-bottom: 1px solid var(--simm-line); }
+.profile-source-downloads ul { max-height: 12rem; overflow: auto; overflow-wrap: anywhere; padding-left: 1.25rem; }
+
 .profile-export-dialog {
   width: min(40rem, calc(100vw - 2rem));
   max-width: 40rem;

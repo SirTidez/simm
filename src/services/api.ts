@@ -36,6 +36,7 @@ import type {
   ModProfileExportRequest,
   ModProfileImportPlan,
   ModProfileManifest,
+  ExternalModProfileFile,
   ModProfileSaveRequest,
   StoredModProfile,
   ModTelemetryCaptureRequest,
@@ -393,6 +394,10 @@ export class ApiService {
 
   static async readModProfileFile(source: string): Promise<ModProfileManifest> {
     return invoke('read_mod_profile_file', { source });
+  }
+
+  static async readExternalModProfilesFile(source: string, runtime: 'IL2CPP' | 'Mono'): Promise<ExternalModProfileFile> {
+    return invoke('read_external_mod_profiles_file', { source, runtime });
   }
 
   static async previewModProfileImport(

@@ -30,6 +30,8 @@ import type {
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { Icon } from './Icon';
 import { SimmButton } from './primitives';
+import { ProfileImportDialog } from './ProfileImportDialog';
+import { ProfileSourceDownloads } from './ProfileSourceDownloads';
 import { ModThumbnail, ThumbnailStack, type ModArtwork } from './media/ModThumbnail';
 import { useLibraryArtwork } from './useLibraryArtwork';
 
@@ -262,6 +264,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [externalImportOpen, setExternalImportOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [renaming, setRenaming] = useState(false);
   const [flow, setFlow] = useState<ProfileFlow>(null);
@@ -1427,7 +1430,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
                       <small className="ui-truncate">
                         {collectionItem
                           ? `${collectionItem.requestedVersion} · Nexus file ${collectionItem.nexusFileId}${collectionItem.requestedAuthor ? ` · ${collectionItem.requestedAuthor}` : ''}`
-                          : itemFileIdentity(item)}
+                          : [item.sourceVersion, itemFileIdentity(item)].filter(Boolean).join(' · ')}
                       </small>
                     </span>
                   </span>
@@ -1761,6 +1764,10 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
       )}
 
       <div className="profiles-detail__body">
+        {!selectedCollection && flow === null && selectedProfile && selectedProfile.manifest.items.some((i) => i.source === 'thunderstore' || i.source === 'nexusmods') && (
+          <ProfileSourceDownloads key={selectedProfile.id} profile={selectedProfile} disabled={busy}
+            onBusyChange={(downloading) => setBusyAction(downloading ? 'profileDownload' : null)} />
+        )}
         {flow === 'apply' ? renderApplyFlow() : (
           <>
             {flow === 'update' && renderUpdateFlow()}
@@ -1778,6 +1785,9 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
           <h1 className="ui-page-title">Profiles</h1>
         </div>
         <div className="ui-toolbar">
+          <SimmButton type="button" variant="ghost" disabled={busy} onClick={() => setExternalImportOpen(true)}>
+            <Icon name="upload" /> Import from mod manager
+          </SimmButton>
           <SimmButton
             type="button"
             variant="ghost"
@@ -1799,6 +1809,16 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
         </div>
       </header>
 
+      {externalImportOpen && <ProfileImportDialog
+        onClose={() => setExternalImportOpen(false)}
+        onImported={async (imported) => {
+          await loadProfiles();
+          setSelectedProfileId(imported.id);
+          setSelectedRuntime(runtimeKey(imported.runtime));
+          setFlow(null);
+          setNotice(`Imported ${imported.name}. Download missing mods, then review Apply to Environment.`);
+        }}
+      />}
       <div className="profiles-workspace__layout">
         <aside className="profiles-list" aria-label="Profile library">
           {profilesLoading && profiles.length === 0 ? (

@@ -776,7 +776,7 @@ impl ModProfilesService {
                 let manifest_json = serde_json::to_string(&manifest)?;
                 sqlx::query(
                     "INSERT INTO profiles (id, name, runtime, is_default, manifest, created_at, updated_at) \
-                     VALUES (?, ?, ?, 1, ?, ?, ?)",
+                     VALUES (?, ?, ?, 1, ?, ?, ?) ON CONFLICT DO NOTHING",
                 )
                 .bind(default_id)
                 .bind(name)
@@ -2764,6 +2764,45 @@ mod tests {
             "Unexpected errors: {:?}",
             result.errors
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn concurrent_profile_lists_seed_defaults_without_duplicate_insert_failures() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let environment_service = EnvironmentService::new(pool.clone())?;
+        environment_service
+            .create_environment(
+                crate::types::schedule_i_config().app_id,
+                "main".into(),
+                temp.path().join("game").to_string_lossy().into_owned(),
+                None,
+                None,
+            )
+            .await?;
+        // Seed from an environment, matching first-run Steam discovery. Clear
+        // defaults created by environment setup so every request sees first run.
+        sqlx::query("DELETE FROM environment_profiles")
+            .execute(pool.as_ref())
+            .await?;
+        sqlx::query("DELETE FROM profiles")
+            .execute(pool.as_ref())
+            .await?;
+        let mut requests = Vec::new();
+        for _ in 0..12 {
+            let service = ModProfilesService::new(pool.clone());
+            requests.push(tokio::spawn(async move { service.list_profiles().await }));
+        }
+        for request in requests {
+            let result = request.await?;
+            assert!(result.is_ok(), "{result:#?}");
+            assert_eq!(result?.len(), 2);
+        }
+        pool.close().await;
         Ok(())
     }
 

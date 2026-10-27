@@ -2,6 +2,10 @@
 
 ## [0.8.10]
 
+- Added profile-file imports from r2modman, Thunderstore Mod Manager, and Gale, plus Schedule I profiles from Vortex full state backups (requested by [ifBars](https://github.com/ifBars) in [#32](https://github.com/SirTidez/simm/issues/32)). The preview preserves pinned versions and enabled/disabled selections, requires an explicit runtime, and lists configuration or local files that need a separate transfer.
+- Added Download missing mods for source-linked profiles, using exact Thunderstore versions and Nexus file IDs with existing security checks and Nexus account/manual-download requirements. Unavailable files and runtime mismatches are reported without substituting another version.
+- Added regression coverage for shared profile archives, Vortex metadata conversion, read-only source handling, malformed input limits, import previews, and exact-version downloads. Vortex installer choices, deployment/conflict rules, and local configuration files remain manual and are disclosed before import.
+- Fixed concurrent first-run profile requests failing to seed the default profiles, and kept the new import dialog's dropdown menus above its modal surface.
 - Fixed Windows setup incorrectly reporting DepotDownloader as installed and skipping its installation.
 - Added DepotDownloader discovery in WinGet user and machine link/package directories, including alternate package sources, without requiring PATH changes or a SIMM restart.
 - Preserved actual installation and detection errors in the environment wizard, including WinGet output when installation completes without a detectable executable.

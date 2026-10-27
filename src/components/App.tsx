@@ -817,7 +817,7 @@ function HomeDashboard({
       <section className="home__section home__news" aria-labelledby="home-news">
         <h2 className="ui-section-title" id="home-news">What&apos;s new in SIMM</h2>
         <p className="home__news-update">
-          SIMM {__APP_VERSION__}: Fixed DepotDownloader setup, improved install detection, and added manual recovery instructions.
+                  SIMM {__APP_VERSION__}: Import profiles from other mod managers, with improved DepotDownloader setup and recovery.
         </p>
         {appUpdateState.status === 'available' && (
           <p className="home__news-update">

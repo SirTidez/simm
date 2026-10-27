@@ -884,6 +884,13 @@ export interface ModProfileManifest {
   collection?: ModProfileCollection | null;
 }
 
+export interface ExternalModProfileFile {
+  format: string;
+  profiles: ModProfileManifest[];
+  warnings: string[];
+  omittedFiles: string[];
+}
+
 export type ModProfileCollectionSourceChoice = 'nexusmods' | 'thunderstore' | 'library';
 export type ModProfileCollectionItemStatus =
   | 'pending'

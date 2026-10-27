@@ -277,6 +277,7 @@ fn main() {
             commands::mod_profiles::apply_mod_profile,
             commands::mod_profiles::save_mod_profile_file,
             commands::mod_profiles::read_mod_profile_file,
+            commands::mod_profiles::read_external_mod_profiles_file,
             commands::mod_profiles::preview_mod_profile_import,
             commands::mod_profiles::apply_mod_profile_import,
             // Plugins

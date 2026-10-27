@@ -8,10 +8,23 @@ use crate::events;
 use crate::services::mod_profiles::ModProfilesService;
 use crate::services::settings::RuntimeSettingsState;
 use crate::types::{
-    ModProfileApplyRequest, ModProfileApplyResult, ModProfileCaptureRequest,
-    ModProfileExportRequest, ModProfileImportPlan, ModProfileManifest, ModProfileSaveRequest,
-    StoredModProfile,
+    ExternalModProfileFile, ModProfileApplyRequest, ModProfileApplyResult,
+    ModProfileCaptureRequest, ModProfileExportRequest, ModProfileImportPlan, ModProfileManifest,
+    ModProfileSaveRequest, Runtime as GameRuntime, StoredModProfile,
 };
+
+#[tauri::command]
+pub async fn read_external_mod_profiles_file(
+    source: String,
+    runtime: GameRuntime,
+) -> Result<ExternalModProfileFile, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::services::external_profiles::read_file(&PathBuf::from(source), runtime)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| format!("{error:#}"))
+}
 
 fn emit_profile_apply_events<R: Runtime>(app: &AppHandle<R>, environment_id: String) {
     if let Err(error) = events::emit_mods_changed(app, environment_id.clone()) {

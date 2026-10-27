@@ -1478,6 +1478,17 @@ pub struct ModProfileInfo {
     pub exported_at: String,
 }
 
+/// A read-only conversion preview. Importing a profile never restores another
+/// manager's database, credentials, deployment rules, or executable files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalModProfileFile {
+    pub format: String,
+    pub profiles: Vec<ModProfileManifest>,
+    pub warnings: Vec<String>,
+    pub omitted_files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModProfileItemType {

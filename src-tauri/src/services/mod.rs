@@ -19,6 +19,7 @@ pub(crate) mod melon_log;
 pub(crate) mod melon_metadata;
 pub mod mod_integration;
 pub mod mod_profiles;
+pub mod external_profiles;
 pub mod mod_update;
 pub mod mods;
 pub mod mods_snapshot_cache;

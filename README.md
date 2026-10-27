@@ -23,6 +23,7 @@ SIMM (Schedule I Mod Manager) is a unified tool for creating and maintaining gam
 - 📦 **Shared Library Model**: Download mods into a centralized library, then install into environments
 - 📁 **Managed Copy Installs**: Keep source archives in the shared library and materialize real files into each environment
 - 🧹 **Consistent Cleanup**: Deleting a library item removes it from all linked environments
+- 📥 **Profile Imports**: Bring mod lists from r2modman, Thunderstore Mod Manager, Gale, or Vortex into the profile library, preserving versions and enabled/disabled selections
 
 ### Mod Sources & Updates
 
@@ -130,6 +131,19 @@ On Linux or Steam Deck:
 1. Download **DepotDownloader-linux-x64.zip** from the same official downloads page.
 2. Extract all files into `~/.local/bin`, creating the directory if needed, so the executable is `~/.local/bin/DepotDownloader`.
 3. Make it runnable with `chmod +x ~/.local/bin/DepotDownloader`, then click **Check Again** in SIMM. This folder is detected directly without PATH edits.
+
+## Import Profiles From Other Managers
+
+Open **Profiles → Import from mod manager** and choose the runtime used by your source profile (**IL2CPP** or **Mono**). These exports do not reliably identify the runtime, so SIMM requires you to select it.
+
+- **r2modman / Thunderstore Mod Manager / Gale:** export the Schedule I profile **as a file**, then select the `.r2z` file. An extracted `export.r2x` manifest is also accepted. Profile share codes are not supported yet; export a file instead.
+- **Vortex:** open **Settings → Workarounds → Create Backup**, then use **Save copy** to save a fresh full state backup as JSON. Select that file in SIMM and choose the Schedule I profile to import. The small Vortex startup/window-settings JSON is not a full backup. SIMM only converts Schedule I profile/mod metadata; it does not restore the Vortex database or import account settings.
+
+Review the mod list and any warnings, then click **Import profile**. This creates a separate SIMM profile without changing the original manager or installing files into a game. Use **Download missing mods** to fetch enabled entries into SIMM's library, then **Apply to Environment** to review and install the available items. Disabled entries remain in the profile and are not downloaded by this action.
+
+Downloads preserve the exact exported Thunderstore version or Nexus file ID. SIMM reports unavailable files and runtime mismatches instead of substituting another version. Existing security checks still apply. Nexus downloads follow your account permissions: accounts without direct-download access confirm one file at a time on Nexus, then return to SIMM and choose **Download missing mods** again.
+
+Configuration files, local/unpublished DLLs, Vortex installer choices, conflict rules, and load order require a separate transfer or review. The import preview lists files omitted from shared-format archives and flags mods without a supported download identity. Add those original archives or DLLs through the Mod Library. MelonLoader itself remains managed by the target environment. See [issue #32](https://github.com/SirTidez/simm/issues/32) for remaining format and configuration-transfer support.
 
 ## Linux Packages
 
