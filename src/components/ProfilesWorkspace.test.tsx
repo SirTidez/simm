@@ -924,26 +924,43 @@ describe('ProfilesWorkspace', () => {
   });
 
   it('keeps profile import in the page header, away from the apply flow', async () => {
+    const imported = { ...profiles[1], id: 'imported-mono', name: 'Imported Mono', runtime: 'MONO' as const };
+    apiMocks.importModProfileToLibrary.mockResolvedValue(imported);
+    apiMocks.listModProfiles.mockResolvedValueOnce(profiles).mockImplementation(async () => [...profiles, { ...imported }]);
     render(<ProfilesWorkspace />);
 
     await screen.findByRole('button', { name: /Default IL2CPP/i });
     const header = screen.getByRole('heading', { name: 'Profiles', level: 1 }).closest('header');
-    const importButton = within(header as HTMLElement).getByRole('button', { name: /Import JSON/i });
+    const importButton = within(header as HTMLElement).getByRole('button', { name: 'Import Profile' });
+    expect(within(header as HTMLElement).queryByRole('button', { name: 'Import JSON' })).toBeNull();
 
     const applyFlow = await openApplyFlow();
     expect(applyFlow).not.toContainElement(importButton);
     fireEvent.click(importButton);
+    const importDialog = await screen.findByRole('dialog', { name: 'Import Profile' });
+    expect(within(importDialog).getByRole('combobox', { name: 'Profile format' })).toHaveTextContent('SIMM profile (.json)');
+    expect(dialogMocks.open).not.toHaveBeenCalled();
+    fireEvent.click(within(importDialog).getByRole('button', { name: 'Choose file…' }));
 
     await waitFor(() => {
       expect(dialogMocks.open).toHaveBeenCalledWith({
-        title: 'Choose SIMM profile JSON',
+        title: 'Choose SIMM profile',
         multiple: false,
         filters: [{ name: 'SIMM profile', extensions: ['json'] }],
       });
     });
     expect(apiMocks.readModProfileFile).toHaveBeenCalledWith('C:/tmp/import-profile.json');
-    expect(apiMocks.importModProfileToLibrary).toHaveBeenCalledWith(profiles[1].manifest);
-    expect(await screen.findByText('Imported Default Mono.')).toBeTruthy();
+    await within(importDialog).findByText('Runtime: Mono');
+    expect(apiMocks.importModProfileToLibrary).not.toHaveBeenCalled();
+    fireEvent.click(within(importDialog).getByRole('button', { name: 'Import profile' }));
+    await waitFor(() => expect(apiMocks.importModProfileToLibrary).toHaveBeenCalledWith(profiles[1].manifest));
+    const notice = await screen.findByText(/Imported Imported Mono\./);
+    // Switching runtimes refreshes the list with new profile objects. The
+    // success message must survive that refresh and remain dismissible.
+    await waitFor(() => expect(apiMocks.listModProfiles.mock.calls.length).toBeGreaterThan(2));
+    expect(notice).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss message' }));
+    expect(screen.queryByText(/Imported Imported Mono\./)).toBeNull();
   });
 
   it('applies a profile before launching the selected environment', async () => {

@@ -107,7 +107,7 @@ pub fn read_file(path: &Path, runtime: Runtime) -> Result<ExternalModProfileFile
             if value.get("persistent").is_some() {
                 parse_vortex(&value, runtime)
             } else {
-                bail!("Choose a full Vortex state backup JSON, or use Import JSON for a SIMM profile. For r2modman, Thunderstore Mod Manager, and Gale, export a profile .r2z file.")
+                bail!("Choose a full Vortex state backup JSON. For a SIMM export, select SIMM profile in Import Profile. For r2modman, Thunderstore Mod Manager, and Gale, export a profile .r2z file.")
             }
         }
         _ => bail!("Unsupported file. Choose .r2z, export.r2x, or a Vortex state backup .json."),

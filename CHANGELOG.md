@@ -2,6 +2,7 @@
 
 ## [0.8.10]
 
+- Unified SIMM JSON, shared-format, and Vortex imports under one Import Profile action. SIMM is listed first, retains its exported runtime and full profile metadata, and previews mods, plugins, and UserLibs alongside versions and enabled/disabled selections. Import confirmation now remains visible through runtime and profile-list refreshes.
 - Added profile-file imports from r2modman, Thunderstore Mod Manager, and Gale, plus Schedule I profiles from Vortex full state backups (requested by [ifBars](https://github.com/ifBars) in [#32](https://github.com/SirTidez/simm/issues/32)). The preview preserves pinned versions and enabled/disabled selections, requires an explicit runtime, and lists configuration or local files that need a separate transfer.
 - Added Download missing mods for source-linked profiles, using exact Thunderstore versions and Nexus file IDs with existing security checks and Nexus account/manual-download requirements. Unavailable files and runtime mismatches are reported without substituting another version.
 - Added regression coverage for shared profile archives, Vortex metadata conversion, read-only source handling, malformed input limits, import previews, and exact-version downloads. Vortex installer choices, deployment/conflict rules, and local configuration files remain manual and are disclosed before import.

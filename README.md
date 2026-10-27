@@ -132,11 +132,12 @@ On Linux or Steam Deck:
 2. Extract all files into `~/.local/bin`, creating the directory if needed, so the executable is `~/.local/bin/DepotDownloader`.
 3. Make it runnable with `chmod +x ~/.local/bin/DepotDownloader`, then click **Check Again** in SIMM. This folder is detected directly without PATH edits.
 
-## Import Profiles From Other Managers
+## Import Profiles
 
-Open **Profiles → Import from mod manager** and choose the runtime used by your source profile (**IL2CPP** or **Mono**). These exports do not reliably identify the runtime, so SIMM requires you to select it.
+Open **Profiles → Import Profile** and select the profile format. **SIMM profile (.json)** is the first option and preserves the runtime already saved in the export. Shared-format and Vortex imports ask you to choose the source profile's runtime (**IL2CPP** or **Mono**), because those exports do not reliably identify it.
 
-- **r2modman / Thunderstore Mod Manager / Gale:** export the Schedule I profile **as a file**, then select the `.r2z` file. An extracted `export.r2x` manifest is also accepted. Profile share codes are not supported yet; export a file instead.
+- **SIMM:** choose **SIMM profile (.json)** and select an exported SIMM JSON file. The preview includes mods, plugins, and UserLibs; saved versions, enabled/disabled selections, and collection metadata are preserved.
+- **r2modman / Thunderstore Mod Manager / Gale:** choose the shared profile format, export the Schedule I profile **as a file**, then select the `.r2z` file. An extracted `export.r2x` manifest is also accepted. Profile share codes are not supported yet; export a file instead.
 - **Vortex:** open **Settings → Workarounds → Create Backup**, then use **Save copy** to save a fresh full state backup as JSON. Select that file in SIMM and choose the Schedule I profile to import. The small Vortex startup/window-settings JSON is not a full backup. SIMM only converts Schedule I profile/mod metadata; it does not restore the Vortex database or import account settings.
 
 Review the mod list and any warnings, then click **Import profile**. This creates a separate SIMM profile without changing the original manager or installing files into a game. Use **Download missing mods** to fetch enabled entries into SIMM's library, then **Apply to Environment** to review and install the available items. Disabled entries remain in the profile and are not downloaded by this action.

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { save } from '@tauri-apps/plugin-dialog';
 import { useAppDialogs } from './AppDialogProvider';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -263,8 +263,9 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
   const [plan, setPlan] = useState<ModProfileImportPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [importNotice, setImportNotice] = useState<{ profileId: string; message: string } | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [externalImportOpen, setExternalImportOpen] = useState(false);
+  const [profileImportOpen, setProfileImportOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [renaming, setRenaming] = useState(false);
   const [flow, setFlow] = useState<ProfileFlow>(null);
@@ -394,6 +395,10 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     setNotice(null);
   }, [selectedProfile, selectedRuntime]);
 
+  useEffect(() => {
+    setImportNotice((current) => current?.profileId === selectedProfileId ? current : null);
+  }, [selectedProfileId]);
+
   useLayoutEffect(() => {
     targetSelectionGenerationRef.current += 1;
   }, [selectedProfileId, targetEnvironmentId]);
@@ -446,6 +451,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     setBusyAction(actionName);
     setError(null);
     setNotice(null);
+    setImportNotice(null);
     try {
       const message = await action();
       if (message) setNotice(message);
@@ -900,20 +906,6 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
       ? `Applied ${profile.name} and launched the game.`
       : `Applied ${profile.name}, but launch did not complete.`;
   }, [confirmProfileRemovals, loadProfiles, refreshEnvironments, requireSelection, targetEnvironmentId]);
-
-  const importProfile = useCallback(async () => {
-    const selected = await open({
-      title: 'Choose SIMM profile JSON',
-      multiple: false,
-      filters: [{ name: 'SIMM profile', extensions: ['json'] }],
-    });
-    if (!selected || Array.isArray(selected)) return null;
-    const imported = await ApiService.importModProfileToLibrary(await ApiService.readModProfileFile(selected));
-    await loadProfiles();
-    setSelectedProfileId(imported.id);
-    setSelectedRuntime(runtimeKey(imported.runtime));
-    return `Imported ${imported.name}.`;
-  }, [loadProfiles]);
 
   const exportProfile = useCallback(async (includeDisabled: boolean) => {
     if (!selectedProfile) throw new Error('Choose a profile first.');
@@ -1778,6 +1770,8 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
     </section>
   );
 
+  const visibleNotice = importNotice && importNotice.profileId === selectedProfileId ? importNotice.message : notice;
+
   return (
     <section className="profiles-workspace workspace-panel ui-page" aria-label="Profiles workspace">
       <header className="ui-page-header">
@@ -1785,17 +1779,8 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
           <h1 className="ui-page-title">Profiles</h1>
         </div>
         <div className="ui-toolbar">
-          <SimmButton type="button" variant="ghost" disabled={busy} onClick={() => setExternalImportOpen(true)}>
-            <Icon name="upload" /> Import from mod manager
-          </SimmButton>
-          <SimmButton
-            type="button"
-            variant="ghost"
-            onClick={() => void runAction('import', importProfile)}
-            disabled={busy}
-          >
-            <Icon name={busyAction === 'import' ? 'spinner' : 'upload'} spin={busyAction === 'import'} />
-            Import JSON
+          <SimmButton type="button" variant="ghost" disabled={busy} onClick={() => setProfileImportOpen(true)}>
+            <Icon name="upload" /> Import Profile
           </SimmButton>
           <SimmButton
             type="button"
@@ -1809,14 +1794,14 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
         </div>
       </header>
 
-      {externalImportOpen && <ProfileImportDialog
-        onClose={() => setExternalImportOpen(false)}
+      {profileImportOpen && <ProfileImportDialog
+        onClose={() => setProfileImportOpen(false)}
         onImported={async (imported) => {
           await loadProfiles();
           setSelectedProfileId(imported.id);
           setSelectedRuntime(runtimeKey(imported.runtime));
           setFlow(null);
-          setNotice(`Imported ${imported.name}. Download missing mods, then review Apply to Environment.`);
+          setImportNotice({ profileId: imported.id, message: `Imported ${imported.name}. Download missing mods, then review Apply to Environment.` });
         }}
       />}
       <div className="profiles-workspace__layout">
@@ -1894,11 +1879,11 @@ export function ProfilesWorkspace({ preferredEnvironmentId, initialProfileId }: 
               <span>{error}</span>
             </div>
           )}
-          {notice && (
+          {visibleNotice && (
             <div className="profiles-workspace__notice" role="status">
               <Icon name="check" />
-              <span>{notice}</span>
-              <SimmButton type="button" variant="ghost" size="icon-sm" aria-label="Dismiss message" onClick={() => setNotice(null)}>
+              <span>{visibleNotice}</span>
+              <SimmButton type="button" variant="ghost" size="icon-sm" aria-label="Dismiss message" onClick={() => { setNotice(null); setImportNotice(null); }}>
                 <Icon name="times" />
               </SimmButton>
             </div>
